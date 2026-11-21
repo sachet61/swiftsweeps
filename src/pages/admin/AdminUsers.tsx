@@ -3,6 +3,10 @@ import { UserProfile, UserRole, GameAccount } from '../../types';
 import { dataService } from '../../services/dataService';
 import { requestReauthSignIn } from '../../services/supabaseTokenManager';
 import {
+  getAdminDisplayEmail,
+  getAdminDisplayName,
+} from '../../utils/adminDisplayUtils';
+import {
   Users,
   Search,
   Shield,
@@ -397,8 +401,8 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
   const filteredUsers = users.filter((u) => {
     const matchesRole = roleFilter === 'all' || u.role === roleFilter;
     const matchesSearch =
-      u.displayName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      u.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      getAdminDisplayName(u).toLowerCase().includes(searchTerm.toLowerCase()) ||
+      getAdminDisplayEmail(u).toLowerCase().includes(searchTerm.toLowerCase()) ||
       u.id.toLowerCase().includes(searchTerm.toLowerCase());
     return matchesRole && matchesSearch;
   });
@@ -553,10 +557,10 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="font-bold text-white text-sm flex items-center gap-1.5 truncate">
-                          <span className="truncate">{u.displayName}</span>
+                          <span className="truncate">{getAdminDisplayName(u)}</span>
                           {isParentAdmin && <Shield className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
                         </div>
-                        <div className="text-[11px] text-slate-400 font-mono truncate">{u.email}</div>
+                        <div className="text-[11px] text-slate-400 font-mono truncate">{getAdminDisplayEmail(u)}</div>
                       </div>
                       <span
                         className={`shrink-0 px-2 py-0.5 rounded-md text-[10px] font-mono font-bold capitalize border ${
@@ -650,24 +654,24 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                               {u.avatarUrl ? (
                                 <img
                                   src={u.avatarUrl}
-                                  alt={u.displayName}
+                                  alt={getAdminDisplayName(u)}
                                   className="w-full h-full object-cover"
                                   referrerPolicy="no-referrer"
                                 />
                               ) : (
-                                u.displayName.charAt(0)
+                                getAdminDisplayName(u).charAt(0)
                               )}
                             </div>
                             <div className="min-w-0">
                               <div className="font-bold text-white flex items-center gap-1.5 truncate">
-                                <span>{u.displayName}</span>
+                                <span>{getAdminDisplayName(u)}</span>
                                 {isParentAdmin && (
                                   <span title="Protected Parent Super Admin (Cannot be demoted)">
                                     <Shield className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                                   </span>
                                 )}
                               </div>
-                              <div className="text-[11px] text-slate-400 font-mono truncate">{u.email}</div>
+                              <div className="text-[11px] text-slate-400 font-mono truncate">{getAdminDisplayEmail(u)}</div>
                             </div>
                           </div>
                         </td>
@@ -839,17 +843,17 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                     {selectedUser.avatarUrl ? (
                       <img
                         src={selectedUser.avatarUrl}
-                        alt={selectedUser.displayName}
+                        alt={getAdminDisplayName(selectedUser)}
                         className="w-full h-full object-cover"
                         referrerPolicy="no-referrer"
                       />
                     ) : (
-                      selectedUser.displayName.charAt(0)
+                      getAdminDisplayName(selectedUser).charAt(0)
                     )}
                   </div>
                   <div className="min-w-0">
                     <h3 className="text-base font-bold text-white flex items-center gap-1.5 flex-wrap">
-                      <span className="truncate">{selectedUser.displayName}</span>
+                      <span className="truncate">{getAdminDisplayName(selectedUser)}</span>
                       {isTargetParentAdmin && (
                         <span className="text-[10px] text-amber-300 bg-amber-950/80 border border-amber-500/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1 shrink-0">
                           <Shield className="w-3 h-3 text-amber-400" />
@@ -858,7 +862,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                         </span>
                       )}
                     </h3>
-                    <div className="text-[11px] text-slate-400 font-mono truncate">{selectedUser.email}</div>
+                    <div className="text-[11px] text-slate-400 font-mono truncate">{getAdminDisplayEmail(selectedUser)}</div>
                   </div>
                 </div>
 

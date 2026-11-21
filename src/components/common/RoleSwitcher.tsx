@@ -2,6 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { UserProfile, UserRole, UserWallet } from '../../types';
 import { useVerificationResolution } from '../../hooks/useVerificationResolution';
 import {
+  getAdminDisplayEmail,
+  getAdminDisplayName,
+  isProtectedSuperAdminAccount,
+} from '../../utils/adminDisplayUtils';
+import {
   Shield,
   Headphones,
   User,
@@ -89,6 +94,10 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
   };
 
   const isVerified = currentUser.role !== 'customer' || verificationUi.isVerified;
+  const resolvedDisplayName = getAdminDisplayName(currentUser);
+  const navbarDisplayLabel = isProtectedSuperAdminAccount(currentUser)
+    ? resolvedDisplayName
+    : resolvedDisplayName.split(' ')[0];
 
   return (
     <div className="relative inline-block text-left z-50">
@@ -106,17 +115,17 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
               isVerified ? 'bg-emerald-500' : 'bg-amber-500'
             }`}
           />
-          {currentUser.avatarUrl ? (
+            {currentUser.avatarUrl ? (
             <img
               src={currentUser.avatarUrl}
-              alt={currentUser.displayName}
+              alt={resolvedDisplayName}
               className="w-5 h-5 rounded-full object-cover border border-amber-500/30 shrink-0"
               referrerPolicy="no-referrer"
             />
           ) : (
             getRoleIcon(currentUser.role)
           )}
-          <span className="font-semibold text-slate-100 max-w-[90px] truncate">{currentUser.displayName.split(' ')[0]}</span>
+          <span className="font-semibold text-slate-100 max-w-[110px] truncate">{navbarDisplayLabel}</span>
         </span>
         <ChevronDown
           className={`w-3.5 h-3.5 text-slate-400 transition-transform shrink-0 ${isOpen ? 'rotate-180' : ''}`}
@@ -140,18 +149,18 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
                 {currentUser.avatarUrl ? (
                   <img
                     src={currentUser.avatarUrl}
-                    alt={currentUser.displayName}
+                    alt={resolvedDisplayName}
                     className="w-10 h-10 rounded-xl object-cover border border-amber-500/30 shrink-0 shadow"
                     referrerPolicy="no-referrer"
                   />
                 ) : (
                   <div className="w-10 h-10 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-sm text-white shrink-0">
-                    {currentUser.displayName.charAt(0)}
+                    {resolvedDisplayName.charAt(0)}
                   </div>
                 )}
                 <div className="min-w-0">
-                  <div className="font-bold text-sm text-white truncate">{currentUser.displayName}</div>
-                  <div className="text-xs font-mono text-slate-400 truncate">{currentUser.email}</div>
+                  <div className="font-bold text-sm text-white truncate">{resolvedDisplayName}</div>
+                  <div className="text-xs font-mono text-slate-400 truncate">{getAdminDisplayEmail(currentUser)}</div>
                 </div>
               </div>
 

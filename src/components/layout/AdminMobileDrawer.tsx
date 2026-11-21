@@ -16,6 +16,10 @@ import {
   getAdminDrawerListItems,
   getAdminFirstName,
 } from './adminMobileDrawerConfig';
+import {
+  getAdminDisplayName,
+  isProtectedSuperAdminAccount,
+} from '../../utils/adminDisplayUtils';
 
 interface AdminMobileDrawerProps {
   isOpen: boolean;
@@ -97,7 +101,10 @@ export const AdminMobileDrawer: React.FC<AdminMobileDrawerProps> = ({
     return null;
   }
 
-  const firstName = getAdminFirstName(currentUser.displayName);
+  const resolvedName = getAdminDisplayName(currentUser);
+  const firstName = isProtectedSuperAdminAccount(currentUser)
+    ? resolvedName
+    : getAdminFirstName(resolvedName);
 
   const handleSelectTab = (tab: string) => {
     onClose();
