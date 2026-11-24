@@ -5,8 +5,16 @@ node_modules
 
 # Build results
 dist
+dist-server
 .output
 .next
 .vercel
+*.tsbuildinfo
+
+# Environment and secret files
 .env
-.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
