@@ -16,13 +16,17 @@
     "test:server": "tsx --test server/tests/*.test.ts",
     "db:migrate:check": "tsx server/db/migrate.ts check",
     "db:migrate:status": "tsx server/db/migrate.ts status",
-    "db:migrate:up": "tsx server/db/migrate.ts up"
+    "db:migrate:up": "tsx server/db/migrate.ts up",
+    "auth:migrate:status": "tsx server/db/authMigrate.ts status",
+    "auth:migrate:sql": "tsx server/db/authMigrate.ts sql",
+    "auth:migrate:up": "tsx server/db/authMigrate.ts up"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
     "@tailwindcss/vite": "^4.0.0",
     "@types/express": "^5.0.6",
     "@types/pg": "^8.23.1",
+    "better-auth": "^1.7.28",
     "express": "^5.3.0",
     "lucide-react": "^1.16.0",
     "pg": "^8.23.1",

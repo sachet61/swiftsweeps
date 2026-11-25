@@ -27,8 +27,20 @@ function createTestConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     pgStatementTimeoutMs: 5_000,
     pgSslMode: 'disable',
     requestBodyLimit: '1kb',
+    requestBodyLimitBytes: 1024,
     logLevel: 'debug',
     shutdownTimeoutMs: 2_000,
+    authSecret: 'test-only-auth-secret-minimum-32-characters-long',
+    authCookiePrefix: 'swiftsweeps_auth',
+    authSessionExpiresInSec: 604_800,
+    authSessionUpdateAgeSec: 86_400,
+    authSessionFreshAgeSec: 900,
+    authRequireEmailVerification: true,
+    authRateLimitEnabled: false,
+    authRateLimitWindowSec: 60,
+    authRateLimitMax: 30,
+    emailProvider: 'disabled',
+    emailFromName: 'SwiftSweeps',
     ...overrides,
   };
 }
@@ -185,6 +197,9 @@ test('GET /api/healthz and /api/readyz return minimal safe responses', async () 
       return { rows: [{ ok: 1 }] };
     },
     async end() {},
+  } as DatabasePool & { connect: () => Promise<never> };
+  (mockPool as unknown as { connect: () => Promise<never> }).connect = async () => {
+    throw new Error('connect not used in health test');
   };
 
   const stdoutLines: string[] = [];
@@ -230,6 +245,9 @@ test('security middleware enforces same-origin policy without wildcard CORS', as
       return { rows: [{ ok: 1 }] };
     },
     async end() {},
+  };
+  (mockPool as unknown as { connect: () => Promise<never> }).connect = async () => {
+    throw new Error('connect not used in security test');
   };
 
   const app = createApiApp({
@@ -280,6 +298,9 @@ test('centralized validation and error handling return safe structured responses
       return { rows: [{ ok: 1 }] };
     },
     async end() {},
+  };
+  (mockPool as unknown as { connect: () => Promise<never> }).connect = async () => {
+    throw new Error('connect not used in validation test');
   };
 
   const app = createApiApp({

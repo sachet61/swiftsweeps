@@ -1,13 +1,27 @@
+import type { BetterAuthOptions } from 'better-auth';
+import { toNodeHandler } from 'better-auth/node';
 import express, { type Express } from 'express';
+import { createAuthInstance } from './auth/authInstance.js';
+import {
+  createEmailDeliveryAdapter,
+  type EmailDeliveryAdapter,
+} from './auth/emailDelivery.js';
+import { UserDirectoryRepo } from './auth/userDirectoryRepo.js';
 import type { ServerConfig } from './config/env.js';
 import type { DatabasePool } from './db/pool.js';
 import type { Logger } from './logging/logger.js';
+import { createRequireAuthMiddleware } from './middleware/auth.js';
 import {
   createErrorHandler,
   notFoundHandler,
 } from './middleware/errorHandler.js';
 import { createRequestContextMiddleware } from './middleware/requestContext.js';
-import { createSecurityMiddleware } from './middleware/security.js';
+import {
+  createRequestSizeGuard,
+  createSecurityMiddleware,
+} from './middleware/security.js';
+import { createAdminAuthRouter } from './routes/adminAuth.js';
+import { createAuthProfileRouter } from './routes/authProfile.js';
 import { createHealthRouter } from './routes/health.js';
 
 export interface ApiAppDependencies {
@@ -15,6 +29,12 @@ export interface ApiAppDependencies {
   logger: Logger;
   pool: Pick<DatabasePool, 'query'>;
   isShuttingDown?: () => boolean;
+  /**
+   * Optional overrides strictly for isolated automated testing.
+   * Production runtime uses the configured PostgreSQL pool and email provider.
+   */
+  authDatabaseOverride?: BetterAuthOptions['database'];
+  emailDeliveryOverride?: EmailDeliveryAdapter;
 }
 
 export function createApiApp({
@@ -22,6 +42,8 @@ export function createApiApp({
   logger,
   pool,
   isShuttingDown = () => false,
+  authDatabaseOverride,
+  emailDeliveryOverride,
 }: ApiAppDependencies): Express {
   const app = express();
 
@@ -32,8 +54,35 @@ export function createApiApp({
   // forwarded headers from untrusted public clients.
   app.set('trust proxy', config.trustProxy);
 
+  const userRepo = new UserDirectoryRepo(pool);
+  const emailDelivery =
+    emailDeliveryOverride ?? createEmailDeliveryAdapter(config, logger);
+  const authRuntime = createAuthInstance({
+    config,
+    logger,
+    pool,
+    userRepo,
+    emailDelivery,
+    authDatabaseOverride,
+  });
+  const requireAuth = createRequireAuthMiddleware(authRuntime.auth, userRepo);
+  const authNodeHandler = toNodeHandler(authRuntime.auth);
+
   app.use(createRequestContextMiddleware(logger));
   app.use(createSecurityMiddleware(config));
+
+  // Mount server-resolved profile endpoint before Better Auth catch-all.
+  app.use('/api', createAuthProfileRouter(requireAuth));
+
+  // Better Auth reads raw incoming streams directly; mount before express.json().
+  app.all(
+    '/api/auth/*splat',
+    createRequestSizeGuard(config.requestBodyLimitBytes),
+    (req, res, next) => {
+      void authNodeHandler(req, res).catch(next);
+    },
+  );
+
   app.use(express.json({ limit: config.requestBodyLimit }));
 
   app.use(
@@ -42,6 +91,14 @@ export function createApiApp({
       pool,
       logger,
       isShuttingDown,
+    }),
+  );
+  app.use(
+    '/api',
+    createAdminAuthRouter({
+      authRuntime,
+      userRepo,
+      requireAuth,
     }),
   );
 

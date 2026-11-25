@@ -2,6 +2,7 @@ export type NodeEnv = 'development' | 'test' | 'production';
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type PgSslMode = 'disable' | 'require' | 'verify-full';
 export type TrustProxySetting = false | 'loopback' | number;
+export type EmailProvider = 'disabled' | 'brevo';
 
 export interface ServerConfig {
   nodeEnv: NodeEnv;
@@ -22,8 +23,22 @@ export interface ServerConfig {
   pgStatementTimeoutMs: number;
   pgSslMode: PgSslMode;
   requestBodyLimit: string;
+  requestBodyLimitBytes: number;
   logLevel: LogLevel;
   shutdownTimeoutMs: number;
+  authSecret: string;
+  authCookiePrefix: string;
+  authSessionExpiresInSec: number;
+  authSessionUpdateAgeSec: number;
+  authSessionFreshAgeSec: number;
+  authRequireEmailVerification: boolean;
+  authRateLimitEnabled: boolean;
+  authRateLimitWindowSec: number;
+  authRateLimitMax: number;
+  emailProvider: EmailProvider;
+  brevoApiKey?: string;
+  emailFromAddress?: string;
+  emailFromName: string;
 }
 
 export class ConfigValidationError extends Error {
@@ -39,7 +54,53 @@ export class ConfigValidationError extends Error {
 const VALID_NODE_ENVS = new Set<NodeEnv>(['development', 'test', 'production']);
 const VALID_LOG_LEVELS = new Set<LogLevel>(['debug', 'info', 'warn', 'error']);
 const VALID_SSL_MODES = new Set<PgSslMode>(['disable', 'require', 'verify-full']);
-const BODY_LIMIT_REGEX = /^\d+(b|kb|mb)$/i;
+const VALID_EMAIL_PROVIDERS = new Set<EmailProvider>(['disabled', 'brevo']);
+const BODY_LIMIT_REGEX = /^(\d+)(b|kb|mb)$/i;
+const COOKIE_PREFIX_REGEX = /^[a-z0-9_-]{3,40}$/;
+const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const INSECURE_AUTH_SECRET_VALUES = new Set([
+  'better-auth-secret-123456789',
+  'change-me',
+  'changeme',
+  'secret',
+  'dev-only-insecure-secret-not-for-production',
+]);
+
+const DEV_ONLY_FALLBACK_AUTH_SECRET =
+  'dev-only-insecure-secret-not-for-production';
+
+function parseBodyLimitBytes(raw: string): number {
+  const match = BODY_LIMIT_REGEX.exec(raw);
+  if (!match) {
+    return 1024 * 1024;
+  }
+  const amount = Number.parseInt(match[1]!, 10);
+  const unit = match[2]!.toLowerCase();
+  if (unit === 'b') return amount;
+  if (unit === 'kb') return amount * 1024;
+  return amount * 1024 * 1024;
+}
+
+function parseBooleanSetting(
+  raw: string | undefined,
+  varName: string,
+  defaultValue: boolean,
+  issues: string[],
+): boolean {
+  if (raw === undefined || raw.trim() === '') {
+    return defaultValue;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0') {
+    return false;
+  }
+  issues.push(`${varName} must be "true" or "false"`);
+  return defaultValue;
+}
 
 function parseIntegerInRange(
   raw: string | undefined,
@@ -162,6 +223,36 @@ function parseDatabaseUrl(raw: string | undefined, issues: string[]): string {
   }
 }
 
+function parseAuthSecret(
+  envSource: Record<string, string | undefined>,
+  nodeEnv: NodeEnv,
+  issues: string[],
+): string {
+  const raw = (envSource.AUTH_SECRET ?? envSource.BETTER_AUTH_SECRET)?.trim();
+  if (!raw) {
+    if (nodeEnv === 'production') {
+      issues.push('AUTH_SECRET is required in production (minimum 32 characters)');
+      return '';
+    }
+    return DEV_ONLY_FALLBACK_AUTH_SECRET;
+  }
+
+  if (raw.length < 32) {
+    issues.push('AUTH_SECRET must be at least 32 characters long');
+    return '';
+  }
+
+  if (
+    nodeEnv === 'production' &&
+    INSECURE_AUTH_SECRET_VALUES.has(raw.toLowerCase())
+  ) {
+    issues.push('AUTH_SECRET must not use a known placeholder secret in production');
+    return '';
+  }
+
+  return raw;
+}
+
 export function loadServerConfig(
   envSource: Record<string, string | undefined> = process.env,
 ): ServerConfig {
@@ -235,6 +326,7 @@ export function loadServerConfig(
   if (!BODY_LIMIT_REGEX.test(requestBodyLimit)) {
     issues.push('REQUEST_BODY_LIMIT must match <number>(b|kb|mb)');
   }
+  const requestBodyLimitBytes = parseBodyLimitBytes(requestBodyLimit);
 
   const rawLogLevel = (envSource.LOG_LEVEL?.trim() || 'info') as LogLevel;
   if (!VALID_LOG_LEVELS.has(rawLogLevel)) {
@@ -249,6 +341,88 @@ export function loadServerConfig(
     60_000,
     issues,
   );
+
+  const authSecret = parseAuthSecret(envSource, nodeEnv, issues);
+  const authCookiePrefix =
+    envSource.AUTH_COOKIE_PREFIX?.trim() || 'swiftsweeps_auth';
+  if (!COOKIE_PREFIX_REGEX.test(authCookiePrefix)) {
+    issues.push(
+      'AUTH_COOKIE_PREFIX must match ^[a-z0-9_-]{3,40}$',
+    );
+  }
+
+  const authSessionExpiresInSec = parseIntegerInRange(
+    envSource.AUTH_SESSION_EXPIRES_IN_SEC,
+    'AUTH_SESSION_EXPIRES_IN_SEC',
+    604_800,
+    300,
+    2_592_000,
+    issues,
+  );
+  const authSessionUpdateAgeSec = parseIntegerInRange(
+    envSource.AUTH_SESSION_UPDATE_AGE_SEC,
+    'AUTH_SESSION_UPDATE_AGE_SEC',
+    86_400,
+    60,
+    authSessionExpiresInSec,
+    issues,
+  );
+  const authSessionFreshAgeSec = parseIntegerInRange(
+    envSource.AUTH_SESSION_FRESH_AGE_SEC,
+    'AUTH_SESSION_FRESH_AGE_SEC',
+    900,
+    60,
+    authSessionExpiresInSec,
+    issues,
+  );
+  const authRequireEmailVerification = parseBooleanSetting(
+    envSource.AUTH_REQUIRE_EMAIL_VERIFICATION,
+    'AUTH_REQUIRE_EMAIL_VERIFICATION',
+    true,
+    issues,
+  );
+  const authRateLimitEnabled = parseBooleanSetting(
+    envSource.AUTH_RATE_LIMIT_ENABLED,
+    'AUTH_RATE_LIMIT_ENABLED',
+    true,
+    issues,
+  );
+  const authRateLimitWindowSec = parseIntegerInRange(
+    envSource.AUTH_RATE_LIMIT_WINDOW_SEC,
+    'AUTH_RATE_LIMIT_WINDOW_SEC',
+    60,
+    10,
+    86_400,
+    issues,
+  );
+  const authRateLimitMax = parseIntegerInRange(
+    envSource.AUTH_RATE_LIMIT_MAX,
+    'AUTH_RATE_LIMIT_MAX',
+    30,
+    1,
+    1_000,
+    issues,
+  );
+
+  const rawEmailProvider = (
+    envSource.EMAIL_PROVIDER?.trim().toLowerCase() || 'disabled'
+  ) as EmailProvider;
+  if (!VALID_EMAIL_PROVIDERS.has(rawEmailProvider)) {
+    issues.push('EMAIL_PROVIDER must be disabled or brevo');
+  }
+
+  const brevoApiKey = envSource.BREVO_API_KEY?.trim() || undefined;
+  const emailFromAddress = envSource.EMAIL_FROM_ADDRESS?.trim() || undefined;
+  const emailFromName = envSource.EMAIL_FROM_NAME?.trim() || 'SwiftSweeps';
+
+  if (rawEmailProvider === 'brevo') {
+    if (!brevoApiKey) {
+      issues.push('BREVO_API_KEY is required when EMAIL_PROVIDER=brevo');
+    }
+    if (!emailFromAddress || !SIMPLE_EMAIL_REGEX.test(emailFromAddress)) {
+      issues.push('EMAIL_FROM_ADDRESS must be a valid email when EMAIL_PROVIDER=brevo');
+    }
+  }
 
   if (issues.length > 0) {
     throw new ConfigValidationError(issues);
@@ -268,7 +442,21 @@ export function loadServerConfig(
     pgStatementTimeoutMs,
     pgSslMode: rawSslMode,
     requestBodyLimit,
+    requestBodyLimitBytes,
     logLevel: rawLogLevel,
     shutdownTimeoutMs,
+    authSecret,
+    authCookiePrefix,
+    authSessionExpiresInSec,
+    authSessionUpdateAgeSec,
+    authSessionFreshAgeSec,
+    authRequireEmailVerification,
+    authRateLimitEnabled,
+    authRateLimitWindowSec,
+    authRateLimitMax,
+    emailProvider: rawEmailProvider,
+    brevoApiKey,
+    emailFromAddress,
+    emailFromName,
   };
 }
