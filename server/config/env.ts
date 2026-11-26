@@ -2,7 +2,7 @@ export type NodeEnv = 'development' | 'test' | 'production';
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type PgSslMode = 'disable' | 'require' | 'verify-full';
 export type TrustProxySetting = false | 'loopback' | number;
-export type EmailProvider = 'disabled' | 'brevo';
+export type EmailProvider = 'disabled' | 'brevo' | 'smtp';
 
 export interface ServerConfig {
   nodeEnv: NodeEnv;
@@ -38,6 +38,11 @@ export interface ServerConfig {
   authRateLimitMax: number;
   emailProvider: EmailProvider;
   brevoApiKey?: string;
+  smtpHost?: string;
+  smtpPort: number;
+  smtpSecure: boolean;
+  smtpUser?: string;
+  smtpPass?: string;
   emailFromAddress?: string;
   emailFromName: string;
 }
@@ -55,7 +60,7 @@ export class ConfigValidationError extends Error {
 const VALID_NODE_ENVS = new Set<NodeEnv>(['development', 'test', 'production']);
 const VALID_LOG_LEVELS = new Set<LogLevel>(['debug', 'info', 'warn', 'error']);
 const VALID_SSL_MODES = new Set<PgSslMode>(['disable', 'require', 'verify-full']);
-const VALID_EMAIL_PROVIDERS = new Set<EmailProvider>(['disabled', 'brevo']);
+const VALID_EMAIL_PROVIDERS = new Set<EmailProvider>(['disabled', 'brevo', 'smtp']);
 const BODY_LIMIT_REGEX = /^(\d+)(b|kb|mb)$/i;
 const COOKIE_PREFIX_REGEX = /^[a-z0-9_-]{3,40}$/;
 const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -473,10 +478,30 @@ export function loadServerConfig(
     envSource.EMAIL_PROVIDER?.trim().toLowerCase() || 'disabled'
   ) as EmailProvider;
   if (!VALID_EMAIL_PROVIDERS.has(rawEmailProvider)) {
-    issues.push('EMAIL_PROVIDER must be disabled or brevo');
+    issues.push('EMAIL_PROVIDER must be disabled, brevo, or smtp');
   }
 
   const brevoApiKey = envSource.BREVO_API_KEY?.trim() || undefined;
+  const smtpHost = envSource.SMTP_HOST?.trim() || undefined;
+  if (smtpHost && /\s/.test(smtpHost)) {
+    issues.push('SMTP_HOST must not contain whitespace');
+  }
+  const smtpPort = parseIntegerInRange(
+    envSource.SMTP_PORT,
+    'SMTP_PORT',
+    587,
+    1,
+    65535,
+    issues,
+  );
+  const smtpSecure = parseBooleanSetting(
+    envSource.SMTP_SECURE,
+    'SMTP_SECURE',
+    smtpPort === 465,
+    issues,
+  );
+  const smtpUser = envSource.SMTP_USER?.trim() || undefined;
+  const smtpPass = envSource.SMTP_PASS?.trim() || undefined;
   const emailFromAddress = envSource.EMAIL_FROM_ADDRESS?.trim() || undefined;
   const emailFromName = envSource.EMAIL_FROM_NAME?.trim() || 'SwiftSweeps';
 
@@ -486,6 +511,21 @@ export function loadServerConfig(
     }
     if (!emailFromAddress || !SIMPLE_EMAIL_REGEX.test(emailFromAddress)) {
       issues.push('EMAIL_FROM_ADDRESS must be a valid email when EMAIL_PROVIDER=brevo');
+    }
+  }
+
+  if (rawEmailProvider === 'smtp') {
+    if (!smtpHost) {
+      issues.push('SMTP_HOST is required when EMAIL_PROVIDER=smtp');
+    }
+    if (!smtpUser) {
+      issues.push('SMTP_USER is required when EMAIL_PROVIDER=smtp');
+    }
+    if (!smtpPass) {
+      issues.push('SMTP_PASS is required when EMAIL_PROVIDER=smtp');
+    }
+    if (!emailFromAddress || !SIMPLE_EMAIL_REGEX.test(emailFromAddress)) {
+      issues.push('EMAIL_FROM_ADDRESS must be a valid email when EMAIL_PROVIDER=smtp');
     }
   }
 
@@ -522,6 +562,11 @@ export function loadServerConfig(
     authRateLimitMax,
     emailProvider: rawEmailProvider,
     brevoApiKey,
+    smtpHost,
+    smtpPort,
+    smtpSecure,
+    smtpUser,
+    smtpPass,
     emailFromAddress,
     emailFromName,
   };

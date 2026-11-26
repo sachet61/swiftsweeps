@@ -1,3 +1,4 @@
+import nodemailer from 'nodemailer';
 import type { ServerConfig } from '../config/env.js';
 import type { Logger } from '../logging/logger.js';
 
@@ -31,6 +32,20 @@ export interface EmailDeliveryAdapter {
   sendVerificationEmail(payload: SendVerificationEmailPayload): Promise<void>;
   sendOtpEmail(payload: SendOtpEmailPayload): Promise<void>;
   sendPasswordResetEmail(payload: SendPasswordResetEmailPayload): Promise<void>;
+}
+
+export interface SmtpTransporterLike {
+  sendMail(mailOptions: {
+    from: { name: string; address: string };
+    to: string;
+    subject: string;
+    text: string;
+    html: string;
+  }): Promise<unknown>;
+}
+
+export interface EmailDeliveryAdapterOptions {
+  smtpTransporter?: SmtpTransporterLike;
 }
 
 export class EmailDeliveryUnavailableError extends Error {
@@ -82,9 +97,73 @@ function buildOtpCopy(purpose: OtpEmailPurpose, otp: string): {
   }
 }
 
+interface BuiltEmailMessage {
+  to: string;
+  subject: string;
+  textContent: string;
+  htmlContent: string;
+}
+
+function buildVerificationMessage(
+  payload: SendVerificationEmailPayload,
+): BuiltEmailMessage {
+  const safeName = escapeHtml(payload.recipientName || 'Player');
+  const safeUrl = escapeHtml(payload.url);
+  return {
+    to: payload.to,
+    subject: 'Verify your SwiftSweeps email address',
+    textContent: `Hello ${payload.recipientName || 'Player'}, verify your email address using this link: ${payload.url}`,
+    htmlContent: `<p>Hello ${safeName},</p><p>Please verify your email address by opening the link below:</p><p><a href="${safeUrl}">Verify Email</a></p>`,
+  };
+}
+
+function buildOtpMessage(payload: SendOtpEmailPayload): BuiltEmailMessage {
+  const copy = buildOtpCopy(payload.purpose, payload.otp);
+  const safeOtp = escapeHtml(payload.otp);
+  return {
+    to: payload.to,
+    subject: copy.subject,
+    textContent: copy.instruction,
+    htmlContent: `<p><strong>${escapeHtml(copy.heading)}</strong></p><p>${escapeHtml(copy.instruction)}</p><p style="font-size:24px;font-weight:bold;letter-spacing:4px;">${safeOtp}</p>`,
+  };
+}
+
+function buildPasswordResetMessage(
+  payload: SendPasswordResetEmailPayload,
+): BuiltEmailMessage {
+  const safeName = escapeHtml(payload.recipientName || 'Player');
+  const safeUrl = escapeHtml(payload.url);
+  return {
+    to: payload.to,
+    subject: 'Reset your SwiftSweeps password',
+    textContent: `Hello ${payload.recipientName || 'Player'}, reset your password using this link: ${payload.url}`,
+    htmlContent: `<p>Hello ${safeName},</p><p>Reset your password using the link below:</p><p><a href="${safeUrl}">Reset Password</a></p>`,
+  };
+}
+
+function createConfiguredAdapter(
+  providerName: string,
+  dispatch: (msg: BuiltEmailMessage) => Promise<void>,
+): EmailDeliveryAdapter {
+  return {
+    providerName,
+    isConfigured: () => true,
+    async sendVerificationEmail(payload) {
+      await dispatch(buildVerificationMessage(payload));
+    },
+    async sendOtpEmail(payload) {
+      await dispatch(buildOtpMessage(payload));
+    },
+    async sendPasswordResetEmail(payload) {
+      await dispatch(buildPasswordResetMessage(payload));
+    },
+  };
+}
+
 export function createEmailDeliveryAdapter(
   config: ServerConfig,
   logger: Logger,
+  options: EmailDeliveryAdapterOptions = {},
 ): EmailDeliveryAdapter {
   if (
     config.emailProvider === 'brevo' &&
@@ -97,12 +176,7 @@ export function createEmailDeliveryAdapter(
       name: config.emailFromName,
     };
 
-    const dispatchBrevo = async (args: {
-      to: string;
-      subject: string;
-      htmlContent: string;
-      textContent: string;
-    }): Promise<void> => {
+    const dispatchBrevo = async (msg: BuiltEmailMessage): Promise<void> => {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5_000);
       timeout.unref();
@@ -118,10 +192,10 @@ export function createEmailDeliveryAdapter(
           },
           body: JSON.stringify({
             sender,
-            to: [{ email: args.to }],
-            subject: args.subject,
-            htmlContent: args.htmlContent,
-            textContent: args.textContent,
+            to: [{ email: msg.to }],
+            subject: msg.subject,
+            htmlContent: msg.htmlContent,
+            textContent: msg.textContent,
           }),
         });
 
@@ -150,40 +224,62 @@ export function createEmailDeliveryAdapter(
       }
     };
 
-    return {
-      providerName: 'brevo',
-      isConfigured: () => true,
-      async sendVerificationEmail(payload) {
-        const safeName = escapeHtml(payload.recipientName || 'Player');
-        const safeUrl = escapeHtml(payload.url);
-        await dispatchBrevo({
-          to: payload.to,
-          subject: 'Verify your SwiftSweeps email address',
-          textContent: `Hello ${payload.recipientName || 'Player'}, verify your email address using this link: ${payload.url}`,
-          htmlContent: `<p>Hello ${safeName},</p><p>Please verify your email address by opening the link below:</p><p><a href="${safeUrl}">Verify Email</a></p>`,
-        });
-      },
-      async sendOtpEmail(payload) {
-        const copy = buildOtpCopy(payload.purpose, payload.otp);
-        const safeOtp = escapeHtml(payload.otp);
-        await dispatchBrevo({
-          to: payload.to,
-          subject: copy.subject,
-          textContent: copy.instruction,
-          htmlContent: `<p><strong>${escapeHtml(copy.heading)}</strong></p><p>${escapeHtml(copy.instruction)}</p><p style="font-size:24px;font-weight:bold;letter-spacing:4px;">${safeOtp}</p>`,
-        });
-      },
-      async sendPasswordResetEmail(payload) {
-        const safeName = escapeHtml(payload.recipientName || 'Player');
-        const safeUrl = escapeHtml(payload.url);
-        await dispatchBrevo({
-          to: payload.to,
-          subject: 'Reset your SwiftSweeps password',
-          textContent: `Hello ${payload.recipientName || 'Player'}, reset your password using this link: ${payload.url}`,
-          htmlContent: `<p>Hello ${safeName},</p><p>Reset your password using the link below:</p><p><a href="${safeUrl}">Reset Password</a></p>`,
-        });
-      },
+    return createConfiguredAdapter('brevo', dispatchBrevo);
+  }
+
+  if (
+    config.emailProvider === 'smtp' &&
+    config.smtpHost &&
+    config.smtpUser &&
+    config.smtpPass &&
+    config.emailFromAddress
+  ) {
+    const sender = {
+      name: config.emailFromName,
+      address: config.emailFromAddress,
     };
+
+    const transporter: SmtpTransporterLike =
+      options.smtpTransporter ??
+      nodemailer.createTransport({
+        host: config.smtpHost,
+        port: config.smtpPort,
+        secure: config.smtpSecure,
+        requireTLS:
+          !config.smtpSecure &&
+          (config.smtpPort === 587 || config.nodeEnv === 'production'),
+        auth: {
+          user: config.smtpUser,
+          pass: config.smtpPass,
+        },
+        connectionTimeout: 5_000,
+        greetingTimeout: 5_000,
+        socketTimeout: 10_000,
+      });
+
+    const dispatchSmtp = async (msg: BuiltEmailMessage): Promise<void> => {
+      try {
+        await transporter.sendMail({
+          from: sender,
+          to: msg.to,
+          subject: msg.subject,
+          text: msg.textContent,
+          html: msg.htmlContent,
+        });
+      } catch (err) {
+        logger.error('email_delivery_request_failed', {
+          provider: 'smtp',
+          host: config.smtpHost,
+          port: config.smtpPort,
+          error: err,
+        });
+        throw new EmailDeliveryUnavailableError(
+          'Unable to reach SMTP email delivery provider.',
+        );
+      }
+    };
+
+    return createConfiguredAdapter('smtp', dispatchSmtp);
   }
 
   return {

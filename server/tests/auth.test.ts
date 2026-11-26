@@ -4,11 +4,13 @@ import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 import { memoryAdapter } from 'better-auth/adapters/memory';
 import { createApiApp } from '../app.js';
-import type {
-  EmailDeliveryAdapter,
-  SendOtpEmailPayload,
-  SendPasswordResetEmailPayload,
-  SendVerificationEmailPayload,
+import {
+  createEmailDeliveryAdapter,
+  EmailDeliveryUnavailableError,
+  type EmailDeliveryAdapter,
+  type SendOtpEmailPayload,
+  type SendPasswordResetEmailPayload,
+  type SendVerificationEmailPayload,
 } from '../auth/emailDelivery.js';
 import { ConfigValidationError, loadServerConfig, type ServerConfig } from '../config/env.js';
 import type { DatabasePool } from '../db/pool.js';
@@ -330,6 +332,8 @@ function createTestConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     authRateLimitWindowSec: 60,
     authRateLimitMax: 30,
     emailProvider: 'disabled',
+    smtpPort: 587,
+    smtpSecure: false,
     emailFromName: 'SwiftSweeps',
     ...overrides,
   };
@@ -1267,4 +1271,140 @@ test('auth endpoints allow configured secondary trustedOrigins and reject unconf
     },
   );
 });
+
+test('loadServerConfig validates EMAIL_PROVIDER=smtp settings without leaking SMTP_PASS', () => {
+  assert.throws(
+    () =>
+      loadServerConfig({
+        NODE_ENV: 'production',
+        APP_ORIGIN: 'https://swiftsweeps.example.com',
+        DATABASE_URL: 'postgres://app:pass@127.0.0.1:5432/swiftsweeps',
+        AUTH_SECRET: 'a-strong-random-production-secret-string-32chars',
+        EMAIL_PROVIDER: 'smtp',
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof ConfigValidationError);
+      assert.match(err.message, /SMTP_HOST is required/);
+      assert.match(err.message, /SMTP_USER is required/);
+      assert.match(err.message, /SMTP_PASS is required/);
+      assert.match(err.message, /EMAIL_FROM_ADDRESS/);
+      return true;
+    },
+  );
+
+  const cfg587 = loadServerConfig({
+    NODE_ENV: 'production',
+    APP_ORIGIN: 'https://swiftsweeps.example.com',
+    DATABASE_URL: 'postgres://app:pass@127.0.0.1:5432/swiftsweeps',
+    AUTH_SECRET: 'a-strong-random-production-secret-string-32chars',
+    EMAIL_PROVIDER: 'smtp',
+    SMTP_HOST: 'smtp-relay.brevo.com',
+    SMTP_PORT: '587',
+    SMTP_USER: 'mailer@swiftsweeps.example.com',
+    SMTP_PASS: 'xsmtpsib-secret-smtp-key',
+    EMAIL_FROM_ADDRESS: 'no-reply@swiftsweeps.example.com',
+  });
+  assert.equal(cfg587.emailProvider, 'smtp');
+  assert.equal(cfg587.smtpPort, 587);
+  assert.equal(cfg587.smtpSecure, false);
+
+  const cfg465 = loadServerConfig({
+    NODE_ENV: 'production',
+    APP_ORIGIN: 'https://swiftsweeps.example.com',
+    DATABASE_URL: 'postgres://app:pass@127.0.0.1:5432/swiftsweeps',
+    AUTH_SECRET: 'a-strong-random-production-secret-string-32chars',
+    EMAIL_PROVIDER: 'smtp',
+    SMTP_HOST: 'smtp-relay.brevo.com',
+    SMTP_PORT: '465',
+    SMTP_USER: 'mailer@swiftsweeps.example.com',
+    SMTP_PASS: 'xsmtpsib-secret-smtp-key',
+    EMAIL_FROM_ADDRESS: 'no-reply@swiftsweeps.example.com',
+  });
+  assert.equal(cfg465.smtpPort, 465);
+  assert.equal(cfg465.smtpSecure, true);
+});
+
+test('SMTP email adapter integrates with Better Auth OTP signup flow and fails safely on transport error', async () => {
+  const sentMessages: Array<{
+    from: { name: string; address: string };
+    to: string;
+    subject: string;
+    text: string;
+    html: string;
+  }> = [];
+  let shouldFail = false;
+
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+  const logger = createSilentLogger(stdoutLines, stderrLines);
+  const smtpSecretPass = 'xsmtpsib-super-secret-smtp-password';
+  const smtpConfig = createTestConfig({
+    appOrigin: 'https://swiftsweeps.example.com',
+    emailProvider: 'smtp',
+    smtpHost: 'smtp-relay.brevo.com',
+    smtpPort: 587,
+    smtpSecure: false,
+    smtpUser: '9a0011@smtp-brevo.com',
+    smtpPass: smtpSecretPass,
+    emailFromAddress: 'no-reply@swiftsweeps.example.com',
+    emailFromName: 'SwiftSweeps',
+  });
+
+  const adapter = createEmailDeliveryAdapter(smtpConfig, logger, {
+    smtpTransporter: {
+      async sendMail(mailOptions) {
+        if (shouldFail) {
+          throw new Error(`535 Authentication failed password=${smtpSecretPass}`);
+        }
+        sentMessages.push(mailOptions);
+      },
+    },
+  });
+
+  assert.equal(adapter.providerName, 'smtp');
+  assert.equal(adapter.isConfigured(), true);
+
+  await withTestServer(
+    {
+      config: smtpConfig,
+      emailDeliveryOverride: adapter,
+    },
+    async ({ baseUrl }) => {
+      const signUpRes = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
+        method: 'POST',
+        headers: {
+          Origin: 'https://swiftsweeps.example.com',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: 'SMTP Player',
+          email: 'smtp-player@example.com',
+          password: 'Password123!',
+        }),
+      });
+      assert.equal(signUpRes.status, 200);
+      assert.equal(sentMessages.length, 1);
+      assert.deepEqual(sentMessages[0]?.from, {
+        name: 'SwiftSweeps',
+        address: 'no-reply@swiftsweeps.example.com',
+      });
+      assert.equal(sentMessages[0]?.to, 'smtp-player@example.com');
+      assert.match(sentMessages[0]?.text ?? '', /\b\d{6}\b/);
+    },
+  );
+
+  shouldFail = true;
+  await assert.rejects(
+    () =>
+      adapter.sendOtpEmail({
+        to: 'smtp-player@example.com',
+        otp: '123456',
+        purpose: 'email-verification',
+      }),
+    EmailDeliveryUnavailableError,
+  );
+  const allLogs = [...stdoutLines, ...stderrLines].join('\n');
+  assert.ok(!allLogs.includes(smtpSecretPass));
+});
+
 

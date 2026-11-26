@@ -44,6 +44,8 @@ function createTestConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     authRateLimitWindowSec: 60,
     authRateLimitMax: 30,
     emailProvider: 'disabled',
+    smtpPort: 587,
+    smtpSecure: false,
     emailFromName: 'SwiftSweeps',
     ...overrides,
   };
