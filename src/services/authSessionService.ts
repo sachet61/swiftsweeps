@@ -121,35 +121,16 @@ class AuthSessionService {
     }
   }
 
-  // Active Session Restoration & Validation
+  // Active Session Restoration & Validation (disabled: self-hosted /api/auth/me owns session state)
   private initActiveSession(): void {
+    this.activeSession = null;
     try {
-      const cookieToken = this.getSessionCookie();
-      const stored = localStorage.getItem(SESSION_STORAGE_KEY);
-      if (stored) {
-        const parsed: UserSession = JSON.parse(stored);
-        const now = Date.now();
-
-        // Check if session has expired or token mismatch
-        if (parsed.expiresAt && now > parsed.expiresAt) {
-          console.warn('[Auth] Stored session has expired.');
-          this.destroySession();
-          return;
-        }
-
-        if (cookieToken && parsed.token !== cookieToken) {
-          console.warn('[Auth] Session token does not match cookie.');
-          this.destroySession();
-          return;
-        }
-
-        // Session is valid; refresh last active timestamp
-        parsed.lastActiveAt = now;
-        this.activeSession = parsed;
-        this.saveActiveSession();
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
       }
+      this.clearSessionCookie();
     } catch {
-      this.destroySession();
+      this.activeSession = null;
     }
   }
 
@@ -409,9 +390,6 @@ class AuthSessionService {
     try {
       localStorage.removeItem(SESSION_STORAGE_KEY);
     } catch {}
-
-    // Clear server session cookie
-    fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
 
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
   }

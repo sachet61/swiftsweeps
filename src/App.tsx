@@ -3,7 +3,7 @@ import { useDataService } from './hooks/useDataService';
 import { useVerificationResolution } from './hooks/useVerificationResolution';
 import { writeVerifiedCache } from './services/verificationStateUtils';
 import { dataService } from './services/dataService';
-import { authSessionService } from './services/authSessionService';
+import { selfHostedAuthService } from './services/selfHostedAuthService';
 import { resolveGameImageUrl } from './utils/imageUtils';
 import { TopNavbar } from './components/layout/TopNavbar';
 import { CustomerMobileNav } from './components/layout/CustomerMobileNav';
@@ -34,6 +34,7 @@ import {
 import { AuthPage } from './pages/auth/AuthPage';
 import { SessionTimeoutWarningModal } from './components/common/SessionTimeoutWarningModal';
 import { StartupSplash } from './components/common/StartupSplash';
+import { SwiftSweepsLogo } from './components/common/SwiftSweepsLogo';
 import { SessionHydrationScreen } from './components/common/SessionHydrationScreen';
 import { LazyPageFallback } from './components/common/LazyPageFallback';
 import { LiveCashoutTicker } from './components/common/LiveCashoutTicker';
@@ -76,10 +77,24 @@ import {
   X,
   ShieldAlert,
   MessageCircle,
+  Loader2,
+  AlertTriangle,
+  RefreshCw,
+  ShieldCheck,
 } from 'lucide-react';
 
 export default function App() {
-  const { currentUser, wallet, hydrationState, switchUser, logout } = useDataService();
+  const {
+    currentUser,
+    authStatus,
+    authError,
+    authExpiredReason,
+    retryAuthSession,
+    wallet,
+    hydrationState,
+    switchUser,
+    logout,
+  } = useDataService();
   const verificationUi = useVerificationResolution(currentUser);
   const wheelOfLuck = useWheelOfLuckStatus(currentUser);
   const [bypassedHydrationUserId, setBypassedHydrationUserId] = useState<string | null>(null);
@@ -345,8 +360,8 @@ export default function App() {
           : 'Your login session has expired or was signed out on another device. Please sign in again to continue.';
       setBypassedHydrationUserId(null);
       setSessionExpiredNotice(null);
-      logout();
-      setTimeoutNotice(reason);
+      logout('session_expired');
+      setTimeoutNotice(null);
     };
     window.addEventListener('aetherpay_auth_session_expired', handleSessionExpired);
     window.addEventListener('aetherpay_request_reauth', handleRequestReauth);
@@ -368,7 +383,13 @@ export default function App() {
     setBypassedHydrationUserId(null);
     const expiredBannerMsg = sessionExpiredNotice;
     setSessionExpiredNotice(null);
-    logout();
+    const normalizedReason =
+      reason === 'inactivity'
+        ? 'inactivity'
+        : reason === 'session_expired'
+        ? 'session_expired'
+        : 'manual';
+    logout(normalizedReason);
     if (reason === 'inactivity') {
       setTimeoutNotice('Your session has timed out due to 15 minutes of inactivity. Please enter your credentials to resume.');
     } else if (reason === 'session_expired') {
@@ -468,7 +489,79 @@ export default function App() {
   const isAgent = currentUser?.role === 'agent';
   const isAdmin = currentUser?.role === 'admin';
 
-  // If not logged in, render dedicated Auth & Landing Portal
+  // 1. Initial session verification in flight — never show logged-in state or flash sign-in prematurely
+  if (authStatus === 'loading') {
+    return (
+      <>
+        <StartupSplash target="auth" catalogIconUrls={catalogIconUrls} />
+        <div
+          data-testid="auth-loading-screen"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+          className="min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col items-center justify-center px-4 py-8"
+        >
+          <div className="w-full max-w-md rounded-2xl bg-[#0E1628] border border-slate-800 shadow-2xl p-6 sm:p-8 flex flex-col items-center text-center space-y-5">
+            <SwiftSweepsLogo size="lg" showText={true} />
+            <div className="relative flex items-center justify-center w-14 h-14">
+              <div className="absolute inset-0 rounded-full border-2 border-slate-800" />
+              <div className="absolute inset-0 rounded-full border-2 border-t-amber-400 border-r-amber-400/40 border-b-transparent border-l-transparent animate-spin" />
+              <Loader2 className="w-5 h-5 text-amber-400 animate-spin" />
+            </div>
+            <div className="space-y-1.5">
+              <h2 className="text-lg font-bold text-white tracking-tight">Checking Session</h2>
+              <p className="text-xs sm:text-sm text-slate-400">
+                Verifying your encrypted authentication session...
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-slate-500 pt-1">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>Same-origin cookie session check</span>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // 2. Authentication API unreachable or invalid response — fail closed (never display logged in)
+  if (authStatus === 'api_unavailable') {
+    return (
+      <div
+        data-testid="auth-api-unavailable-screen"
+        role="alert"
+        className="min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col items-center justify-center px-4 py-8"
+      >
+        <div className="w-full max-w-md rounded-2xl bg-[#0E1628] border border-rose-500/30 shadow-2xl p-6 sm:p-8 flex flex-col items-center text-center space-y-5">
+          <SwiftSweepsLogo size="lg" showText={true} />
+          <div className="w-14 h-14 rounded-full bg-rose-500/10 border border-rose-500/30 flex items-center justify-center">
+            <AlertTriangle className="w-7 h-7 text-rose-400" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-lg font-bold text-white tracking-tight">
+              Authentication Service Unavailable
+            </h2>
+            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+              {authError ||
+                'Unable to verify your session right now. Please check your connection and try again.'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              void retryAuthSession();
+            }}
+            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-bold text-xs transition shadow-lg shadow-amber-500/20"
+          >
+            <RefreshCw className="w-4 h-4" />
+            <span>Retry Connection</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Anonymous or expired session — render dedicated Auth & Landing Portal
   if (!currentUser) {
     return (
       <>
@@ -478,16 +571,17 @@ export default function App() {
           onLoginSuccess={(user) => {
             resetAllOverlaysLocally();
             setBypassedHydrationUserId(null);
-            void dataService.hydrateForSession(user);
+            const synced = dataService.syncAuthenticatedUser(user, { hydrate: true }) || user;
             setTimeoutNotice(null);
             setSessionExpiredNotice(null);
-            const defaultTab = getDefaultTab(user.role);
+            const defaultTab = getDefaultTab(synced.role);
             setActiveTab(defaultTab);
-            prefetchPagesForSession(user.role, defaultTab);
+            prefetchPagesForSession(synced.role, defaultTab);
             window.history.replaceState(buildHistoryState(defaultTab), '', `#${defaultTab}`);
             tabHistoryRef.current = [defaultTab];
           }}
           timeoutNotice={timeoutNotice}
+          expiredNotice={authStatus === 'expired' ? authExpiredReason : null}
         />
       </>
     );
@@ -758,8 +852,8 @@ export default function App() {
                 onStatusChanged={(verified) => {
                   writeVerifiedCache(currentUser.id, currentUser.email, verified);
                   const updated = { ...currentUser, emailVerified: verified };
-                  dataService.registerUser(updated);
-                  authSessionService.updateUserProfile(updated);
+                  selfHostedAuthService.updateVerificationStatus(verified);
+                  dataService.syncAuthenticatedUser(updated);
                   window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
                 }}
               />

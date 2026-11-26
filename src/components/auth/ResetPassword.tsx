@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { supabaseAuthService } from '../../services/supabaseAuthService';
-import { dataService } from '../../services/dataService';
+import { selfHostedAuthService } from '../../services/selfHostedAuthService';
 import {
   Lock,
   KeyRound,
@@ -40,18 +39,21 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
-  const [hasRecoverySession, setHasRecoverySession] = useState(false);
+  const [isResetLinkTokenMode, setIsResetLinkTokenMode] = useState(false);
 
   useEffect(() => {
-    // Check if user came from a recovery link (hash fragment with type=recovery or access_token)
-    const isRecovery =
-      supabaseAuthService.getIsRecoveryMode() ||
-      (typeof window !== 'undefined' &&
-        (window.location.hash.includes('type=recovery') ||
-          window.location.hash.includes('access_token')));
-
-    setHasRecoverySession(Boolean(isRecovery));
-  }, []);
+    const queryToken =
+      typeof window !== 'undefined'
+        ? new URLSearchParams(window.location.search).get('token') || ''
+        : '';
+    const effectiveToken = (initialToken || queryToken).trim();
+    if (effectiveToken && effectiveToken.length > 8) {
+      setToken(effectiveToken);
+      setIsResetLinkTokenMode(true);
+    } else {
+      setIsResetLinkTokenMode(false);
+    }
+  }, [initialToken]);
 
   // Password criteria
   const hasMinLength = newPassword.length >= 8;
@@ -76,7 +78,7 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
     setIsResending(true);
     setErrorMessage(null);
     try {
-      const res = await supabaseAuthService.sendPasswordReset(email.trim().toLowerCase());
+      const res = await selfHostedAuthService.requestPasswordReset(email.trim().toLowerCase());
       if (res.success) {
         setCooldown(60);
       } else {
@@ -93,8 +95,18 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
     e.preventDefault();
     setErrorMessage(null);
 
-    if (!hasRecoverySession && !token.trim()) {
-      setErrorMessage('Please enter the 6-digit verification code sent to your email.');
+    const trimmedToken = token.trim();
+    if (!trimmedToken) {
+      setErrorMessage(
+        isResetLinkTokenMode
+          ? 'A valid password reset token is required.'
+          : 'Please enter the 6-digit verification code sent to your email.'
+      );
+      return;
+    }
+
+    if (!isResetLinkTokenMode && trimmedToken.length <= 8 && !email.trim()) {
+      setErrorMessage('Please enter your account email address.');
       return;
     }
 
@@ -111,31 +123,24 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
     setIsLoading(true);
 
     try {
-      // 1. If not already in recovery session, verify 6-digit recovery OTP first
-      if (!hasRecoverySession && token.trim() && email.trim()) {
-        const verifyRes = await supabaseAuthService.verifyOtpForRecovery(email.trim(), token.trim());
-        if (!verifyRes.success) {
-          // Also try server backup token if applicable
-          const serverReset = await dataService.resetPasswordWithToken(token.trim(), email.trim(), newPassword);
-          if (serverReset.success) {
-            setIsSuccess(true);
-            return;
-          }
-          setErrorMessage(verifyRes.message || 'Invalid or expired 6-digit reset code. Please request a new code.');
-          setIsLoading(false);
-          return;
-        }
-      }
-
-      // 2. Update password directly via Supabase recovery session
-      const res = await supabaseAuthService.updateUserPassword(newPassword);
+      const useTokenEndpoint = isResetLinkTokenMode || trimmedToken.length > 8;
+      const res = useTokenEndpoint
+        ? await selfHostedAuthService.resetPasswordWithToken({
+            token: trimmedToken,
+            newPassword,
+          })
+        : await selfHostedAuthService.resetPasswordWithOtp({
+            email: email.trim(),
+            otp: trimmedToken,
+            newPassword,
+          });
 
       if (res.success) {
         setIsSuccess(true);
       } else {
         setErrorMessage(
           res.message ||
-            'Unable to set new password. Please verify your 6-digit code or request a fresh code.'
+            'Unable to set new password. Please verify your code or request a fresh reset code.'
         );
       }
     } catch (err: any) {
@@ -154,17 +159,17 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
         <div>
           <h2 className="text-base font-bold text-white tracking-tight">Set New Password</h2>
           <p className="text-xs text-slate-400">
-            {hasRecoverySession
-              ? 'Email link verified — enter your new password below'
+            {isResetLinkTokenMode
+              ? 'Email link detected — enter your new password below'
               : 'Verify your credentials and establish a secure password'}
           </p>
         </div>
       </div>
 
-      {hasRecoverySession && (
+      {isResetLinkTokenMode && (
         <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-600/60 text-emerald-300 text-xs flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-          <span>Secure recovery session detected from your reset link.</span>
+          <span>Secure reset token detected from your email link.</span>
         </div>
       )}
 
@@ -177,8 +182,8 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
 
       {!isSuccess ? (
         <form onSubmit={handleReset} className="space-y-3.5">
-          {/* Email (Optional if recovery link was clicked) */}
-          {!hasRecoverySession && (
+          {/* Email (Required for 6-digit OTP reset) */}
+          {!isResetLinkTokenMode && (
             <div className="space-y-1">
               <label className="text-xs font-medium text-slate-300">Account Email Address</label>
               <div className="relative">
@@ -195,7 +200,7 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
           )}
 
           {/* 6-Digit OTP Recovery Code */}
-          {!hasRecoverySession && (
+          {!isResetLinkTokenMode && (
             <div className="space-y-1">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-medium text-slate-300">
@@ -228,12 +233,12 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
                   value={token}
                   onChange={(e) => setToken(e.target.value.trim())}
                   placeholder="e.g. 123456"
-                  maxLength={12}
+                  maxLength={64}
                   className="w-full bg-[#0A0F1D] border border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-amber-400 font-mono tracking-widest focus:outline-none focus:border-amber-400"
                 />
               </div>
               <p className="text-[10px] text-slate-500">
-                Enter the 6-digit security code received via Brevo email.
+                Enter the 6-digit security code or reset token from your email.
               </p>
             </div>
           )}

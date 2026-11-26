@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { supabaseAuthService } from '../../services/supabaseAuthService';
+import { selfHostedAuthService } from '../../services/selfHostedAuthService';
 import {
   KeyRound,
   Mail,
@@ -49,7 +49,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
     setIsLoading(true);
 
     try {
-      const res = await supabaseAuthService.sendPasswordReset(cleanEmail);
+      const res = await selfHostedAuthService.requestPasswordReset(cleanEmail);
       if (res.success) {
         setIsSuccess(true);
         setCooldown(60);
@@ -68,7 +68,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
     setErrorMessage(null);
     setIsLoading(true);
     try {
-      const res = await supabaseAuthService.sendPasswordReset(email.trim().toLowerCase());
+      const res = await selfHostedAuthService.requestPasswordReset(email.trim().toLowerCase());
       if (res.success) {
         setCooldown(60);
       } else {

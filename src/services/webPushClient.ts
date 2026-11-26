@@ -1,6 +1,6 @@
 // Client Web Push & Service Worker Registration Manager
 import { UserProfile } from '../types';
-import { authSessionService } from './authSessionService';
+import { selfHostedAuthService } from './selfHostedAuthService';
 import { supabaseTokenManager } from './supabaseTokenManager';
 import { executeSendTestAlertFlow } from '../utils/webPushTestUtils';
 
@@ -59,9 +59,9 @@ class WebPushClient {
     explicitUser?: Pick<UserProfile, 'id' | 'role'> | null
   ): Promise<Record<string, string>> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    const session = authSessionService.getActiveSession();
-    const uid = explicitUser?.id || session?.userId;
-    const role = explicitUser?.role || session?.role;
+    const authUser = selfHostedAuthService.getCurrentUser();
+    const uid = explicitUser?.id || authUser?.id;
+    const role = explicitUser?.role || authUser?.role;
     if (uid) headers['x-user-id'] = uid;
     if (role) headers['x-user-role'] = role;
 
@@ -483,8 +483,8 @@ class WebPushClient {
     actionType?: 'chat' | 'payout' | 'deposit' | 'game';
   }): Promise<void> {
     try {
-      const session = authSessionService.getActiveSession();
-      const effectiveSenderId = params.senderId || session?.userId;
+      const authUser = selfHostedAuthService.getCurrentUser();
+      const effectiveSenderId = params.senderId || authUser?.id;
       if (!effectiveSenderId) return;
 
       const authHeaders = await this.buildPushAuthHeaders();

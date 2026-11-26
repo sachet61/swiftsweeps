@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { authSessionService } from '../../services/authSessionService';
-import { Clock, ShieldAlert, CheckCircle2 } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { INACTIVITY_TIMEOUT_MS } from '../../services/authSessionService';
+import { Clock, CheckCircle2 } from 'lucide-react';
 
 interface SessionTimeoutWarningModalProps {
   onLogout: (reason: string) => void;
@@ -9,32 +9,31 @@ interface SessionTimeoutWarningModalProps {
 export const SessionTimeoutWarningModal: React.FC<SessionTimeoutWarningModalProps> = ({ onLogout }) => {
   const [showWarning, setShowWarning] = useState(false);
   const [secondsRemaining, setSecondsRemaining] = useState(120);
+  const lastActivityRef = useRef<number>(Date.now());
 
   useEffect(() => {
     // If indefinite session is active, no timer is needed
-    if (authSessionService.getInactivityRemainingMs() > 24 * 60 * 60 * 1000) {
+    if (INACTIVITY_TIMEOUT_MS > 24 * 60 * 60 * 1000) {
       return;
     }
 
-    // Record user activity
+    lastActivityRef.current = Date.now();
+
     const handleActivity = () => {
-      authSessionService.recordActivity();
-      if (showWarning) {
-        setShowWarning(false);
-      }
+      lastActivityRef.current = Date.now();
+      setShowWarning(false);
     };
 
     window.addEventListener('mousemove', handleActivity, { passive: true });
     window.addEventListener('keydown', handleActivity, { passive: true });
     window.addEventListener('touchstart', handleActivity, { passive: true });
 
-    // Polling interval to check remaining inactivity time
     const interval = setInterval(() => {
-      const remainingMs = authSessionService.getInactivityRemainingMs();
+      const remainingMs = Math.max(0, INACTIVITY_TIMEOUT_MS - (Date.now() - lastActivityRef.current));
       if (remainingMs <= 0) {
         setShowWarning(false);
         onLogout('inactivity');
-      } else if (remainingMs <= 120000) { // 2 minutes remaining
+      } else if (remainingMs <= 120000) {
         setShowWarning(true);
         setSecondsRemaining(Math.ceil(remainingMs / 1000));
       } else {
@@ -48,12 +47,12 @@ export const SessionTimeoutWarningModal: React.FC<SessionTimeoutWarningModalProp
       window.removeEventListener('keydown', handleActivity);
       window.removeEventListener('touchstart', handleActivity);
     };
-  }, [onLogout, showWarning]);
+  }, [onLogout]);
 
   if (!showWarning) return null;
 
   const handleStayActive = () => {
-    authSessionService.recordActivity();
+    lastActivityRef.current = Date.now();
     setShowWarning(false);
   };
 

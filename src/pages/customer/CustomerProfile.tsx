@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { UserProfile, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
-import { authSessionService } from '../../services/authSessionService';
+import { selfHostedAuthService } from '../../services/selfHostedAuthService';
 import { useVerificationResolution } from '../../hooks/useVerificationResolution';
 import { EmailOtpModal } from '../../components/auth/EmailOtpModal';
 import { IOSPwaInstallModal } from '../../components/common/IOSPwaInstallModal';
@@ -156,8 +156,8 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
 
   const handleOtpSuccess = (updatedUser: UserProfile) => {
     setShowOtpModal(false);
-    dataService.registerUser(updatedUser);
-    authSessionService.updateUserProfile(updatedUser);
+    selfHostedAuthService.updateVerificationStatus(true);
+    dataService.syncAuthenticatedUser(updatedUser);
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
     setSuccessNote('Email address verified!');
     setTimeout(() => setSuccessNote(null), 5000);

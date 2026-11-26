@@ -46,6 +46,7 @@ import {
 } from './seedData';
 import { resolveGameImageUrl } from '../utils/imageUtils';
 import { authSessionService, PREDEFINED_ADMINS } from './authSessionService';
+import { selfHostedAuthService } from './selfHostedAuthService';
 import { shouldRunSilentBackgroundRefresh } from './sessionHydrationUtils';
 import { supabase, isSupabaseConfigured, testSupabaseConnection } from './supabaseClient';
 import { supabaseAuthService } from './supabaseAuthService';
@@ -171,6 +172,7 @@ class DataService {
     [STORAGE_KEYS.PASSWORD_RESET_TOKENS]: [],
   };
   private currentUserId: string | null = null;
+  private authenticatedUser: UserProfile | null = null;
   private isQuotaExceeded = false;
   private pollingIntervals: number[] = [];
   private isSeeding = false;
@@ -655,13 +657,7 @@ class DataService {
     window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
     try {
-      const activeSession = authSessionService.getActiveSession();
-      const user = this.getCurrentUser() || (activeSession ? {
-        id: activeSession.userId,
-        email: activeSession.email,
-        displayName: activeSession.displayName,
-        role: activeSession.role,
-      } as any : null);
+      const user = this.getCurrentUser();
       const isAdmin = user?.role === 'admin' || user?.role === 'agent';
       const currentUserId = user?.id;
 
@@ -811,8 +807,20 @@ class DataService {
             users.push(local);
           }
           this.cache[STORAGE_KEYS.USERS] = users;
-          authSessionService.updateUserProfile(local);
-          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_profile_synced', user: local } }));
+          if (this.authenticatedUser && this.authenticatedUser.id === local.id) {
+            this.authenticatedUser = {
+              ...local,
+              id: this.authenticatedUser.id,
+              email: this.authenticatedUser.email,
+              displayName: this.authenticatedUser.displayName,
+              role: this.authenticatedUser.role,
+              status: this.authenticatedUser.status,
+              emailVerified: Boolean(this.authenticatedUser.emailVerified || local.emailVerified),
+              isParentAdmin: this.authenticatedUser.isParentAdmin,
+              passwordResetRequired: this.authenticatedUser.passwordResetRequired,
+            };
+          }
+          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_profile_synced', user: this.authenticatedUser || local } }));
         }
 
         // Apply Order Invariant: apply topups, withdrawals, and transactions BEFORE wallet reconciliation
@@ -2558,8 +2566,8 @@ class DataService {
         [STORAGE_KEYS.WEBHOOK_LOGS]: [],
         [STORAGE_KEYS.FAKED_CASHOUTS]: [],
       };
-      const activeSess = authSessionService.getActiveSession();
-      this.currentUserId = activeSess ? activeSess.userId : null;
+      const activeUser = this.getCurrentUser();
+      this.currentUserId = activeUser ? activeUser.id : null;
 
       // Migrate to Supabase
       await this.migrateAllToSupabase();
@@ -2608,34 +2616,105 @@ class DataService {
     }
   }
 
-  // Current session management - Production Enforced
+  // Current session management - Self-Hosted Server Session Enforced
+  public syncAuthenticatedUser(
+    user: UserProfile | null,
+    options?: { hydrate?: boolean }
+  ): UserProfile | null {
+    if (!user) {
+      const hadUser = Boolean(this.authenticatedUser || this.currentUserId);
+      this.teardownRealtimeSync();
+      this.authenticatedUser = null;
+      this.currentUserId = null;
+      this.isHydratingSession = false;
+      this.hydrationUserId = null;
+      this.activeHydrationPromise = null;
+      this.lastHydratedUserId = null;
+      this.lastHydratedAt = 0;
+      this.lastHydrationError = null;
+      if (hadUser) {
+        this.clearUserScopedCache();
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
+      }
+      return null;
+    }
+
+    if (this.currentUserId && this.currentUserId !== user.id) {
+      this.clearUserScopedCache();
+      this.lastHydratedUserId = null;
+    }
+
+    const users = this.getUsers();
+    const existing = users.find(
+      (u) => u.id === user.id || u.email.toLowerCase() === user.email.toLowerCase()
+    );
+    const merged: UserProfile = {
+      ...(existing || {}),
+      ...user,
+      id: user.id,
+      email: user.email,
+      displayName: user.displayName,
+      role: user.role,
+      status: user.status,
+      emailVerified: Boolean(user.emailVerified),
+      isParentAdmin: Boolean(user.isParentAdmin),
+      passwordResetRequired: Boolean(user.passwordResetRequired),
+    };
+
+    const nextUsers = existing
+      ? users.map((u) => (u.id === existing.id ? merged : u))
+      : [...users, merged];
+    this.cache[STORAGE_KEYS.USERS] = nextUsers;
+    this.authenticatedUser = merged;
+    this.currentUserId = merged.id;
+
+    if (merged.emailVerified) {
+      writeVerifiedCache(merged.id, merged.email, true);
+    }
+
+    if (options?.hydrate) {
+      void this.hydrateForSession(merged);
+    }
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
+    return merged;
+  }
+
   public getCurrentUser(): UserProfile | null {
-    const session = authSessionService.getActiveSession();
-    if (!session) {
+    const authUser = selfHostedAuthService.getCurrentUser();
+    if (!authUser) {
+      this.authenticatedUser = null;
       this.currentUserId = null;
       return null;
     }
-    this.currentUserId = session.userId;
-    const users = this.getUsers();
-    let user = users.find((u) => u.id === session.userId || u.email.toLowerCase() === session.email.toLowerCase());
-    const cachedVerified = readVerifiedCache(session.userId, session.email);
-    if (!user) {
-      user = {
-        id: session.userId,
-        email: session.email,
-        displayName: session.displayName,
-        role: session.role,
-        referralCode: `REF_${session.userId.slice(-5)}`,
-        status: 'active',
-        emailVerified: Boolean(session.emailVerified || cachedVerified),
-        createdAt: new Date(session.createdAt).toISOString(),
-        lastLoginAt: new Date(session.lastActiveAt).toISOString(),
+
+    if (
+      this.authenticatedUser &&
+      this.authenticatedUser.id === authUser.id &&
+      this.authenticatedUser.email.toLowerCase() === authUser.email.toLowerCase()
+    ) {
+      this.authenticatedUser = {
+        ...this.authenticatedUser,
+        displayName: authUser.displayName,
+        role: authUser.role,
+        status: authUser.status,
+        emailVerified: Boolean(authUser.emailVerified),
+        isParentAdmin: Boolean(authUser.isParentAdmin),
+        passwordResetRequired: Boolean(authUser.passwordResetRequired),
       };
-      this.registerUser(user);
-    } else if ((session.emailVerified || cachedVerified) && !user.emailVerified) {
-      user.emailVerified = true;
+      return this.authenticatedUser;
     }
-    return user;
+
+    const users = this.getUsers();
+    const existing = users.find(
+      (u) => u.id === authUser.id || u.email.toLowerCase() === authUser.email.toLowerCase()
+    );
+    const merged: UserProfile = {
+      ...(existing || {}),
+      ...authUser,
+    };
+    this.authenticatedUser = merged;
+    this.currentUserId = merged.id;
+    return merged;
   }
 
   private clearUserScopedCache(): void {
@@ -2664,48 +2743,27 @@ class DataService {
   }
 
   public setCurrentUserId(userId: string): void {
-    if (this.currentUserId && this.currentUserId !== userId) {
-      this.clearUserScopedCache();
+    const active = this.getCurrentUser();
+    if (!active || active.id !== userId) {
+      return;
     }
     this.currentUserId = userId;
-    const targetUser = this.getUserById(userId);
-    if (targetUser) {
-      void this.hydrateForSession(targetUser, { force: true });
-    }
+    void this.hydrateForSession(active, { force: true });
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
   }
 
-  public logout(): void {
+  public logout(reason: 'manual' | 'inactivity' | 'session_expired' = 'manual'): void {
     const prevUser = this.getCurrentUser();
-    const cachedEndpoint = webPushClient.getCachedEndpoint();
     const dispatchServerLogout = async () => {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (prevUser?.id) headers['x-user-id'] = prevUser.id;
-      if (supabase && isSupabaseConfigured()) {
-        try {
-          const { data } = await supabase.auth.getSession();
-          if (data?.session?.access_token) {
-            headers['Authorization'] = `Bearer ${data.session.access_token}`;
-            headers['x-supabase-token'] = data.session.access_token;
-          }
-        } catch {}
-      }
       await Promise.allSettled([
         webPushClient.unsubscribeFromPushNotifications(prevUser),
-        fetch('/api/auth/logout', {
-          method: 'POST',
-          keepalive: true,
-          headers,
-          body: JSON.stringify({
-            userId: prevUser?.id,
-            endpoint: cachedEndpoint || undefined,
-          }),
-        }),
+        selfHostedAuthService.logout(reason),
       ]);
       supabaseAuthService.logout().catch(() => {});
     };
 
     this.teardownRealtimeSync();
+    this.authenticatedUser = null;
     this.currentUserId = null;
     this.isHydratingSession = false;
     this.hydrationUserId = null;
@@ -2720,31 +2778,22 @@ class DataService {
   }
 
   // ==========================================
-  // Production Supabase Authentication Methods
+  // Self-Hosted Authentication Bridges
   // ==========================================
 
   public async loginWithSupabaseAuth(
     email: string,
     pass: string
   ): Promise<{ success: boolean; user?: UserProfile; message?: string }> {
-    const supaRes = await supabaseAuthService.loginWithEmail(email, pass);
-    if (supaRes.success && supaRes.user) {
-      this.currentUserId = supaRes.user.id;
-      this.logAudit({
-        actorId: supaRes.user.id,
-        actorName: supaRes.user.displayName,
-        actorRole: supaRes.user.role,
-        action: 'USER_LOGGED_IN',
-        entityType: 'user',
-        entityId: supaRes.user.id,
-        details: 'User authenticated successfully via Supabase Auth / Local Session.',
-      });
-      return { success: true, user: supaRes.user };
+    const authRes = await selfHostedAuthService.loginWithEmail(email, pass);
+    if (authRes.success && authRes.user) {
+      const synced = this.syncAuthenticatedUser(authRes.user);
+      return { success: true, user: synced || authRes.user };
     }
 
     return {
       success: false,
-      message: supaRes.error || 'Authentication failed. Please check your credentials.',
+      message: authRes.error || 'Authentication failed. Please check your credentials.',
     };
   }
 
@@ -2760,35 +2809,22 @@ class DataService {
     email: string,
     pass: string,
     displayName: string,
-    phone?: string,
-    referralCode?: string,
-    role?: UserRole
+    _phone?: string,
+    _referralCode?: string,
+    _role?: UserRole
   ): Promise<{ success: boolean; user?: UserProfile; message?: string }> {
-    const supaRes = await supabaseAuthService.registerWithEmail({
+    const regRes = await selfHostedAuthService.registerWithEmail({
       email,
       password: pass,
       displayName,
-      phone,
-      referralCode,
-      role,
     });
-    if (supaRes.success && supaRes.user) {
-      this.currentUserId = supaRes.user.id;
-      this.logAudit({
-        actorId: supaRes.user.id,
-        actorName: supaRes.user.displayName,
-        actorRole: supaRes.user.role,
-        action: 'USER_REGISTERED',
-        entityType: 'user',
-        entityId: supaRes.user.id,
-        details: 'User registered successfully with Supabase Auth profile initialized.',
-      });
-      return { success: true, user: supaRes.user, message: supaRes.message };
+    if (regRes.success) {
+      return { success: true, message: regRes.message };
     }
 
     return {
       success: false,
-      message: supaRes.error || 'Registration failed.',
+      message: regRes.error || 'Registration failed.',
     };
   }
 
@@ -2805,41 +2841,12 @@ class DataService {
   }
 
   public async loginWithGoogle(
-    intendedRole: UserRole = 'customer'
+    _intendedRole: UserRole = 'customer'
   ): Promise<{ success: boolean; user?: UserProfile; message?: string; code?: string }> {
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        const { data, error } = await supabase.auth.signInWithOAuth({
-          provider: 'google',
-          options: {
-            redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
-          },
-        });
-        if (error) {
-          return { success: false, message: error.message };
-        }
-        return { success: true, message: 'Redirecting to Google Sign-In via Supabase...' };
-      } catch (err: any) {
-        return { success: false, message: err?.message || 'Google OAuth failed' };
-      }
-    }
-
-    // Local / demo fallback
-    const demoUser = this.getUsers().find((u) => u.role === intendedRole);
-    if (demoUser) {
-      this.currentUserId = demoUser.id;
-      authSessionService.createSessionForUser(
-        demoUser.id,
-        demoUser.email,
-        demoUser.displayName,
-        demoUser.role
-      );
-      return { success: true, user: demoUser };
-    }
-
     return {
       success: false,
-      message: 'Google Sign-In is configured with Supabase Auth (VITE_SUPABASE_URL).',
+      code: 'OAUTH_NOT_CONFIGURED',
+      message: 'Google Sign-In is not enabled on the self-hosted authentication API. Please sign in with your email and password.',
     };
   }
 
@@ -2848,7 +2855,7 @@ class DataService {
     if (!user) {
       return { success: false, message: 'No active user found.' };
     }
-    return supabaseAuthService.resendVerificationEmail(user.email);
+    return selfHostedAuthService.resendEmailOtp(user.email);
   }
 
   public async reloadAndCheckEmailVerification(): Promise<{
@@ -2861,114 +2868,52 @@ class DataService {
       return { verified: false, message: 'No active session found', user: null };
     }
 
-    // 1. Check with Supabase backend server API
-    try {
-      const resp = await fetch('/api/auth/check-verification', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: user.email }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.exists) {
-          const isVerified = Boolean(data.verified);
-          user.emailVerified = isVerified;
-          writeVerifiedCache(user.id, user.email, isVerified);
-          this.registerUser(user);
-          authSessionService.updateUserProfile(user);
-          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
-          if (isVerified) {
-            void this.triggerServerReferralEvaluation(user.id);
-          }
-          return {
-            verified: isVerified,
-            message: isVerified
-              ? 'Email address confirmed and verified in Supabase! Cashouts and referral bonuses are now unlocked.'
-              : 'Email address is still unconfirmed in Supabase. Check your inbox or click Instant Verify.',
-            user,
-          };
-        }
-      }
-    } catch (err) {
-      console.warn('Check verification network notice:', err);
+    const meSnapshot = await selfHostedAuthService.fetchCurrentUser({
+      preservePreviousStateOnUnavailable: true,
+    });
+
+    if (meSnapshot.status === 'expired') {
+      return {
+        verified: false,
+        message: meSnapshot.expiredReason || 'Session expired. Please sign in again.',
+        user: null,
+      };
     }
 
-    // 2. Client-side Supabase session & database check fallback
-    if (supabase && isSupabaseConfigured()) {
-      try {
-        const [{ data: authData }, { data: dbUser }] = await Promise.all([
-          supabase.auth.getUser(),
-          supabase.from('users').select('id, email_verified').eq('id', user.id).maybeSingle(),
-        ]);
-
-        const supaUser = authData?.user;
-        const isAuthConfirmed = supaUser && supaUser.email?.toLowerCase() === user.email.toLowerCase() && Boolean(supaUser.email_confirmed_at);
-        const isDbConfirmed = Boolean(dbUser?.email_verified);
-        const isConfirmed = isAuthConfirmed || isDbConfirmed;
-
-        if (isConfirmed) {
-          user.emailVerified = true;
-          writeVerifiedCache(user.id, user.email, true);
-          this.registerUser(user);
-          authSessionService.updateUserProfile(user);
-          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
-          void this.triggerServerReferralEvaluation(user.id);
-          return {
-            verified: true,
-            message: 'Email address confirmed and verified! Cashouts and referral bonuses are now unlocked.',
-            user,
-          };
-        }
-      } catch (e) {
-        console.warn('Supabase client verification check notice:', e);
+    if (meSnapshot.status === 'authenticated' && meSnapshot.user) {
+      const synced = this.syncAuthenticatedUser(meSnapshot.user) || meSnapshot.user;
+      const isVerified = Boolean(synced.emailVerified);
+      if (isVerified) {
+        writeVerifiedCache(synced.id, synced.email, true);
+        void this.triggerServerReferralEvaluation(synced.id);
       }
+      return {
+        verified: isVerified,
+        message: isVerified
+          ? 'Email address confirmed and verified! Cashouts and referral bonuses are now unlocked.'
+          : 'Email address is still unverified. Check your inbox for your 6-digit code.',
+        user: synced,
+      };
     }
 
     return {
       verified: Boolean(user.emailVerified),
-      message: user.emailVerified
-        ? 'Email address confirmed and verified!'
-        : 'Email address is unverified. Please check your email inbox.',
+      message: meSnapshot.errorMessage || 'Unable to check verification status right now.',
       user,
     };
   }
 
-  public async confirmEmailNow(email?: string): Promise<{ success: boolean; message: string }> {
-    const targetEmail = (email || this.getCurrentUser()?.email || '').trim().toLowerCase();
-    if (!targetEmail) {
-      return { success: false, message: 'Valid email address is required.' };
-    }
-    const res = await supabaseAuthService.confirmEmailNow(targetEmail);
-    if (res.success) {
-      let verifiedUserId: string | undefined;
-      const u = this.getUsers().find((usr) => usr.email.toLowerCase() === targetEmail);
-      if (u) {
-        u.emailVerified = true;
-        verifiedUserId = u.id;
-        writeVerifiedCache(u.id, u.email, true);
-        this.registerUser(u);
-        authSessionService.updateUserProfile(u);
-      }
-      const cur = this.getCurrentUser();
-      if (cur && cur.email.toLowerCase() === targetEmail) {
-        cur.emailVerified = true;
-        verifiedUserId = cur.id;
-        writeVerifiedCache(cur.id, cur.email, true);
-        this.registerUser(cur);
-        authSessionService.updateUserProfile(cur);
-      }
-      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
-      if (verifiedUserId) {
-        void this.triggerServerReferralEvaluation(verifiedUserId);
-      }
-    }
-    return res;
+  public async confirmEmailNow(_email?: string): Promise<{ success: boolean; message: string }> {
+    return {
+      success: false,
+      message: 'Please enter the 6-digit verification code sent to your email.',
+    };
   }
 
   public async sendPasswordResetViaSupabase(
     email: string
   ): Promise<{ success: boolean; message?: string }> {
-    return supabaseAuthService.sendPasswordReset(email);
+    return selfHostedAuthService.requestPasswordReset(email);
   }
 
   // Alias for backward compatibility
@@ -3001,28 +2946,14 @@ class DataService {
       return { success: false, message: 'Please provide a valid email address.' };
     }
 
-    const res = await supabaseAuthService.sendPasswordReset(email);
+    const res = await selfHostedAuthService.requestPasswordReset(email);
     if (!res.success) {
       return { success: false, message: res.message || 'Password reset request failed.' };
     }
 
-    const users = this.getUsers();
-    const existingUser = users.find((u) => u.email.toLowerCase() === email);
-
-    // Audit log
-    this.logAudit({
-      actorId: existingUser?.id || 'system',
-      actorName: existingUser?.displayName || email,
-      actorRole: existingUser?.role || 'customer',
-      action: 'PASSWORD_RESET_REQUESTED',
-      entityType: 'user',
-      entityId: existingUser?.id || 'anonymous',
-      details: `Password reset instructions sent to ${email} via Supabase Auth.`,
-    });
-
     return {
       success: true,
-      message: res.message || `Password reset link dispatched to ${email}.`,
+      message: res.message || `Password reset instructions dispatched to ${email}.`,
     };
   }
 
@@ -6618,14 +6549,7 @@ class DataService {
   }
 
   public async hydrateForSession(user?: UserProfile, options?: { force?: boolean }): Promise<void> {
-    const activeSession = authSessionService.getActiveSession();
-    const sessionUser = activeSession ? ({
-      id: activeSession.userId,
-      email: activeSession.email,
-      displayName: activeSession.displayName,
-      role: activeSession.role,
-    } as any) : null;
-    const target = user || this.getCurrentUser() || sessionUser;
+    const target = user || this.getCurrentUser();
     if (!target?.id) return;
 
     // Clear stale cross-user caches whenever switching accounts

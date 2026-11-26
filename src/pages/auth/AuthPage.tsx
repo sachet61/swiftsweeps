@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { UserProfile, UserRole, GameCatalogItem } from '../../types';
 import { dataService } from '../../services/dataService';
 import { filterEnabledGames } from '../../services/gameCatalogUtils';
-import { supabaseAuthService } from '../../services/supabaseAuthService';
+import { selfHostedAuthService } from '../../services/selfHostedAuthService';
 import { validateRegistrationForm } from '../../utils/authValidationUtils';
 import {
   DEFAULT_GAME_ICON,
@@ -38,9 +38,14 @@ import { LiveCashoutTicker } from '../../components/common/LiveCashoutTicker';
 interface AuthPageProps {
   onLoginSuccess: (user: UserProfile) => void;
   timeoutNotice?: string | null;
+  expiredNotice?: string | null;
 }
 
-export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotice }) => {
+export const AuthPage: React.FC<AuthPageProps> = ({
+  onLoginSuccess,
+  timeoutNotice,
+  expiredNotice,
+}) => {
   const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'forgot' | 'reset' | 'verify-otp'>('signin');
   const [resetEmail, setResetEmail] = useState('');
   const [resetToken, setResetToken] = useState('');
@@ -125,14 +130,20 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     window.addEventListener('aetherpay_state_changed', syncCatalog);
     window.addEventListener('supabase_password_recovery', handleRecovery);
 
-    // Also check window hash and ?ref= query parameter directly on mount
+    // Also check window query/hash parameters on mount
     if (typeof window !== 'undefined') {
       const hash = window.location.hash || '';
-      if (hash.includes('type=recovery') || hash.includes('access_token')) {
+      const searchParams = new URLSearchParams(window.location.search);
+      const tokenFromUrl = (searchParams.get('token') || '').trim();
+      if (tokenFromUrl) {
+        setResetToken(tokenFromUrl);
+        setAuthMode('reset');
+        setErrorMessage(null);
+        setInfoMessage('Password reset link verified. Please enter your new password below.');
+      } else if (hash.includes('type=recovery') || hash.includes('access_token')) {
         handleRecovery();
       } else {
         try {
-          const searchParams = new URLSearchParams(window.location.search);
           const refFromUrl = (searchParams.get('ref') || '').trim().toUpperCase();
           if (refFromUrl || window.location.pathname.toLowerCase().includes('/signup')) {
             if (refFromUrl) {
@@ -162,7 +173,32 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     authCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
-  // Supabase Authentication Sign-In Flow
+  const finalizeAuthenticatedUser = (user: UserProfile) => {
+    const synced = dataService.syncAuthenticatedUser(user) || user;
+    if (typeof window !== 'undefined') {
+      try {
+        const pendingRef = (sessionStorage.getItem('ss_pending_ref_code') || '').trim().toUpperCase();
+        if (pendingRef) {
+          void dataService
+            .attributeSignupReferral({
+              refereeId: synced.id,
+              referralCode: pendingRef,
+            })
+            .then((res) => {
+              if (res.success) {
+                try {
+                  sessionStorage.removeItem('ss_pending_ref_code');
+                } catch {}
+              }
+            })
+            .catch(() => {});
+        }
+      } catch {}
+    }
+    onLoginSuccess(synced);
+  };
+
+  // Self-Hosted Authentication Sign-In Flow
   const handleEmailSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -176,10 +212,10 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     setIsLoading(true);
 
     try {
-      const authRes = await supabaseAuthService.loginWithEmail(email.trim(), password);
+      const authRes = await selfHostedAuthService.loginWithEmail(email.trim(), password);
 
       if (authRes.success && authRes.user) {
-        onLoginSuccess(authRes.user);
+        finalizeAuthenticatedUser(authRes.user);
         return;
       }
 
@@ -188,6 +224,14 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
         setOtpEmail(targetEmail);
         setShowOtpModal(true);
         setErrorMessage('Your email address is not verified yet. Please enter the 6-digit code sent to your email to verify and sign in.');
+        return;
+      }
+
+      if (authRes.passwordResetRequired) {
+        const targetEmail = authRes.email || email.trim();
+        setResetEmail(targetEmail);
+        setAuthMode('forgot');
+        setInfoMessage('Your account requires a password reset before signing in. Request a reset code below.');
         return;
       }
 
@@ -201,7 +245,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     }
   };
 
-  // Supabase Authentication Registration Flow
+  // Self-Hosted Authentication Registration Flow
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -216,18 +260,19 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
 
     try {
       const cleanEmail = signupEmail.trim();
-      const res = await supabaseAuthService.registerWithEmail({
+      const res = await selfHostedAuthService.registerWithEmail({
         email: cleanEmail,
         password: signupPassword,
         displayName: signupName.trim(),
-        phone: signupPhone.trim() || undefined,
-        referralCode: signupReferral.trim() || undefined,
       });
 
       if (res.success) {
         setOtpEmail(cleanEmail);
         setAuthMode('verify-otp');
-        setInfoMessage('Account created! Enter the 6-digit verification code sent to your email to activate your account.');
+        setInfoMessage(
+          res.message ||
+            'Account created! Enter the 6-digit verification code sent to your email to activate your account.'
+        );
       } else {
         setErrorMessage(res.error || 'Registration failed.');
       }
@@ -288,13 +333,19 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
 
       {/* Main Content Viewport */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10 w-full flex-1 space-y-6">
-        {/* Inactivity Timeout Warning if triggered */}
-        {timeoutNotice && (
-          <div className="p-4 rounded-2xl bg-amber-950/70 border border-amber-600 text-amber-200 text-xs flex items-center gap-3 shadow-xl">
+        {/* Session Expiry or Inactivity Timeout Notice if triggered */}
+        {(timeoutNotice || expiredNotice) && (
+          <div
+            role="alert"
+            data-testid="auth-session-notice"
+            className="p-4 rounded-2xl bg-amber-950/70 border border-amber-600 text-amber-200 text-xs flex items-center gap-3 shadow-xl"
+          >
             <Clock className="w-5 h-5 text-amber-400 shrink-0" />
             <div>
-              <div className="font-bold text-white text-sm">Session Timed Out</div>
-              <p className="text-xs text-amber-300/90">{timeoutNotice}</p>
+              <div className="font-bold text-white text-sm">
+                {timeoutNotice ? 'Session Timed Out' : 'Session Expired'}
+              </div>
+              <p className="text-xs text-amber-300/90">{timeoutNotice || expiredNotice}</p>
             </div>
           </div>
         )}
@@ -490,9 +541,16 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
               {authMode === 'verify-otp' ? (
                 <EmailOtpModal
                   email={otpEmail || signupEmail || email}
+                  password={signupPassword || undefined}
                   isStandalone={true}
                   onSuccess={(user) => {
-                    onLoginSuccess(user);
+                    finalizeAuthenticatedUser(user);
+                  }}
+                  onVerifiedNeedsSignIn={(verifiedEmail) => {
+                    setEmail(verifiedEmail);
+                    setAuthMode('signin');
+                    setErrorMessage(null);
+                    setInfoMessage('Email verified! Please sign in with your password to continue.');
                   }}
                   onBackToSignIn={() => {
                     setAuthMode('signin');
@@ -947,11 +1005,19 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
       {showOtpModal && (
         <EmailOtpModal
           email={otpEmail || email}
+          password={password || undefined}
           isOpen={showOtpModal}
           onClose={() => setShowOtpModal(false)}
           onSuccess={(user) => {
             setShowOtpModal(false);
-            onLoginSuccess(user);
+            finalizeAuthenticatedUser(user);
+          }}
+          onVerifiedNeedsSignIn={(verifiedEmail) => {
+            setShowOtpModal(false);
+            setEmail(verifiedEmail);
+            setAuthMode('signin');
+            setErrorMessage(null);
+            setInfoMessage('Email verified! Please sign in with your password to continue.');
           }}
           onBackToSignIn={() => {
             setShowOtpModal(false);

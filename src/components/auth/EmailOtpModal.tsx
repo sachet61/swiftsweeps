@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { supabaseAuthService } from '../../services/supabaseAuthService';
+import { selfHostedAuthService } from '../../services/selfHostedAuthService';
 import { UserProfile } from '../../types';
 import {
   ShieldCheck,
@@ -15,20 +15,24 @@ import {
 
 interface EmailOtpModalProps {
   email: string;
+  password?: string;
   isOpen?: boolean;
   isStandalone?: boolean;
   onClose?: () => void;
   onSuccess: (user: UserProfile) => void;
+  onVerifiedNeedsSignIn?: (email: string) => void;
   onBackToSignIn?: () => void;
   initialCooldown?: number;
 }
 
 export const EmailOtpModal: React.FC<EmailOtpModalProps> = ({
   email,
+  password,
   isOpen = true,
   isStandalone = false,
   onClose,
   onSuccess,
+  onVerifiedNeedsSignIn,
   onBackToSignIn,
   initialCooldown = 60,
 }) => {
@@ -119,14 +123,33 @@ export const EmailOtpModal: React.FC<EmailOtpModalProps> = ({
     setErrorMessage(null);
 
     try {
-      const res = await supabaseAuthService.verifyEmailOtp(email, code);
+      const res = await selfHostedAuthService.verifyEmailOtp(
+        email,
+        code,
+        password ? { password } : undefined
+      );
       if (res.success && res.user) {
         setSuccessMessage(res.message || 'Email verified successfully!');
         setTimeout(() => {
           onSuccess(res.user!);
-        }, 800);
+        }, 600);
+      } else if (res.success && res.requiresSignIn) {
+        setSuccessMessage(
+          res.message || 'Email verified! Please sign in with your password to continue.'
+        );
+        setTimeout(() => {
+          if (onVerifiedNeedsSignIn) {
+            onVerifiedNeedsSignIn(res.email || email);
+          } else if (onBackToSignIn) {
+            onBackToSignIn();
+          } else if (onClose) {
+            onClose();
+          }
+        }, 900);
       } else {
-        setErrorMessage(res.message || 'Invalid or expired 6-digit code. Please try again or request a new code.');
+        setErrorMessage(
+          res.message || 'Invalid or expired 6-digit code. Please try again or request a new code.'
+        );
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Verification failed. Please try again.');
@@ -140,7 +163,7 @@ export const EmailOtpModal: React.FC<EmailOtpModalProps> = ({
     setIsResending(true);
     setErrorMessage(null);
     try {
-      const res = await supabaseAuthService.resendEmailOtp(email);
+      const res = await selfHostedAuthService.resendEmailOtp(email);
       if (res.success) {
         setCooldown(60);
         setSuccessMessage('A new 6-digit code has been dispatched to your email.');
@@ -180,7 +203,7 @@ export const EmailOtpModal: React.FC<EmailOtpModalProps> = ({
           Verify Your Email
         </h2>
         <p className="text-xs sm:text-sm text-slate-400 mt-2">
-          We sent a 6-digit security code via Brevo to
+          We sent a 6-digit security code to
         </p>
         <div className="mt-1 flex items-center justify-center gap-1.5 font-medium text-amber-300 text-sm bg-amber-500/10 py-1 px-3 rounded-lg border border-amber-500/20 max-w-xs mx-auto truncate">
           <Mail className="w-3.5 h-3.5 shrink-0" />

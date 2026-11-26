@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { UserProfile } from '../types';
 import { dataService } from '../services/dataService';
-import { authSessionService } from '../services/authSessionService';
+import { selfHostedAuthService } from '../services/selfHostedAuthService';
 import {
   VERIFICATION_GRACE_DELAY_MS,
   VERIFICATION_MAX_CHECK_WAIT_MS,
@@ -96,8 +96,8 @@ function startResolutionForUser(user: UserProfile) {
       if (res.verified) {
         writeVerifiedCache(user.id, user.email, true);
         const updated = { ...user, emailVerified: true };
-        dataService.registerUser(updated);
-        authSessionService.updateUserProfile(updated);
+        selfHostedAuthService.updateVerificationStatus(true);
+        dataService.syncAuthenticatedUser(updated);
       }
       coordinator = { ...coordinator, isChecking: false };
       activeCheckUserId = null;
