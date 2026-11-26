@@ -23,6 +23,7 @@ import {
 import { createAdminAuthRouter } from './routes/adminAuth.js';
 import { createAuthProfileRouter } from './routes/authProfile.js';
 import { createHealthRouter } from './routes/health.js';
+import { createProfileRouter } from './routes/profile.js';
 
 export interface ApiAppDependencies {
   config: ServerConfig;
@@ -72,7 +73,7 @@ export function createApiApp({
   app.use(createSecurityMiddleware(config, logger));
 
   // Mount server-resolved profile endpoint before Better Auth catch-all.
-  app.use('/api', createAuthProfileRouter(requireAuth));
+  app.use('/api', createAuthProfileRouter(requireAuth, userRepo));
 
   // Better Auth reads raw incoming streams directly; mount before express.json().
   app.all(
@@ -97,6 +98,13 @@ export function createApiApp({
     '/api',
     createAdminAuthRouter({
       authRuntime,
+      userRepo,
+      requireAuth,
+    }),
+  );
+  app.use(
+    '/api',
+    createProfileRouter({
       userRepo,
       requireAuth,
     }),

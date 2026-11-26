@@ -424,3 +424,171 @@ test('authStateUtils surfaces rate limit retry-after and rejects HTML fallback c
   assert.equal(transition.status, 'api_unavailable');
   assert.equal(transition.user, null);
 });
+
+test('fetchProfile, updateProfile, and updateProfileAvatar sync server profile fields and fail cleanly on 401/403/503', async () => {
+  const requests: Array<{ url: string; method: string; body: any }> = [];
+  let mode: 'ok' | 'forbidden' | 'unavailable' | 'expired' = 'ok';
+
+  const auth = new SelfHostedAuthService({
+    fetchFn: async (url, init) => {
+      const path = String(url);
+      const method = init?.method || 'GET';
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      requests.push({ url: path, method, body });
+      assert.equal(init?.credentials, 'include');
+
+      if (path === '/api/auth/me') {
+        return jsonResponse(200, {
+          user: {
+            id: 'usr_prof_1',
+            email: 'player@example.com',
+            displayName: 'Player One',
+            phone: null,
+            avatarUrl: null,
+            role: 'customer',
+            status: 'active',
+            emailVerified: true,
+            referralCode: 'REF_PLAYER1',
+            referredBy: 'REF_ELENA',
+            referrerDisplayName: 'Elena Referrer',
+          },
+          session: { expiresAt: '2026-12-31T00:00:00.000Z' },
+        });
+      }
+
+      if (mode === 'unavailable') {
+        return jsonResponse(503, { error: { code: 'API_UNAVAILABLE', message: 'Database unavailable' } });
+      }
+      if (mode === 'expired') {
+        return jsonResponse(401, { error: { code: 'UNAUTHENTICATED', message: 'Session expired' } });
+      }
+      if (mode === 'forbidden') {
+        return jsonResponse(403, { error: { code: 'FORBIDDEN', message: 'You can only update your own profile.' } });
+      }
+
+      if (path === '/api/profile' && method === 'GET') {
+        return jsonResponse(200, {
+          user: {
+            id: 'usr_prof_1',
+            email: 'player@example.com',
+            displayName: 'Player One',
+            phone: '+1 555 0100',
+            avatarUrl: 'https://cdn.example.com/avatar.webp',
+            role: 'customer',
+            status: 'active',
+            emailVerified: true,
+            referralCode: 'REF_PLAYER1',
+            referredBy: 'REF_ELENA',
+            referrerDisplayName: 'Elena Referrer',
+          },
+        });
+      }
+
+      if (path === '/api/profile' && method === 'PATCH') {
+        return jsonResponse(200, {
+          user: {
+            id: 'usr_prof_1',
+            email: 'player@example.com',
+            displayName: body.displayName ?? 'Player One',
+            phone: body.phone === undefined ? '+1 555 0100' : body.phone,
+            avatarUrl: 'https://cdn.example.com/avatar.webp',
+            role: 'customer',
+            status: 'active',
+            emailVerified: true,
+            referralCode: 'REF_PLAYER1',
+            referredBy: 'REF_ELENA',
+            referrerDisplayName: 'Elena Referrer',
+          },
+        });
+      }
+
+      if (path === '/api/profile/avatar' && method === 'POST') {
+        return jsonResponse(200, {
+          success: true,
+          avatarUrl: body.avatarUrl,
+          user: {
+            id: 'usr_prof_1',
+            email: 'player@example.com',
+            displayName: 'Renamed Player',
+            phone: null,
+            avatarUrl: body.avatarUrl,
+            role: 'customer',
+            status: 'active',
+            emailVerified: true,
+            referralCode: 'REF_PLAYER1',
+            referredBy: 'REF_ELENA',
+            referrerDisplayName: 'Elena Referrer',
+          },
+        });
+      }
+
+      if (path === '/api/profile/avatar' && method === 'DELETE') {
+        return jsonResponse(200, {
+          success: true,
+          avatarUrl: null,
+          user: {
+            id: 'usr_prof_1',
+            email: 'player@example.com',
+            displayName: 'Renamed Player',
+            phone: null,
+            avatarUrl: null,
+            role: 'customer',
+            status: 'active',
+            emailVerified: true,
+            referralCode: 'REF_PLAYER1',
+            referredBy: 'REF_ELENA',
+            referrerDisplayName: 'Elena Referrer',
+          },
+        });
+      }
+
+      throw new Error(`Unexpected request: ${method} ${path}`);
+    },
+  });
+
+  const boot = await auth.bootstrapSession();
+  assert.equal(boot.status, 'authenticated');
+  assert.equal(boot.user?.referrerDisplayName, 'Elena Referrer');
+  assert.equal(boot.user?.referralCode, 'REF_PLAYER1');
+
+  const fetched = await auth.fetchProfile();
+  assert.equal(fetched.success, true);
+  assert.equal(fetched.user?.phone, '+1 555 0100');
+  assert.equal(fetched.user?.avatarUrl, 'https://cdn.example.com/avatar.webp');
+
+  const updated = await auth.updateProfile({ displayName: 'Renamed Player', phone: null });
+  assert.equal(updated.success, true);
+  assert.equal(updated.user?.displayName, 'Renamed Player');
+  assert.equal(updated.user?.phone, undefined);
+  assert.equal(auth.getCurrentUser()?.displayName, 'Renamed Player');
+
+  const avatarRes = await auth.updateProfileAvatar('data:image/webp;base64,UklGRhAAAABXRUJQ');
+  assert.equal(avatarRes.success, true);
+  assert.equal(avatarRes.user?.avatarUrl, 'data:image/webp;base64,UklGRhAAAABXRUJQ');
+
+  const clearedRes = await auth.updateProfileAvatar(null);
+  assert.equal(clearedRes.success, true);
+  assert.equal(clearedRes.user?.avatarUrl, undefined);
+
+  // Forbidden error does not fake success
+  mode = 'forbidden';
+  const forbiddenRes = await auth.updateProfile({ displayName: 'Blocked' });
+  assert.equal(forbiddenRes.success, false);
+  assert.equal(forbiddenRes.code, 'FORBIDDEN');
+  assert.equal(auth.getCurrentUser()?.displayName, 'Renamed Player');
+
+  // 503 unavailable reports isUnavailable cleanly
+  mode = 'unavailable';
+  const unavailableRes = await auth.updateProfileAvatar('https://cdn.example.com/x.png');
+  assert.equal(unavailableRes.success, false);
+  assert.equal(unavailableRes.isUnavailable, true);
+
+  // 401 while authenticated transitions session to expired
+  mode = 'expired';
+  const expiredRes = await auth.fetchProfile();
+  assert.equal(expiredRes.success, false);
+  assert.equal(expiredRes.code, 'SESSION_EXPIRED');
+  assert.equal(auth.getSnapshot().status, 'expired');
+  assert.equal(auth.getCurrentUser(), null);
+  assert.ok(requests.some((r) => r.url === '/api/profile' && r.method === 'PATCH'));
+});

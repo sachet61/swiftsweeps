@@ -22,9 +22,11 @@ interface InMemoryUserRow {
   display_name: string;
   role: string;
   phone: string | null;
+  avatar_url: string | null;
   status: string;
   email_verified: boolean;
   referral_code: string | null;
+  referred_by: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -125,9 +127,11 @@ class InMemoryAppDatabase implements Pick<DatabasePool, 'query'> {
             display_name: displayName,
             role: 'customer',
             phone: null,
+            avatar_url: null,
             status: 'active',
             email_verified: emailVerified,
             referral_code: referralCode,
+            referred_by: null,
             created_at: now,
             updated_at: now,
           });
@@ -151,9 +155,11 @@ class InMemoryAppDatabase implements Pick<DatabasePool, 'query'> {
         display_name: displayName,
         role,
         phone,
+        avatar_url: null,
         status: 'active',
         email_verified: emailVerified,
         referral_code: referralCode,
+        referred_by: null,
         created_at: now,
         updated_at: now,
       });
@@ -264,9 +270,13 @@ class InMemoryAppDatabase implements Pick<DatabasePool, 'query'> {
       auth_user_id: link?.auth_user_id ?? null,
       email: user.email,
       display_name: user.display_name,
+      phone: user.phone,
+      avatar_url: user.avatar_url,
       role: user.role,
       status: user.status,
       email_verified: user.email_verified,
+      referral_code: user.referral_code,
+      referred_by: user.referred_by,
       password_reset_required: link?.password_reset_required ?? false,
       created_at: user.created_at,
       updated_at: user.updated_at,

@@ -718,7 +718,7 @@ class DataService {
           appConfigRes,
           cashoutsRes,
           catRes,
-          userRes,
+          profileRes,
           walletRes,
           topupsRes,
           latestCompletedTopupRes,
@@ -730,7 +730,7 @@ class DataService {
           appConfigPromise,
           cashoutsPromise,
           catPromise,
-          supabase.from('users').select('*').eq('id', currentUserId).maybeSingle(),
+          selfHostedAuthService.fetchProfile().catch(() => null),
           supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
           supabase
             .from('topups')
@@ -771,56 +771,15 @@ class DataService {
         if (!catRes?.error && Array.isArray(catRes?.data) && catRes.data.length > 0) {
           this.applyCatalogRows(catRes.data);
         }
-        if (userRes?.data) {
-          const dbUser = userRes.data;
-          const users = this.getUsers();
-          let local = users.find((u) => u.id === dbUser.id || u.email.toLowerCase() === dbUser.email?.toLowerCase());
-          const isConfirmed = mergeVerifiedStatus({
-            dbVerified: Boolean(dbUser.email_verified),
-            existingVerified: Boolean(local?.emailVerified),
-            cachedVerified: readVerifiedCache(dbUser.id, dbUser.email),
-          });
-          if (isConfirmed) {
-            writeVerifiedCache(dbUser.id, dbUser.email, true);
+        if (profileRes?.success && profileRes.user) {
+          const synced = this.syncAuthenticatedUser(profileRes.user);
+          if (synced) {
+            window.dispatchEvent(
+              new CustomEvent('aetherpay_state_changed', {
+                detail: { key: 'user_profile_synced', user: synced },
+              })
+            );
           }
-          if (local) {
-            local.emailVerified = isConfirmed;
-            if (dbUser.display_name) local.displayName = dbUser.display_name;
-            if (dbUser.role) local.role = dbUser.role;
-            if (dbUser.phone) local.phone = dbUser.phone;
-            if (dbUser.avatar_url) local.avatarUrl = dbUser.avatar_url;
-          } else {
-            local = {
-              id: dbUser.id,
-              email: dbUser.email,
-              displayName: dbUser.display_name || dbUser.email?.split('@')[0] || 'Player',
-              role: dbUser.role || 'customer',
-              phone: dbUser.phone,
-              avatarUrl: dbUser.avatar_url,
-              status: dbUser.status || 'active',
-              emailVerified: isConfirmed,
-              referralCode: dbUser.referral_code || `REF_${dbUser.id.slice(-5).toUpperCase()}`,
-              referredBy: dbUser.referred_by,
-              createdAt: dbUser.created_at || new Date().toISOString(),
-              lastLoginAt: new Date().toISOString(),
-            };
-            users.push(local);
-          }
-          this.cache[STORAGE_KEYS.USERS] = users;
-          if (this.authenticatedUser && this.authenticatedUser.id === local.id) {
-            this.authenticatedUser = {
-              ...local,
-              id: this.authenticatedUser.id,
-              email: this.authenticatedUser.email,
-              displayName: this.authenticatedUser.displayName,
-              role: this.authenticatedUser.role,
-              status: this.authenticatedUser.status,
-              emailVerified: Boolean(this.authenticatedUser.emailVerified || local.emailVerified),
-              isParentAdmin: this.authenticatedUser.isParentAdmin,
-              passwordResetRequired: this.authenticatedUser.passwordResetRequired,
-            };
-          }
-          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_profile_synced', user: this.authenticatedUser || local } }));
         }
 
         // Apply Order Invariant: apply topups, withdrawals, and transactions BEFORE wallet reconciliation
@@ -2654,9 +2613,14 @@ class DataService {
       id: user.id,
       email: user.email,
       displayName: user.displayName,
+      phone: user.phone,
+      avatarUrl: user.avatarUrl,
       role: user.role,
       status: user.status,
       emailVerified: Boolean(user.emailVerified),
+      referralCode: user.referralCode || existing?.referralCode,
+      referredBy: user.referredBy,
+      referrerDisplayName: user.referrerDisplayName,
       isParentAdmin: Boolean(user.isParentAdmin),
       passwordResetRequired: Boolean(user.passwordResetRequired),
     };
@@ -2695,9 +2659,14 @@ class DataService {
       this.authenticatedUser = {
         ...this.authenticatedUser,
         displayName: authUser.displayName,
+        phone: authUser.phone,
+        avatarUrl: authUser.avatarUrl,
         role: authUser.role,
         status: authUser.status,
         emailVerified: Boolean(authUser.emailVerified),
+        referralCode: authUser.referralCode || this.authenticatedUser.referralCode,
+        referredBy: authUser.referredBy,
+        referrerDisplayName: authUser.referrerDisplayName,
         isParentAdmin: Boolean(authUser.isParentAdmin),
         passwordResetRequired: Boolean(authUser.passwordResetRequired),
       };
@@ -3684,62 +3653,61 @@ class DataService {
     return { success: true, user: newUser };
   }
 
+  public async updateOwnProfile(params: {
+    displayName?: string;
+    phone?: string | null;
+  }): Promise<{ success: boolean; error?: string; code?: string; user?: UserProfile }> {
+    const current = this.getCurrentUser();
+    if (!current) {
+      return { success: false, error: 'You must be signed in to update your profile.' };
+    }
+
+    const res = await selfHostedAuthService.updateProfile(params);
+    if (!res.success || !res.user) {
+      return {
+        success: false,
+        code: res.code,
+        error: res.error || 'Failed to update profile.',
+      };
+    }
+
+    const synced = this.syncAuthenticatedUser(res.user) || res.user;
+    window.dispatchEvent(
+      new CustomEvent('aetherpay_state_changed', {
+        detail: { key: 'profile_updated', userId: synced.id },
+      })
+    );
+    return { success: true, user: synced };
+  }
+
   public async updateUserAvatar(
     userId: string,
-    avatarUrl: string
+    avatarUrl: string | null
   ): Promise<{ success: boolean; error?: string; user?: UserProfile }> {
-    try {
-      const users = this.getUsers();
-      const user = users.find((u) => u.id === userId);
-      if (user) {
-        user.avatarUrl = avatarUrl;
-        this.cache[STORAGE_KEYS.USERS] = users;
-      }
-
-      // Update active user in session if matches
-      const current = this.getCurrentUser();
-      if (current && current.id === userId) {
-        current.avatarUrl = avatarUrl;
-        authSessionService.updateUserProfile(current);
-      }
-
-      // 1. Persist directly to Supabase PostgreSQL public.users
-      if (supabase && isSupabaseConfigured()) {
-        try {
-          await supabase
-            .from('users')
-            .update({
-              avatar_url: avatarUrl,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('id', userId);
-        } catch (dbErr: any) {
-          console.warn('[Supabase Avatar Direct Update Notice]:', dbErr?.message);
-        }
-      }
-
-      // 2. Persist via server endpoint with service-role privileges
-      try {
-        await fetch('/api/user/avatar', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId, avatarUrl }),
-        });
-      } catch (srvErr) {
-        console.warn('[Server Avatar Endpoint Sync Notice]:', srvErr);
-      }
-
-      window.dispatchEvent(
-        new CustomEvent('aetherpay_state_changed', {
-          detail: { key: 'avatar_updated', userId, avatarUrl },
-        })
-      );
-
-      return { success: true, user: user || current || undefined };
-    } catch (err: any) {
-      console.error('[Update User Avatar Error]:', err);
-      return { success: false, error: err.message || 'Failed to update avatar.' };
+    const current = this.getCurrentUser();
+    if (!current || current.id !== userId) {
+      return {
+        success: false,
+        error: 'You can only update your own profile picture.',
+      };
     }
+
+    const res = await selfHostedAuthService.updateProfileAvatar(avatarUrl);
+    if (!res.success || !res.user) {
+      return {
+        success: false,
+        error: res.error || 'Failed to update profile picture.',
+      };
+    }
+
+    const synced = this.syncAuthenticatedUser(res.user) || res.user;
+    window.dispatchEvent(
+      new CustomEvent('aetherpay_state_changed', {
+        detail: { key: 'avatar_updated', userId: synced.id, avatarUrl: synced.avatarUrl },
+      })
+    );
+
+    return { success: true, user: synced };
   }
 
   // Wallets & Authoritative Ledger

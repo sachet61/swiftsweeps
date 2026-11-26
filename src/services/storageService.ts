@@ -285,74 +285,71 @@ class StorageService {
   }
 
   /**
-   * Uploads profile picture with on-the-fly WebP compression and transformations
-   * Features automatic fallback to service-role endpoint if avatars bucket is missing
+   * Compresses profile picture locally to a bounded square WebP/PNG/JPEG data URI
+   * for persistence via the self-hosted /api/profile/avatar endpoint.
    */
-  public async uploadAvatar(file: File, userId: string): Promise<StorageUploadResult> {
+  public async uploadAvatar(file: File, _userId?: string): Promise<StorageUploadResult> {
     try {
       const validation = validateImageFile(file);
       if (!validation.valid) {
         return { success: false, error: validation.error };
       }
 
+      if (file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)) {
+        return {
+          success: false,
+          error: 'SVG files are not allowed for profile pictures. Please choose a PNG, JPG, or WebP image.',
+        };
+      }
+
       // Pre-compress to square WebP (400x400)
-      const compressed = await compressImageToWebP(file, {
+      let compressed = await compressImageToWebP(file, {
         maxWidth: 400,
         maxHeight: 400,
-        quality: 0.88,
+        quality: 0.85,
       });
 
-      const cleanUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const fileName = `${cleanUserId}/avatar_${Date.now()}.webp`;
-
-      await this.ensureBucket('avatars', true);
-
-      let publicUrl: string | null = null;
-
-      // Attempt 1: Direct Client Upload
-      const { data, error } = await supabase.storage
-        .from('avatars')
-        .upload(fileName, compressed.file, {
-          cacheControl: '86400',
-          upsert: true,
-          contentType: 'image/webp',
+      if (compressed.file.size > 200_000) {
+        compressed = await compressImageToWebP(compressed.file, {
+          maxWidth: 320,
+          maxHeight: 320,
+          quality: 0.72,
         });
-
-      if (!error && data?.path) {
-        const { data: urlData } = supabase.storage
-          .from('avatars')
-          .getPublicUrl(data.path);
-        publicUrl = urlData.publicUrl;
-      } else {
-        // Attempt 2: Server-side Fallback with Service Role auto-provisioning
-        console.warn('[StorageService] Client avatar upload failed ("Bucket not found" or RLS), activating server fallback:', error?.message);
-        const fallbackResult = await this.uploadViaServerFallback(
-          compressed.file,
-          'avatars',
-          fileName,
-          'image/webp',
-          userId
-        );
-
-        if (fallbackResult.success && fallbackResult.url) {
-          publicUrl = fallbackResult.url;
-        } else {
-          return {
-            success: false,
-            error: fallbackResult.error || error?.message || 'Avatar upload failed',
-          };
-        }
       }
+
+      if (compressed.file.size > 280_000) {
+        return {
+          success: false,
+          error: 'Compressed avatar image exceeds 280 KB. Please choose a smaller photo.',
+        };
+      }
+
+      const mimeType = (compressed.file.type || 'image/webp').toLowerCase();
+      if (
+        mimeType !== 'image/webp' &&
+        mimeType !== 'image/png' &&
+        mimeType !== 'image/jpeg' &&
+        mimeType !== 'image/jpg'
+      ) {
+        return {
+          success: false,
+          error: 'Profile picture must be a PNG, JPEG, or WebP image.',
+        };
+      }
+
+      const base64Data = await fileToBase64(compressed.file);
+      const normalizedMime = mimeType === 'image/jpg' ? 'image/jpeg' : mimeType;
+      const dataUrl = `data:${normalizedMime};base64,${base64Data}`;
 
       return {
         success: true,
-        url: publicUrl,
+        url: dataUrl,
         name: file.name,
         originalSize: compressed.originalSize,
         compressedSize: compressed.compressedSize,
       };
     } catch (err: any) {
-      console.error('[StorageService] Avatar upload error:', err);
+      console.error('[StorageService] Avatar preparation error:', err);
       return { success: false, error: err?.message || 'Avatar upload failed' };
     }
   }

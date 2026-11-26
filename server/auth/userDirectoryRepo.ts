@@ -13,9 +13,13 @@ export interface ResolvedAppUser {
   authUserId: string | null;
   email: string;
   displayName: string;
+  phone: string | null;
+  avatarUrl: string | null;
   role: AppUserRole;
   status: AppUserStatus;
   emailVerified: boolean;
+  referralCode: string | null;
+  referredBy: string | null;
   passwordResetRequired: boolean;
   isParentAdmin: boolean;
   createdAt: string;
@@ -73,9 +77,13 @@ interface JoinedUserRow {
   auth_user_id: string | null;
   email: string;
   display_name: string;
+  phone: string | null;
+  avatar_url: string | null;
   role: string;
   status: string;
   email_verified: boolean;
+  referral_code: string | null;
+  referred_by: string | null;
   password_reset_required: boolean | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -111,9 +119,13 @@ function mapJoinedRow(row: JoinedUserRow): ResolvedAppUser {
     authUserId: row.auth_user_id,
     email,
     displayName: row.display_name,
+    phone: row.phone ?? null,
+    avatarUrl: row.avatar_url ?? null,
     role: normalizeRole(row.role),
     status: normalizeStatus(row.status),
     emailVerified: Boolean(row.email_verified),
+    referralCode: row.referral_code ?? null,
+    referredBy: row.referred_by ?? null,
     passwordResetRequired: Boolean(row.password_reset_required),
     isParentAdmin: isParentAdminUser({ id: row.app_user_id, email }),
     createdAt: toIsoString(row.created_at),
@@ -150,9 +162,13 @@ export class UserDirectoryRepo {
         l.auth_user_id,
         u.email,
         u.display_name,
+        u.phone,
+        u.avatar_url,
         u.role,
         u.status,
         u.email_verified,
+        u.referral_code,
+        u.referred_by,
         COALESCE(l.password_reset_required, false) AS password_reset_required,
         u.created_at,
         u.updated_at
@@ -178,9 +194,13 @@ export class UserDirectoryRepo {
         l.auth_user_id,
         u.email,
         u.display_name,
+        u.phone,
+        u.avatar_url,
         u.role,
         u.status,
         u.email_verified,
+        u.referral_code,
+        u.referred_by,
         COALESCE(l.password_reset_required, false) AS password_reset_required,
         u.created_at,
         u.updated_at
@@ -205,9 +225,13 @@ export class UserDirectoryRepo {
         l.auth_user_id,
         u.email,
         u.display_name,
+        u.phone,
+        u.avatar_url,
         u.role,
         u.status,
         u.email_verified,
+        u.referral_code,
+        u.referred_by,
         COALESCE(l.password_reset_required, false) AS password_reset_required,
         u.created_at,
         u.updated_at
@@ -443,9 +467,13 @@ export class UserDirectoryRepo {
         l.auth_user_id,
         u.email,
         u.display_name,
+        u.phone,
+        u.avatar_url,
         u.role,
         u.status,
         u.email_verified,
+        u.referral_code,
+        u.referred_by,
         COALESCE(l.password_reset_required, false) AS password_reset_required,
         u.created_at,
         u.updated_at
@@ -458,6 +486,85 @@ export class UserDirectoryRepo {
     );
 
     return res.rows.map(mapJoinedRow);
+  }
+
+  public async resolveReferrerDisplayName(
+    referredBy: string | null | undefined,
+  ): Promise<string | null> {
+    const cleanRef = referredBy?.trim();
+    if (!cleanRef) {
+      return null;
+    }
+
+    const res = await this.query<{ display_name: string }>(
+      `
+      SELECT display_name
+      FROM public.users
+      WHERE id = $1
+         OR upper(referral_code) = upper($1)
+         OR lower(email) = lower($1)
+      LIMIT 1
+      `,
+      [cleanRef],
+    );
+
+    const row = res.rows[0];
+    return row?.display_name ?? null;
+  }
+
+  public async updateOwnProfile(input: {
+    appUserId: string;
+    displayName?: string;
+    phone?: string | null;
+  }): Promise<ResolvedAppUser | null> {
+    const hasDisplayName = input.displayName !== undefined;
+    const hasPhone = input.phone !== undefined;
+
+    if (hasDisplayName && hasPhone) {
+      await this.query(
+        `
+        UPDATE public.users
+        SET display_name = $2, phone = $3, updated_at = timezone('utc'::text, now())
+        WHERE id = $1
+        `,
+        [input.appUserId, input.displayName, input.phone],
+      );
+    } else if (hasDisplayName) {
+      await this.query(
+        `
+        UPDATE public.users
+        SET display_name = $2, updated_at = timezone('utc'::text, now())
+        WHERE id = $1
+        `,
+        [input.appUserId, input.displayName],
+      );
+    } else if (hasPhone) {
+      await this.query(
+        `
+        UPDATE public.users
+        SET phone = $2, updated_at = timezone('utc'::text, now())
+        WHERE id = $1
+        `,
+        [input.appUserId, input.phone],
+      );
+    }
+
+    return this.findByAppUserId(input.appUserId);
+  }
+
+  public async updateOwnAvatar(
+    appUserId: string,
+    avatarUrl: string | null,
+  ): Promise<ResolvedAppUser | null> {
+    await this.query(
+      `
+      UPDATE public.users
+      SET avatar_url = $2, updated_at = timezone('utc'::text, now())
+      WHERE id = $1
+      `,
+      [appUserId, avatarUrl],
+    );
+    return this.findByAppUserId(appUserId);
   }
 
   public async updateUserRole(

@@ -11,6 +11,7 @@ export interface UserProfile {
   emailVerified?: boolean;
   referralCode?: string;
   referredBy?: string;
+  referrerDisplayName?: string;
   registeredPaymentMethod?: string;
   registeredPaymentDetails?: string;
   createdAt: string;

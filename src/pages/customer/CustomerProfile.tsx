@@ -24,6 +24,8 @@ import {
   Loader2,
   Copy,
   Check,
+  Pencil,
+  X,
 } from 'lucide-react';
 import { storageService } from '../../services/storageService';
 import { validateImageFile } from '../../utils/uploadUtils';
@@ -55,6 +57,18 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
   const [isUploadingAvatar, setIsUploadingAvatar] = useState<boolean>(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<boolean>(false);
+  const [isEditingProfile, setIsEditingProfile] = useState<boolean>(false);
+  const [editDisplayName, setEditDisplayName] = useState<string>(currentUser.displayName);
+  const [editPhone, setEditPhone] = useState<string>(currentUser.phone || '');
+  const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!isEditingProfile) {
+      setEditDisplayName(currentUser.displayName);
+      setEditPhone(currentUser.phone || '');
+    }
+  }, [currentUser.displayName, currentUser.phone, isEditingProfile]);
 
   const handleCopyUserId = () => {
     navigator.clipboard.writeText(currentUser.id);
@@ -64,16 +78,63 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
 
   const referrerDisplayName = React.useMemo(() => {
     if (!currentUser.referredBy) return null;
-    const match = dataService
-      .getUsers()
-      .find(
-        (u) =>
-          u.id === currentUser.referredBy ||
-          u.referralCode === currentUser.referredBy ||
-          u.email === currentUser.referredBy
-      );
-    return match?.displayName || currentUser.referredBy;
-  }, [currentUser.referredBy]);
+    return currentUser.referrerDisplayName || currentUser.referredBy;
+  }, [currentUser.referredBy, currentUser.referrerDisplayName]);
+
+  const handleStartEditProfile = () => {
+    setProfileError(null);
+    setEditDisplayName(currentUser.displayName);
+    setEditPhone(currentUser.phone || '');
+    setIsEditingProfile(true);
+  };
+
+  const handleCancelEditProfile = () => {
+    setProfileError(null);
+    setEditDisplayName(currentUser.displayName);
+    setEditPhone(currentUser.phone || '');
+    setIsEditingProfile(false);
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setProfileError(null);
+
+    const cleanName = editDisplayName.trim();
+    if (!cleanName || cleanName.length > 120) {
+      setProfileError('Display name must be between 1 and 120 characters.');
+      return;
+    }
+
+    const cleanPhone = editPhone.trim();
+    if (cleanPhone) {
+      const digitsCount = cleanPhone.replace(/\D/g, '').length;
+      if (cleanPhone.length > 32 || !/^[+0-9()\-\s.]{5,32}$/.test(cleanPhone) || digitsCount < 5) {
+        setProfileError('Please enter a valid phone number or leave it blank.');
+        return;
+      }
+    }
+
+    try {
+      setIsSavingProfile(true);
+      const res = await dataService.updateOwnProfile({
+        displayName: cleanName,
+        phone: cleanPhone || null,
+      });
+
+      if (!res.success) {
+        setProfileError(res.error || 'Failed to save profile changes.');
+        return;
+      }
+
+      setIsEditingProfile(false);
+      setSuccessNote('Profile details updated!');
+      setTimeout(() => setSuccessNote(null), 5000);
+    } catch (err: any) {
+      setProfileError(err?.message || 'Unable to save profile changes right now.');
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
 
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -92,10 +153,13 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
       const res = await storageService.uploadAvatar(file, currentUser.id);
 
       if (res.success && res.url) {
-        await dataService.updateUserAvatar(currentUser.id, res.url);
-        currentUser.avatarUrl = res.url;
-        setSuccessNote('Profile picture updated!');
-        setTimeout(() => setSuccessNote(null), 5000);
+        const updateRes = await dataService.updateUserAvatar(currentUser.id, res.url);
+        if (updateRes.success) {
+          setSuccessNote('Profile picture updated!');
+          setTimeout(() => setSuccessNote(null), 5000);
+        } else {
+          setAvatarError(updateRes.error || 'Failed to update profile picture. Please try again.');
+        }
       } else {
         setAvatarError(res.error || 'Failed to update profile picture. Please try again.');
       }
@@ -158,6 +222,7 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
     setShowOtpModal(false);
     selfHostedAuthService.updateVerificationStatus(true);
     dataService.syncAuthenticatedUser(updatedUser);
+    void selfHostedAuthService.fetchProfile().catch(() => null);
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
     setSuccessNote('Email address verified!');
     setTimeout(() => setSuccessNote(null), 5000);
@@ -279,7 +344,102 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
               </div>
             </div>
           </div>
+
+          {!isEditingProfile && (
+            <button
+              type="button"
+              onClick={handleStartEditProfile}
+              className="self-start sm:self-center px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold transition flex items-center gap-1.5"
+            >
+              <Pencil className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Edit Profile</span>
+            </button>
+          )}
         </div>
+
+        {isEditingProfile && (
+          <form
+            onSubmit={handleSaveProfile}
+            className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-4"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                Edit Profile Details
+              </h3>
+              <button
+                type="button"
+                onClick={handleCancelEditProfile}
+                disabled={isSavingProfile}
+                className="text-slate-400 hover:text-white p-1 rounded"
+                aria-label="Close profile editor"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {profileError && (
+              <div
+                role="alert"
+                className="p-2.5 rounded-lg bg-rose-950/60 border border-rose-800 text-rose-200 text-xs flex items-center gap-2"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                <span>{profileError}</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label htmlFor="profile-display-name" className="block text-xs text-slate-400 font-medium">
+                  Full Name / Gamer Tag
+                </label>
+                <input
+                  id="profile-display-name"
+                  type="text"
+                  value={editDisplayName}
+                  onChange={(e) => setEditDisplayName(e.target.value)}
+                  maxLength={120}
+                  required
+                  className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white text-xs focus:outline-none focus:border-indigo-500"
+                  placeholder="Enter display name"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="profile-phone" className="block text-xs text-slate-400 font-medium">
+                  Mobile Phone Number
+                </label>
+                <input
+                  id="profile-phone"
+                  type="tel"
+                  value={editPhone}
+                  onChange={(e) => setEditPhone(e.target.value)}
+                  maxLength={32}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white text-xs font-mono focus:outline-none focus:border-indigo-500"
+                  placeholder="Optional phone number"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleCancelEditProfile}
+                disabled={isSavingProfile}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSavingProfile}
+                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {isSavingProfile && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isSavingProfile ? 'Saving...' : 'Save Changes'}</span>
+              </button>
+            </div>
+          </form>
+        )}
 
         {/* Credentials Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -326,8 +486,12 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
               <span>Mobile Phone Number</span>
             </div>
             <div className="font-medium text-white font-mono flex items-center justify-between">
-              <span>{currentUser.phone || '+1 (555) 234-8901'}</span>
-              <span className="text-[10px] text-emerald-400 font-bold">Verified</span>
+              <span>{currentUser.phone || 'Not linked'}</span>
+              {currentUser.phone ? (
+                <span className="text-[10px] text-emerald-400 font-bold">Linked</span>
+              ) : (
+                <span className="text-[10px] text-slate-500 font-medium">Not Set</span>
+              )}
             </div>
           </div>
 

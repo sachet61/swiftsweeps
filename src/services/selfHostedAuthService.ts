@@ -2,6 +2,8 @@ import type { UserProfile } from '../types';
 import {
   type AuthStateSnapshot,
   type ParsedAuthHttpPayload,
+  type ServerAuthUser,
+  buildUserProfileFromAuthMe,
   deriveAuthMeTransition,
   mapAuthErrorResponse,
   parseAuthHttpPayload,
@@ -48,6 +50,19 @@ export interface VerifyEmailOtpResult {
 export interface SimpleAuthActionResult {
   success: boolean;
   message?: string;
+  code?: string;
+  isUnavailable?: boolean;
+}
+
+export interface ProfileUpdatePayload {
+  displayName?: string;
+  phone?: string | null;
+}
+
+export interface ProfileActionResult {
+  success: boolean;
+  user?: UserProfile;
+  error?: string;
   code?: string;
   isUnavailable?: boolean;
 }
@@ -765,6 +780,103 @@ export class SelfHostedAuthService {
         emailVerified: Boolean(verified),
       },
     });
+  }
+
+  private handleProfileHttpResult(
+    result: { parsed?: ParsedAuthHttpPayload; networkError?: boolean },
+    fallbackMessage: string
+  ): ProfileActionResult {
+    if (result.networkError || !result.parsed) {
+      return {
+        success: false,
+        code: 'API_UNAVAILABLE',
+        isUnavailable: true,
+        error: 'Unable to reach the profile server. Please check your connection and try again.',
+      };
+    }
+
+    const parsed = result.parsed;
+    if (parsed.isHtmlFallback || parsed.status >= 500 || parsed.status === 404) {
+      return {
+        success: false,
+        code: parsed.code || 'API_UNAVAILABLE',
+        isUnavailable: true,
+        error:
+          parsed.message ||
+          'Profile service is currently unavailable. Please try again shortly.',
+      };
+    }
+
+    if (parsed.status === 401) {
+      if (this.snapshot.status === 'authenticated') {
+        this.markSessionExpired();
+      }
+      return {
+        success: false,
+        code: 'SESSION_EXPIRED',
+        error: 'Your login session has expired. Please sign in again.',
+      };
+    }
+
+    if (!parsed.ok) {
+      const mapped = mapAuthErrorResponse(parsed);
+      return {
+        success: false,
+        code: mapped.code,
+        isUnavailable: mapped.isUnavailable,
+        error: mapped.message || fallbackMessage,
+      };
+    }
+
+    const userObj = parsed.data?.user as ServerAuthUser | undefined;
+    if (
+      !parsed.isJson ||
+      !userObj ||
+      typeof userObj.id !== 'string' ||
+      !userObj.id.trim() ||
+      typeof userObj.email !== 'string' ||
+      !userObj.email.trim()
+    ) {
+      return {
+        success: false,
+        code: 'INVALID_PROFILE_PAYLOAD',
+        isUnavailable: true,
+        error: 'Profile API returned an invalid response payload.',
+      };
+    }
+
+    const profile = buildUserProfileFromAuthMe(userObj, this.cachedUserProfileHints);
+    this.applyAuthenticatedUser(profile);
+    return {
+      success: true,
+      user: profile,
+    };
+  }
+
+  public async fetchProfile(): Promise<ProfileActionResult> {
+    const result = await this.requestJson('/api/profile', {
+      method: 'GET',
+    });
+    return this.handleProfileHttpResult(result, 'Failed to load user profile.');
+  }
+
+  public async updateProfile(payload: ProfileUpdatePayload): Promise<ProfileActionResult> {
+    const result = await this.requestJson('/api/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+    return this.handleProfileHttpResult(result, 'Failed to update profile.');
+  }
+
+  public async updateProfileAvatar(avatarUrl: string | null): Promise<ProfileActionResult> {
+    const result =
+      avatarUrl === null
+        ? await this.requestJson('/api/profile/avatar', { method: 'DELETE' })
+        : await this.requestJson('/api/profile/avatar', {
+            method: 'POST',
+            body: JSON.stringify({ avatarUrl }),
+          });
+    return this.handleProfileHttpResult(result, 'Failed to update profile picture.');
   }
 }
 

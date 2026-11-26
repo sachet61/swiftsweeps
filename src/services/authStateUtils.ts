@@ -11,9 +11,14 @@ export interface ServerAuthUser {
   id: string;
   email: string;
   displayName: string;
+  phone?: string | null;
+  avatarUrl?: string | null;
   role: UserRole;
   status: string;
   emailVerified: boolean;
+  referralCode?: string | null;
+  referredBy?: string | null;
+  referrerDisplayName?: string | null;
   passwordResetRequired?: boolean;
   isParentAdmin?: boolean;
   createdAt?: string;
@@ -89,19 +94,44 @@ export function buildUserProfileFromAuthMe(
       ? existingProfile
       : undefined;
 
+  const resolvedPhone =
+    'phone' in serverUser
+      ? serverUser.phone?.trim() || undefined
+      : sameUserExisting?.phone;
+  const resolvedAvatarUrl =
+    'avatarUrl' in serverUser
+      ? serverUser.avatarUrl?.trim() || undefined
+      : sameUserExisting?.avatarUrl;
+  const resolvedReferralCode =
+    'referralCode' in serverUser
+      ? serverUser.referralCode?.trim() ||
+        sameUserExisting?.referralCode ||
+        `REF_${id.slice(-5).toUpperCase()}`
+      : sameUserExisting?.referralCode || `REF_${id.slice(-5).toUpperCase()}`;
+  const resolvedReferredBy =
+    'referredBy' in serverUser
+      ? serverUser.referredBy?.trim() || undefined
+      : sameUserExisting?.referredBy;
+  const resolvedReferrerDisplayName =
+    'referrerDisplayName' in serverUser
+      ? serverUser.referrerDisplayName?.trim() || undefined
+      : sameUserExisting?.referrerDisplayName;
+
   return {
     ...(sameUserExisting || {}),
     id,
     email,
     displayName,
+    phone: resolvedPhone,
+    avatarUrl: resolvedAvatarUrl,
     role: normalizeAuthRole(serverUser.role),
     status: String(serverUser.status || 'active'),
     emailVerified: Boolean(serverUser.emailVerified),
     passwordResetRequired: Boolean(serverUser.passwordResetRequired),
     isParentAdmin: Boolean(serverUser.isParentAdmin),
-    referralCode:
-      sameUserExisting?.referralCode ||
-      `REF_${id.slice(-5).toUpperCase()}`,
+    referralCode: resolvedReferralCode,
+    referredBy: resolvedReferredBy,
+    referrerDisplayName: resolvedReferrerDisplayName,
     createdAt: serverUser.createdAt || sameUserExisting?.createdAt || new Date().toISOString(),
     lastLoginAt: new Date().toISOString(),
   };

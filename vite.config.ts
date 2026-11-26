@@ -11,6 +11,8 @@ function isSelfHostedAuthPath(url: string | undefined): boolean {
   return (
     pathname === '/api/auth' ||
     pathname.startsWith('/api/auth/') ||
+    pathname === '/api/profile' ||
+    pathname.startsWith('/api/profile/') ||
     pathname === '/api/healthz' ||
     pathname === '/api/readyz'
   );
