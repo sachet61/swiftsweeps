@@ -3,12 +3,14 @@ import test from 'node:test';
 import type { GameAccount, GameCatalogItem } from '../types';
 import {
   applyGameCatalogRealtimeEvents,
+  applyServerGameCatalogResponse,
   countUnsavedCatalogChanges,
   filterEnabledGameAccounts,
   filterEnabledGames,
   mapDbRowToGameCatalogItem,
   mapGameCatalogItemToDbRow,
   mergeCatalogFromServerRows,
+  parseGameCatalogApiError,
 } from './gameCatalogUtils.ts';
 
 const SAMPLE_SEED: GameCatalogItem[] = [
@@ -58,7 +60,7 @@ test('mapGameCatalogItemToDbRow emits verified Supabase columns and omits invali
   assert.equal('enabled' in row, false);
 });
 
-test('mapDbRowToGameCatalogItem maps is_active=false to enabled=false and preserves seed links', () => {
+test('mapDbRowToGameCatalogItem maps is_active=false to enabled=false and preserves seed or API links', () => {
   const mapped = mapDbRowToGameCatalogItem(
     {
       id: 'gc_juwa',
@@ -77,6 +79,27 @@ test('mapDbRowToGameCatalogItem maps is_active=false to enabled=false and preser
   assert.equal(mapped.platform, 'Juwa777');
   assert.equal(mapped.gameUrl, 'https://dl.juwa777.com/');
   assert.equal(mapped.links?.length, 1);
+
+  const apiMapped = mapDbRowToGameCatalogItem(
+    {
+      id: 'gc_custom',
+      title: 'Custom Sweeps',
+      platform: 'Custom',
+      enabled: true,
+      iconUrl: '/images/games/juwa-v2.webp',
+      gameUrl: 'https://custom.example.com/play',
+      downloadUrl: 'https://custom.example.com/download',
+      links: [
+        { label: 'Web Play', url: 'https://custom.example.com/play' },
+        { label: 'Android APK', url: 'https://custom.example.com/download' },
+      ],
+    },
+    SAMPLE_SEED
+  );
+
+  assert.equal(apiMapped.gameUrl, 'https://custom.example.com/play');
+  assert.equal(apiMapped.downloadUrl, 'https://custom.example.com/download');
+  assert.equal(apiMapped.links?.length, 2);
 });
 
 test('mergeCatalogFromServerRows and applyGameCatalogRealtimeEvents sync disabled state across sessions', () => {
@@ -104,6 +127,35 @@ test('mergeCatalogFromServerRows and applyGameCatalogRealtimeEvents sync disable
   assert.equal(afterRealtime.length, 1);
   assert.equal(afterRealtime[0].id, 'gc_firekirin');
   assert.equal(afterRealtime[0].enabled, false);
+});
+
+test('applyServerGameCatalogResponse clears catalog when populated DB has 0 active games and keeps fallback when unpopulated', () => {
+  const cleared = applyServerGameCatalogResponse({
+    games: [],
+    catalogPopulated: true,
+    fallbackSeedCatalog: SAMPLE_SEED,
+    existingCatalog: SAMPLE_SEED,
+  });
+  assert.deepEqual(cleared, []);
+
+  const kept = applyServerGameCatalogResponse({
+    games: [],
+    catalogPopulated: false,
+    fallbackSeedCatalog: SAMPLE_SEED,
+    existingCatalog: SAMPLE_SEED,
+  });
+  assert.equal(kept.length, 2);
+});
+
+test('parseGameCatalogApiError extracts JSON messages and hides HTML error pages', () => {
+  assert.equal(
+    parseGameCatalogApiError(403, JSON.stringify({ message: 'Forbidden action' }), 'Fallback'),
+    'Forbidden action'
+  );
+  assert.equal(
+    parseGameCatalogApiError(503, '<!DOCTYPE html><html><body>Bad Gateway</body></html>', 'Fallback'),
+    'Game catalog API is temporarily unavailable.'
+  );
 });
 
 test('filterEnabledGames and filterEnabledGameAccounts exclude disabled games cleanly', () => {

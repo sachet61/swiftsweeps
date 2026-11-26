@@ -23,6 +23,7 @@ declare global {
   namespace Express {
     interface Request {
       authContext?: AuthContext;
+      optionalAuthError?: HttpError;
     }
   }
 }
@@ -87,6 +88,66 @@ export function createRequireAuthMiddleware(
             'Password reset is required before accessing this resource.',
           ),
         );
+        return;
+      }
+
+      req.authContext = {
+        session: {
+          id: sessionResult.session.id,
+          userId: sessionResult.session.userId,
+          expiresAt: toIsoDate(sessionResult.session.expiresAt),
+        },
+        user: appUser,
+      };
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+export function createOptionalAuthMiddleware(
+  auth: AuthRuntime['auth'],
+  userRepo: UserDirectoryRepo,
+): RequestHandler {
+  return async (
+    req: Request,
+    _res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      const sessionResult = await auth.api.getSession({
+        headers: fromNodeHeaders(req.headers),
+      });
+
+      if (!sessionResult?.session || !sessionResult.user) {
+        next();
+        return;
+      }
+
+      const appUser = await userRepo.findByAuthUserId(sessionResult.user.id);
+      if (!appUser) {
+        next();
+        return;
+      }
+
+      if (appUser.status !== 'active') {
+        req.optionalAuthError = new HttpError(
+          403,
+          'ACCOUNT_SUSPENDED',
+          'Account is suspended or inactive.',
+        );
+        next();
+        return;
+      }
+
+      if (appUser.passwordResetRequired) {
+        req.optionalAuthError = new HttpError(
+          403,
+          'PASSWORD_RESET_REQUIRED',
+          'Password reset is required before accessing this resource.',
+        );
+        next();
         return;
       }
 

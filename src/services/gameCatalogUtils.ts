@@ -41,29 +41,79 @@ export function mapDbRowToGameCatalogItem(
   const seedMatch = fallbackSeedCatalog.find((g) => g.id === row.id);
   const existingMatch = existingCatalog.find((g) => g.id === row.id);
 
-  const fallbackGameUrl =
-    existingMatch?.gameUrl || seedMatch?.gameUrl || '#';
-  const fallbackDownloadUrl =
-    existingMatch?.downloadUrl || seedMatch?.downloadUrl;
-  const fallbackLinks =
-    existingMatch?.links && existingMatch.links.length > 0
+  const rowLinks = Array.isArray(row.links)
+    ? row.links
+        .filter(
+          (l: any) =>
+            l &&
+            typeof l.label === 'string' &&
+            typeof l.url === 'string' &&
+            l.label.trim() &&
+            l.url.trim()
+        )
+        .map((l: any) => ({ label: l.label.trim(), url: l.url.trim() }))
+    : [];
+
+  const rowGameUrl =
+    typeof (row.gameUrl ?? row.game_url) === 'string' &&
+    (row.gameUrl ?? row.game_url).trim()
+      ? (row.gameUrl ?? row.game_url).trim()
+      : null;
+
+  const rowDownloadUrl =
+    typeof (row.downloadUrl ?? row.download_url) === 'string' &&
+    (row.downloadUrl ?? row.download_url).trim()
+      ? (row.downloadUrl ?? row.download_url).trim()
+      : null;
+
+  const resolvedGameUrl =
+    rowGameUrl ||
+    rowLinks[0]?.url ||
+    existingMatch?.gameUrl ||
+    seedMatch?.gameUrl ||
+    '#';
+  const resolvedDownloadUrl =
+    rowDownloadUrl ||
+    rowLinks.find((l: { label: string; url: string }) =>
+      l.label.toLowerCase().includes('download')
+    )?.url ||
+    rowLinks[1]?.url ||
+    existingMatch?.downloadUrl ||
+    seedMatch?.downloadUrl;
+  const resolvedLinks =
+    rowLinks.length > 0
+      ? rowLinks
+      : existingMatch?.links && existingMatch.links.length > 0
       ? existingMatch.links
       : seedMatch?.links && seedMatch.links.length > 0
       ? seedMatch.links
-      : [{ label: 'Web Play', url: fallbackGameUrl }];
+      : [{ label: 'Web Play', url: resolvedGameUrl }];
 
   const resolvedIcon = resolveGameImageUrl(
-    row.icon_url ||
-      row.image_url ||
-      existingMatch?.iconUrl ||
+    row.iconUrl ??
+      row.icon_url ??
+      row.imageUrl ??
+      row.image_url ??
+      existingMatch?.iconUrl ??
       seedMatch?.iconUrl
   );
   const resolvedImage = resolveGameImageUrl(
-    row.image_url ||
-      row.icon_url ||
-      existingMatch?.imageUrl ||
+    row.imageUrl ??
+      row.image_url ??
+      row.iconUrl ??
+      row.icon_url ??
+      existingMatch?.imageUrl ??
       seedMatch?.imageUrl
   );
+
+  const isEnabled =
+    row.enabled !== undefined
+      ? row.enabled !== false
+      : row.isActive !== undefined
+      ? row.isActive !== false
+      : row.is_active !== undefined
+      ? row.is_active !== false
+      : true;
 
   return {
     id: String(row.id),
@@ -75,20 +125,31 @@ export function mapDbRowToGameCatalogItem(
         seedMatch?.platform ||
         'General'
     ),
-    gameUrl: fallbackGameUrl,
-    downloadUrl: fallbackDownloadUrl,
-    links: fallbackLinks,
+    gameUrl: resolvedGameUrl,
+    downloadUrl: resolvedDownloadUrl,
+    links: resolvedLinks,
     description: String(
       row.description ??
         existingMatch?.description ??
         seedMatch?.description ??
         ''
     ),
-    enabled: row.is_active !== undefined ? row.is_active !== false : row.enabled !== false,
+    enabled: isEnabled,
     iconUrl: resolvedIcon,
     imageUrl: resolvedImage,
-    createdAt: row.created_at || existingMatch?.createdAt || seedMatch?.createdAt || new Date().toISOString(),
-    updatedAt: row.updated_at || row.created_at || existingMatch?.updatedAt || new Date().toISOString(),
+    createdAt:
+      row.createdAt ||
+      row.created_at ||
+      existingMatch?.createdAt ||
+      seedMatch?.createdAt ||
+      new Date().toISOString(),
+    updatedAt:
+      row.updatedAt ||
+      row.updated_at ||
+      row.createdAt ||
+      row.created_at ||
+      existingMatch?.updatedAt ||
+      new Date().toISOString(),
   };
 }
 
@@ -103,6 +164,60 @@ export function mergeCatalogFromServerRows(
   return validRows.map((row) =>
     mapDbRowToGameCatalogItem(row, fallbackSeedCatalog, existingCatalog)
   );
+}
+
+export function applyServerGameCatalogResponse(params: {
+  games: any[];
+  catalogPopulated: boolean;
+  fallbackSeedCatalog: GameCatalogItem[];
+  existingCatalog: GameCatalogItem[];
+}): GameCatalogItem[] {
+  const validRows = Array.isArray(params.games)
+    ? params.games.filter((r) => r && r.id)
+    : [];
+
+  if (validRows.length === 0) {
+    return params.catalogPopulated ? [] : params.existingCatalog;
+  }
+
+  return validRows.map((row) =>
+    mapDbRowToGameCatalogItem(
+      row,
+      params.fallbackSeedCatalog,
+      params.existingCatalog
+    )
+  );
+}
+
+export function parseGameCatalogApiError(
+  status: number,
+  rawText: string,
+  fallbackMessage: string
+): string {
+  const trimmed = rawText.trim();
+  if (
+    trimmed.startsWith('<!doctype') ||
+    trimmed.startsWith('<!DOCTYPE') ||
+    trimmed.startsWith('<html')
+  ) {
+    return status >= 500
+      ? 'Game catalog API is temporarily unavailable.'
+      : fallbackMessage;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as { message?: unknown; error?: unknown };
+    if (typeof parsed?.message === 'string' && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+    if (typeof parsed?.error === 'string' && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+  } catch {
+    // Ignore non-JSON error text
+  }
+
+  return fallbackMessage;
 }
 
 export function applyGameCatalogRealtimeEvents(

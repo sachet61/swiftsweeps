@@ -109,7 +109,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     { label: 'Web Play', url: 'https://games.swiftsweeps.com' },
   ]);
 
-  // Fetch authoritative catalog from Supabase on mount and stay synchronized
+  // Fetch authoritative catalog from the platform API on mount and stay synchronized
   useEffect(() => {
     let active = true;
     setIsRefreshingServer(true);
@@ -718,7 +718,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
             </div>
 
             <p className="text-xs text-slate-300 leading-relaxed">
-              Are you sure you want to delete <span className="font-bold text-white font-mono">"{gameToDelete.title}"</span>? This will permanently remove the game title and all its play &amp; download links from the master platform catalog and the Supabase database.
+              Are you sure you want to delete <span className="font-bold text-white font-mono">"{gameToDelete.title}"</span>? This will permanently remove the game title and all its play &amp; download links from the master platform catalog and the platform database.
             </p>
 
             <div className="flex items-center justify-end gap-2.5 pt-2">

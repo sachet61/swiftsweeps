@@ -26,13 +26,15 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   const migrationsDir = path.resolve(process.cwd(), 'db', 'migrations');
   const files = await loadAndValidateMigrationFiles(migrationsDir);
 
-  assert.equal(files.length, 2);
+  assert.equal(files.length, 3);
   assert.equal(files[0]!.version, '0001');
   assert.equal(files[1]!.version, '0002');
+  assert.equal(files[2]!.version, '0003');
 
-  const combinedSql = `${files[0]!.sql}\n${files[1]!.sql}`;
+  const combinedSql = files.map((file) => file.sql).join('\n');
   // Preserve financial precision and primary key / FK semantics
   assert.match(combinedSql, /NUMERIC\(12,\s*2\)/);
+  assert.match(combinedSql, /NUMERIC\(5,\s*2\)/);
   assert.match(combinedSql, /id TEXT PRIMARY KEY/);
   assert.match(combinedSql, /REFERENCES public\.users\(id\) ON DELETE CASCADE/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.auth_user_links/);
@@ -40,6 +42,7 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.transactions/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.topups/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.withdrawals/);
+  assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.game_catalog/);
 });
 
 test('validateMigrationSqlContent rejects floating-point money, Supabase auth/storage, and destructive drops', () => {

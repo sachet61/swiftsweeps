@@ -119,6 +119,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
       setGames(filterEnabledGames(dataService.getGameCatalog()));
     };
     syncCatalog();
+    void dataService.fetchGameCatalogFromServer();
 
     // Password recovery listener
     const handleRecovery = () => {

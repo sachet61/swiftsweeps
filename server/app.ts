@@ -7,10 +7,14 @@ import {
   type EmailDeliveryAdapter,
 } from './auth/emailDelivery.js';
 import { UserDirectoryRepo } from './auth/userDirectoryRepo.js';
+import { GameCatalogRepo } from './catalog/gameCatalogRepo.js';
 import type { ServerConfig } from './config/env.js';
 import type { DatabasePool } from './db/pool.js';
 import type { Logger } from './logging/logger.js';
-import { createRequireAuthMiddleware } from './middleware/auth.js';
+import {
+  createOptionalAuthMiddleware,
+  createRequireAuthMiddleware,
+} from './middleware/auth.js';
 import {
   createErrorHandler,
   notFoundHandler,
@@ -22,6 +26,7 @@ import {
 } from './middleware/security.js';
 import { createAdminAuthRouter } from './routes/adminAuth.js';
 import { createAuthProfileRouter } from './routes/authProfile.js';
+import { createGameCatalogRouter } from './routes/gameCatalog.js';
 import { createHealthRouter } from './routes/health.js';
 import { createProfileRouter } from './routes/profile.js';
 
@@ -56,6 +61,7 @@ export function createApiApp({
   app.set('trust proxy', config.trustProxy);
 
   const userRepo = new UserDirectoryRepo(pool);
+  const gameCatalogRepo = new GameCatalogRepo(pool);
   const emailDelivery =
     emailDeliveryOverride ?? createEmailDeliveryAdapter(config, logger);
   const authRuntime = createAuthInstance({
@@ -67,6 +73,7 @@ export function createApiApp({
     authDatabaseOverride,
   });
   const requireAuth = createRequireAuthMiddleware(authRuntime.auth, userRepo);
+  const optionalAuth = createOptionalAuthMiddleware(authRuntime.auth, userRepo);
   const authNodeHandler = toNodeHandler(authRuntime.auth);
 
   app.use(createRequestContextMiddleware(logger));
@@ -107,6 +114,15 @@ export function createApiApp({
     createProfileRouter({
       userRepo,
       requireAuth,
+    }),
+  );
+  app.use(
+    '/api',
+    createGameCatalogRouter({
+      gameCatalogRepo,
+      userRepo,
+      requireAuth,
+      optionalAuth,
     }),
   );
 
