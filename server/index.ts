@@ -7,6 +7,7 @@ import {
   loadServerConfig,
   type ServerConfig,
 } from './config/env.js';
+import { loadLocalDotEnv } from './config/loadDotEnv.js';
 import { closePgPool, createPgPool, type DatabasePool } from './db/pool.js';
 import { createLogger, type Logger } from './logging/logger.js';
 
@@ -112,6 +113,7 @@ function isMainEntrypoint(): boolean {
 
 async function main(): Promise<void> {
   try {
+    loadLocalDotEnv();
     const runtime = await startApiServer(process.env);
 
     const handleSignal = (signal: string): void => {

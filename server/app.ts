@@ -69,7 +69,7 @@ export function createApiApp({
   const authNodeHandler = toNodeHandler(authRuntime.auth);
 
   app.use(createRequestContextMiddleware(logger));
-  app.use(createSecurityMiddleware(config));
+  app.use(createSecurityMiddleware(config, logger));
 
   // Mount server-resolved profile endpoint before Better Auth catch-all.
   app.use('/api', createAuthProfileRouter(requireAuth));

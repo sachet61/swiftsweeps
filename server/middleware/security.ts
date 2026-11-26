@@ -1,5 +1,6 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { ServerConfig } from '../config/env.js';
+import type { Logger } from '../logging/logger.js';
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -18,6 +19,19 @@ function parseOriginFromHeader(rawUrl: string | undefined): string | null {
   }
 }
 
+function buildAllowedOrigins(config: ServerConfig): Set<string> {
+  const allowed = new Set<string>();
+  if (config.appOrigin) {
+    allowed.add(config.appOrigin);
+  }
+  for (const origin of config.trustedOrigins ?? []) {
+    if (origin) {
+      allowed.add(origin);
+    }
+  }
+  return allowed;
+}
+
 function sendOriginForbidden(
   req: Request,
   res: Response,
@@ -33,7 +47,12 @@ function sendOriginForbidden(
   });
 }
 
-export function createSecurityMiddleware(config: ServerConfig): RequestHandler {
+export function createSecurityMiddleware(
+  config: ServerConfig,
+  logger?: Logger,
+): RequestHandler {
+  const allowedOrigins = buildAllowedOrigins(config);
+
   return (req: Request, res: Response, next: NextFunction): void => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
@@ -45,14 +64,17 @@ export function createSecurityMiddleware(config: ServerConfig): RequestHandler {
     res.setHeader('Cache-Control', 'no-store');
 
     const rawOrigin = req.header('origin')?.trim();
+    const normalizedOrigin = rawOrigin
+      ? parseOriginFromHeader(rawOrigin) ?? rawOrigin
+      : undefined;
     const secFetchSite = req.header('sec-fetch-site')?.trim().toLowerCase();
     const refererOrigin = parseOriginFromHeader(req.header('referer'));
     const hasCookieHeader = Boolean(req.header('cookie')?.trim());
 
-    if (rawOrigin) {
-      if (rawOrigin === config.appOrigin) {
+    if (normalizedOrigin) {
+      if (allowedOrigins.has(normalizedOrigin)) {
         res.setHeader('Vary', 'Origin');
-        res.setHeader('Access-Control-Allow-Origin', config.appOrigin);
+        res.setHeader('Access-Control-Allow-Origin', normalizedOrigin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
         res.setHeader(
           'Access-Control-Allow-Methods',
@@ -68,6 +90,14 @@ export function createSecurityMiddleware(config: ServerConfig): RequestHandler {
           return;
         }
       } else if (req.method === 'OPTIONS' || MUTATING_METHODS.has(req.method)) {
+        logger?.warn('origin_forbidden', {
+          requestId: req.requestId,
+          method: req.method,
+          path: req.path,
+          reason: 'ORIGIN_NOT_IN_ALLOWLIST',
+          receivedOrigin: normalizedOrigin,
+          allowedOrigins: [...allowedOrigins],
+        });
         sendOriginForbidden(
           req,
           res,
@@ -80,6 +110,13 @@ export function createSecurityMiddleware(config: ServerConfig): RequestHandler {
 
     if (MUTATING_METHODS.has(req.method)) {
       if (secFetchSite === 'cross-site') {
+        logger?.warn('origin_forbidden', {
+          requestId: req.requestId,
+          method: req.method,
+          path: req.path,
+          reason: 'CROSS_SITE_FETCH',
+          secFetchSite,
+        });
         sendOriginForbidden(
           req,
           res,
@@ -89,7 +126,15 @@ export function createSecurityMiddleware(config: ServerConfig): RequestHandler {
         return;
       }
 
-      if (refererOrigin && refererOrigin !== config.appOrigin) {
+      if (refererOrigin && !allowedOrigins.has(refererOrigin)) {
+        logger?.warn('origin_forbidden', {
+          requestId: req.requestId,
+          method: req.method,
+          path: req.path,
+          reason: 'REFERER_NOT_IN_ALLOWLIST',
+          receivedRefererOrigin: refererOrigin,
+          allowedOrigins: [...allowedOrigins],
+        });
         sendOriginForbidden(
           req,
           res,
@@ -100,11 +145,24 @@ export function createSecurityMiddleware(config: ServerConfig): RequestHandler {
       }
 
       if (hasCookieHeader) {
-        const originMatches = rawOrigin === config.appOrigin;
-        const refererMatches = refererOrigin === config.appOrigin;
+        const originMatches = Boolean(
+          normalizedOrigin && allowedOrigins.has(normalizedOrigin),
+        );
+        const refererMatches = Boolean(
+          refererOrigin && allowedOrigins.has(refererOrigin),
+        );
         const fetchSiteMatches = secFetchSite === 'same-origin';
 
         if (!originMatches && !refererMatches && !fetchSiteMatches) {
+          logger?.warn('origin_forbidden', {
+            requestId: req.requestId,
+            method: req.method,
+            path: req.path,
+            reason: 'CSRF_ORIGIN_REQUIRED',
+            receivedOrigin: normalizedOrigin ?? null,
+            receivedRefererOrigin: refererOrigin ?? null,
+            secFetchSite: secFetchSite ?? null,
+          });
           sendOriginForbidden(
             req,
             res,

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import pg from 'pg';
 import type { PgSslMode } from '../config/env.js';
+import { loadLocalDotEnv } from '../config/loadDotEnv.js';
 import { createLogger } from '../logging/logger.js';
 import {
   MigrationValidationError,
@@ -55,6 +56,7 @@ function buildSslOption(
 }
 
 async function runCli(): Promise<void> {
+  loadLocalDotEnv();
   const command = (process.argv[2]?.trim().toLowerCase() || 'check') as CliCommand;
   if (command !== 'check' && command !== 'status' && command !== 'up') {
     process.stderr.write(

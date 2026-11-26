@@ -3,12 +3,14 @@ import { createAuthInstance } from '../auth/authInstance.js';
 import { createEmailDeliveryAdapter } from '../auth/emailDelivery.js';
 import { UserDirectoryRepo } from '../auth/userDirectoryRepo.js';
 import { ConfigValidationError, loadServerConfig } from '../config/env.js';
+import { loadLocalDotEnv } from '../config/loadDotEnv.js';
 import { closePgPool, createPgPool } from './pool.js';
 import { createLogger } from '../logging/logger.js';
 
 type AuthMigrateCommand = 'status' | 'up' | 'sql';
 
 async function run(): Promise<void> {
+  loadLocalDotEnv();
   const command = (process.argv[2]?.trim().toLowerCase() || 'status') as AuthMigrateCommand;
   if (command !== 'status' && command !== 'up' && command !== 'sql') {
     process.stderr.write(

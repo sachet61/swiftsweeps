@@ -9,6 +9,7 @@ export interface ServerConfig {
   host: string;
   port: number;
   appOrigin: string;
+  trustedOrigins?: string[];
   /**
    * Express `trust proxy` configuration for reverse-proxied deployments behind Nginx.
    * Defaults to `'loopback'` (trusts only 127.0.0.1 / ::1) so arbitrary client
@@ -154,44 +155,97 @@ function parseTrustProxy(
   return 'loopback';
 }
 
-function parseAppOrigin(
-  raw: string | undefined,
-  nodeEnv: NodeEnv,
+function parseSingleOrigin(
+  rawOrigin: string,
+  varName: string,
   issues: string[],
-): string {
-  const trimmed = raw?.trim();
+): string | null {
+  const trimmed = rawOrigin.trim().replace(/^['"]|['"]$/g, '').trim();
   if (!trimmed) {
-    if (nodeEnv === 'production') {
-      issues.push('APP_ORIGIN is required in production');
-      return '';
-    }
-    return 'http://localhost:3000';
+    return null;
   }
 
-  if (trimmed === '*') {
-    issues.push('APP_ORIGIN must not be a wildcard (*)');
-    return '';
+  if (trimmed === '*' || trimmed.includes('*')) {
+    issues.push(`${varName} must not contain wildcards (*)`);
+    return null;
   }
 
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      issues.push('APP_ORIGIN must use http:// or https://');
-      return '';
+      issues.push(`${varName} must use http:// or https://`);
+      return null;
     }
     if (parsed.username || parsed.password) {
-      issues.push('APP_ORIGIN must not contain credentials');
-      return '';
+      issues.push(`${varName} must not contain credentials`);
+      return null;
     }
     if (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
-      issues.push('APP_ORIGIN must be an origin only (no path, query, or hash)');
-      return '';
+      issues.push(`${varName} must contain origins only (no path, query, or hash)`);
+      return null;
     }
     return parsed.origin;
   } catch {
-    issues.push('APP_ORIGIN must be a valid URL origin');
-    return '';
+    issues.push(`${varName} must be a valid URL origin`);
+    return null;
   }
+}
+
+function parseOriginList(
+  raw: string | undefined,
+  varName: string,
+  issues: string[],
+): string[] {
+  if (!raw || !raw.trim()) {
+    return [];
+  }
+
+  const parts = raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+
+  const origins: string[] = [];
+  for (const part of parts) {
+    const parsed = parseSingleOrigin(part, varName, issues);
+    if (parsed && !origins.includes(parsed)) {
+      origins.push(parsed);
+    }
+  }
+  return origins;
+}
+
+function parseAppOrigins(
+  envSource: Record<string, string | undefined>,
+  nodeEnv: NodeEnv,
+  issues: string[],
+): { appOrigin: string; trustedOrigins: string[] } {
+  const primaryList = parseOriginList(envSource.APP_ORIGIN, 'APP_ORIGIN', issues);
+  const extraOrigins = [
+    ...parseOriginList(envSource.TRUSTED_ORIGINS, 'TRUSTED_ORIGINS', issues),
+    ...parseOriginList(envSource.ALLOWED_ORIGINS, 'ALLOWED_ORIGINS', issues),
+    ...parseOriginList(envSource.CORS_ORIGINS, 'CORS_ORIGINS', issues),
+  ];
+
+  let appOrigin = primaryList[0] ?? '';
+  if (!appOrigin) {
+    if (nodeEnv === 'production') {
+      if (!envSource.APP_ORIGIN?.trim()) {
+        issues.push('APP_ORIGIN is required in production');
+      }
+    } else {
+      appOrigin = 'http://localhost:3000';
+    }
+  }
+
+  const trustedOrigins: string[] = [];
+  for (const origin of [appOrigin, ...primaryList, ...extraOrigins]) {
+    if (origin && !trustedOrigins.includes(origin)) {
+      trustedOrigins.push(origin);
+    }
+  }
+
+  return { appOrigin, trustedOrigins };
 }
 
 function parseDatabaseUrl(raw: string | undefined, issues: string[]): string {
@@ -271,8 +325,19 @@ export function loadServerConfig(
     issues.push('HOST must not contain whitespace');
   }
 
-  const port = parseIntegerInRange(envSource.PORT, 'PORT', 4000, 1, 65535, issues);
-  const appOrigin = parseAppOrigin(envSource.APP_ORIGIN, nodeEnv, issues);
+  const port = parseIntegerInRange(
+    envSource.API_PORT ?? envSource.PORT,
+    envSource.API_PORT !== undefined ? 'API_PORT' : 'PORT',
+    4000,
+    1,
+    65535,
+    issues,
+  );
+  const { appOrigin, trustedOrigins } = parseAppOrigins(
+    envSource,
+    nodeEnv,
+    issues,
+  );
   const trustProxy = parseTrustProxy(envSource.TRUST_PROXY, issues);
   const databaseUrl = parseDatabaseUrl(envSource.DATABASE_URL, issues);
 
@@ -433,6 +498,7 @@ export function loadServerConfig(
     host,
     port,
     appOrigin,
+    trustedOrigins,
     trustProxy,
     databaseUrl,
     pgPoolMax,

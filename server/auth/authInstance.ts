@@ -84,12 +84,18 @@ export function createAuthInstance({
   const trustedProxies =
     config.trustProxy === 'loopback' ? ['127.0.0.1', '::1'] : undefined;
 
+  const trustedOrigins = Array.from(
+    new Set(
+      [config.appOrigin, ...(config.trustedOrigins ?? [])].filter(Boolean),
+    ),
+  );
+
   const authOptions: BetterAuthOptions = {
     appName: 'SwiftSweeps',
     baseURL: config.appOrigin,
     basePath: '/api/auth',
     secret: config.authSecret,
-    trustedOrigins: [config.appOrigin],
+    trustedOrigins,
     database: databaseConfig,
     disabledPaths: ['/sign-in/email-otp'],
     telemetry: {

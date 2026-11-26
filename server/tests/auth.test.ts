@@ -1194,3 +1194,77 @@ test('production HTTPS configuration sets Secure cookie attribute', async () => 
     },
   );
 });
+
+test('auth endpoints allow configured secondary trustedOrigins and reject unconfigured origins', async () => {
+  const emailCapture = createCaptureEmailAdapter();
+  const primaryOrigin = 'https://swiftsweeps.example.com';
+  const secondaryOrigin = 'https://www.swiftsweeps.example.com';
+
+  await withTestServer(
+    {
+      config: {
+        nodeEnv: 'production',
+        appOrigin: primaryOrigin,
+        trustedOrigins: [primaryOrigin, secondaryOrigin],
+      },
+      emailDeliveryOverride: emailCapture.adapter,
+    },
+    async ({ baseUrl }) => {
+      const blockedSignUp = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
+        method: 'POST',
+        headers: {
+          Origin: 'https://untrusted.example.com',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: 'Blocked Origin User',
+          email: 'blocked-origin@example.com',
+          password: 'Password123!',
+        }),
+      });
+      assert.equal(blockedSignUp.status, 403);
+      const blockedJson = (await blockedSignUp.json()) as {
+        error: { code: string; message: string };
+      };
+      assert.equal(blockedJson.error.code, 'ORIGIN_FORBIDDEN');
+      assert.equal(blockedJson.error.message, 'Origin is not allowed.');
+
+      const cookie = await signUpAndVerifyCustomer(
+        baseUrl,
+        secondaryOrigin,
+        emailCapture,
+        {
+          name: 'Blithe Sweeps',
+          email: 'blithesweeps@example.com',
+          password: 'Password123!',
+        },
+      );
+
+      const meRes = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: {
+          Origin: secondaryOrigin,
+          Cookie: cookie,
+        },
+      });
+      assert.equal(meRes.status, 200);
+      assert.equal(
+        meRes.headers.get('access-control-allow-origin'),
+        secondaryOrigin,
+      );
+      const meJson = (await meRes.json()) as { user: { email: string } };
+      assert.equal(meJson.user.email, 'blithesweeps@example.com');
+
+      const signOutRes = await fetch(`${baseUrl}/api/auth/sign-out`, {
+        method: 'POST',
+        headers: {
+          Origin: secondaryOrigin,
+          Cookie: cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      });
+      assert.equal(signOutRes.status, 200);
+    },
+  );
+});
+

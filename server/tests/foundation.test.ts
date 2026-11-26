@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { createApiApp } from '../app.js';
 import {
@@ -8,6 +11,7 @@ import {
   loadServerConfig,
   type ServerConfig,
 } from '../config/env.js';
+import { loadLocalDotEnv } from '../config/loadDotEnv.js';
 import { closePgPool, type DatabasePool } from '../db/pool.js';
 import { createLogger } from '../logging/logger.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
@@ -377,3 +381,152 @@ test('validateRequestBody rejects invalid input via HttpError and closePgPool cl
   );
   assert.equal(ended, true);
 });
+
+test('loadServerConfig prefers API_PORT over container PORT when both are provided', () => {
+  const cfg = loadServerConfig({
+    NODE_ENV: 'development',
+    PORT: '8080',
+    API_PORT: '4000',
+    DATABASE_URL: 'postgres://user:pass@127.0.0.1:5432/app',
+  });
+  assert.equal(cfg.port, 4000);
+});
+
+test('loadServerConfig parses comma-separated APP_ORIGIN and TRUSTED_ORIGINS and rejects wildcards', () => {
+  const cfg = loadServerConfig({
+    NODE_ENV: 'production',
+    APP_ORIGIN: ' "https://swiftsweeps.example.com/" , https://app.swiftsweeps.example.com ',
+    TRUSTED_ORIGINS: 'https://www.swiftsweeps.example.com/, https://swiftsweeps.example.com',
+    ALLOWED_ORIGINS: 'https://admin.swiftsweeps.example.com',
+    DATABASE_URL: 'postgres://user:pass@127.0.0.1:5432/app',
+    AUTH_SECRET: 'a-strong-random-production-secret-string-32chars',
+  });
+
+  assert.equal(cfg.appOrigin, 'https://swiftsweeps.example.com');
+  assert.deepEqual(cfg.trustedOrigins, [
+    'https://swiftsweeps.example.com',
+    'https://app.swiftsweeps.example.com',
+    'https://www.swiftsweeps.example.com',
+    'https://admin.swiftsweeps.example.com',
+  ]);
+
+  assert.throws(
+    () =>
+      loadServerConfig({
+        NODE_ENV: 'production',
+        APP_ORIGIN: 'https://swiftsweeps.example.com',
+        TRUSTED_ORIGINS: 'https://*.swiftsweeps.example.com',
+        DATABASE_URL: 'postgres://user:pass@127.0.0.1:5432/app',
+        AUTH_SECRET: 'a-strong-random-production-secret-string-32chars',
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof ConfigValidationError);
+      assert.match(err.message, /TRUSTED_ORIGINS must not contain wildcards/);
+      return true;
+    },
+  );
+});
+
+test('security middleware allows configured trustedOrigins, echoes exact Origin, and logs blocked origins', async () => {
+  const mockPool: DatabasePool = {
+    async query() {
+      return { rows: [{ ok: 1 }] };
+    },
+    async end() {},
+  };
+  (mockPool as unknown as { connect: () => Promise<never> }).connect = async () => {
+    throw new Error('connect not used in multi-origin security test');
+  };
+
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+  const app = createApiApp({
+    config: createTestConfig({
+      appOrigin: 'https://swiftsweeps.example.com',
+      trustedOrigins: [
+        'https://swiftsweeps.example.com',
+        'https://www.swiftsweeps.example.com',
+      ],
+    }),
+    logger: createSilentLogger(stdoutLines, stderrLines),
+    pool: mockPool,
+  });
+
+  await withServer(app, async (baseUrl) => {
+    const preflightRes = await fetch(`${baseUrl}/api/healthz`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://www.swiftsweeps.example.com' },
+    });
+    assert.equal(preflightRes.status, 204);
+    assert.equal(
+      preflightRes.headers.get('access-control-allow-origin'),
+      'https://www.swiftsweeps.example.com',
+    );
+    assert.equal(
+      preflightRes.headers.get('access-control-allow-credentials'),
+      'true',
+    );
+
+    const allowedPostRes = await fetch(`${baseUrl}/api/does-not-exist`, {
+      method: 'POST',
+      headers: {
+        Origin: 'https://www.swiftsweeps.example.com',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+    // Passed security middleware and hit API 404 handler instead of 403 ORIGIN_FORBIDDEN
+    assert.equal(allowedPostRes.status, 404);
+    assert.equal(
+      allowedPostRes.headers.get('access-control-allow-origin'),
+      'https://www.swiftsweeps.example.com',
+    );
+
+    const blockedRes = await fetch(`${baseUrl}/api/healthz`, {
+      method: 'POST',
+      headers: {
+        Origin: 'https://rogue.example.net',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+    assert.equal(blockedRes.status, 403);
+    const logs = [...stdoutLines, ...stderrLines].join('\n');
+    assert.match(logs, /"event":"origin_forbidden"/);
+    assert.match(logs, /https:\/\/rogue\.example\.net/);
+  });
+});
+
+test('loadLocalDotEnv loads variables from .env without overwriting existing process.env', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'swiftsweeps-env-'));
+  const prevExisting = process.env.SWIFTSWEEPS_TEST_EXISTING;
+  const prevLoaded = process.env.SWIFTSWEEPS_TEST_LOADED;
+
+  try {
+    fs.writeFileSync(
+      path.join(tempDir, '.env'),
+      'SWIFTSWEEPS_TEST_EXISTING=from_dotenv\nSWIFTSWEEPS_TEST_LOADED=from_dotenv\n',
+      'utf8',
+    );
+    process.env.SWIFTSWEEPS_TEST_EXISTING = 'from_process';
+    delete process.env.SWIFTSWEEPS_TEST_LOADED;
+
+    loadLocalDotEnv(tempDir);
+
+    assert.equal(process.env.SWIFTSWEEPS_TEST_EXISTING, 'from_process');
+    assert.equal(process.env.SWIFTSWEEPS_TEST_LOADED, 'from_dotenv');
+  } finally {
+    if (prevExisting === undefined) {
+      delete process.env.SWIFTSWEEPS_TEST_EXISTING;
+    } else {
+      process.env.SWIFTSWEEPS_TEST_EXISTING = prevExisting;
+    }
+    if (prevLoaded === undefined) {
+      delete process.env.SWIFTSWEEPS_TEST_LOADED;
+    } else {
+      process.env.SWIFTSWEEPS_TEST_LOADED = prevLoaded;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
