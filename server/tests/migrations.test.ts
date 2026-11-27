@@ -26,7 +26,7 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   const migrationsDir = path.resolve(process.cwd(), 'db', 'migrations');
   const files = await loadAndValidateMigrationFiles(migrationsDir);
 
-  assert.equal(files.length, 12);
+  assert.equal(files.length, 14);
   assert.equal(files[0]!.version, '0001');
   assert.equal(files[1]!.version, '0002');
   assert.equal(files[2]!.version, '0003');
@@ -39,6 +39,8 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   assert.equal(files[9]!.version, '0010');
   assert.equal(files[10]!.version, '0011');
   assert.equal(files[11]!.version, '0012');
+  assert.equal(files[12]!.version, '0013');
+  assert.equal(files[13]!.version, '0014');
 
   const combinedSql = files.map((file) => file.sql).join('\n');
   // Preserve financial precision and primary key / FK semantics
@@ -60,7 +62,12 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.notifications/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.push_subscriptions/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.conversations/);
+  assert.match(combinedSql, /ADD COLUMN IF NOT EXISTS pinned_message_id TEXT NULL/);
+  assert.match(combinedSql, /ADD COLUMN IF NOT EXISTS pinned_rules_version TEXT NULL/);
+  assert.match(combinedSql, /idx_conversations_pinned_message_id/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.messages/);
+  assert.match(combinedSql, /ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ NULL/);
+  assert.match(combinedSql, /ADD COLUMN IF NOT EXISTS delivery_status TEXT NOT NULL DEFAULT 'sent'/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.chat_attachments/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.faked_cashouts/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.storage_objects/);

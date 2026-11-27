@@ -77,6 +77,7 @@ export interface ApiAppDependencies {
   emailDeliveryOverride?: EmailDeliveryAdapter;
   webPushSenderOverride?: WebPushSender;
   telegramFetchOverride?: TelegramFetchFn;
+  telegramNowFnOverride?: () => number;
   wheelNowFnOverride?: () => number;
   wheelRandomUnitOverride?: () => number;
   extraRoutes?: (
@@ -100,6 +101,7 @@ export function createApiApp({
   emailDeliveryOverride,
   webPushSenderOverride,
   telegramFetchOverride,
+  telegramNowFnOverride,
   wheelNowFnOverride,
   wheelRandomUnitOverride,
   extraRoutes,
@@ -276,6 +278,7 @@ export function createApiApp({
       chatEvents,
       requireAuth,
       realtimeEvents,
+      appConfigRepo,
     }),
   );
   app.use(
@@ -303,6 +306,8 @@ export function createApiApp({
       requireAuth,
       realtimeEvents,
       telegramFetch: telegramFetchOverride,
+      logger,
+      nowFn: telegramNowFnOverride,
     }),
   );
   app.use(

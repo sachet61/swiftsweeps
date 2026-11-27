@@ -7,6 +7,8 @@ import {
 } from '../../services/gameCatalogUtils';
 import { useVerificationResolution } from '../../hooks/useVerificationResolution';
 import { LiveCashoutFeedList } from '../../components/common/LiveCashoutFeedList';
+import { CashoutRulesShowcase } from '../../components/common/CashoutRulesShowcase';
+import { normalizeCashoutRulesConfig } from '../../utils/cashoutRulesUtils';
 import {
   ArrowUpFromLine,
   CheckCircle2,
@@ -23,6 +25,7 @@ import {
   MessageCircle,
   Sparkles,
   Loader2,
+  Scale,
   X,
 } from 'lucide-react';
 
@@ -92,6 +95,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [selectedTrackingReq, setSelectedTrackingReq] = useState<WithdrawalRequest | null>(null);
+  const [showCashoutRulesModal, setShowCashoutRulesModal] = useState(false);
 
   const selectedGameAccount = registeredGameAccounts.find((g) => g.id === selectedGameId);
   const selectedCatalogGame = gameCatalog.find((g) => g.id === selectedGameId);
@@ -100,6 +104,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
   const [, setHistoryVersion] = useState(0);
 
   useEffect(() => {
+    void dataService.fetchAppConfigFromServer();
     void dataService.fetchWithdrawalsFromServer({
       customerId: currentUser.id,
       limit: 25,
@@ -113,7 +118,9 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
 
   const parsedAmount = parseFloat(amount) || 0;
   const withdrawalHistory = dataService.getWithdrawalRequests(currentUser.id);
-  const showLiveFeed = Boolean(dataService.getAppConfig().cashoutFeed?.enabled);
+  const appConfig = dataService.getAppConfig();
+  const cashoutRules = normalizeCashoutRulesConfig(appConfig.cashoutRules);
+  const showLiveFeed = Boolean(appConfig.cashoutFeed?.enabled);
   const trackingCardRef = React.useRef<HTMLDivElement>(null);
 
   const handleSelectTrackingReq = (req: WithdrawalRequest) => {
@@ -302,7 +309,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
           </span>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex flex-wrap items-center gap-3 shrink-0">
           {!lastPaymentMethod && (
             <button
               type="button"
@@ -310,6 +317,16 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
               className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-bold text-xs transition-colors shadow-sm"
             >
               Deposit First &rarr;
+            </button>
+          )}
+          {cashoutRules.enabled && (
+            <button
+              type="button"
+              onClick={() => setShowCashoutRulesModal(true)}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-200 hover:text-white transition-colors cursor-pointer"
+            >
+              <Scale className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>Cashout Limits</span>
             </button>
           )}
           <button
@@ -431,6 +448,19 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
                 </span>
               </label>
             </div>
+
+            {cashoutRules.enabled && (
+              <div className="px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-300 flex flex-wrap items-center justify-between gap-2">
+                <span>{cashoutRules.voidExcessWarning}</span>
+                <button
+                  type="button"
+                  onClick={() => setShowCashoutRulesModal(true)}
+                  className="text-amber-400 hover:text-amber-300 font-semibold whitespace-nowrap cursor-pointer"
+                >
+                  View tier limits &rarr;
+                </button>
+              </div>
+            )}
 
             {/* Email Verification Warning for Cashouts (only shown once confirmed unverified) */}
             {verificationUi.showCashoutWarning && (
@@ -599,6 +629,64 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {showCashoutRulesModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm"
+          onClick={() => setShowCashoutRulesModal(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Cashout and redemption limits"
+            onClick={(e) => e.stopPropagation()}
+            className="relative w-full max-w-2xl rounded-2xl bg-[#0B1222] border border-slate-800 p-4 sm:p-5 shadow-2xl space-y-4 safe-modal-panel overflow-y-auto overscroll-contain"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-slate-400">
+                Withdrawal Eligibility &amp; Caps
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowCashoutRulesModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                aria-label="Close cashout rules"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <CashoutRulesShowcase
+              rules={cashoutRules}
+              compact
+              onContactSupport={() => {
+                setShowCashoutRulesModal(false);
+                onNavigateTab('chat');
+              }}
+            />
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCashoutRulesModal(false);
+                  onNavigateTab('rules');
+                }}
+                className="text-xs font-semibold text-indigo-300 hover:text-indigo-200 transition-colors"
+              >
+                Open Full Platform Rules &rarr;
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowCashoutRulesModal(false)}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition-colors"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

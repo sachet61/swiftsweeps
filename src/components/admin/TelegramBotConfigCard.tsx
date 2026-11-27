@@ -23,6 +23,7 @@ export const TelegramBotConfigCard: React.FC = () => {
   const [botToken, setBotToken] = useState('');
   const [channelId, setChannelId] = useState('');
   const [isEnabled, setIsEnabled] = useState(true);
+  const [suppressionWindowMinutes, setSuppressionWindowMinutes] = useState<number>(5);
   const [showToken, setShowToken] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
 
@@ -55,9 +56,17 @@ export const TelegramBotConfigCard: React.FC = () => {
           if (cfg.botToken) setBotToken(cfg.botToken);
           if (cfg.channelId) setChannelId(cfg.channelId);
           if (cfg.enabled !== undefined) setIsEnabled(cfg.enabled);
+          if (typeof cfg.suppressionWindowMinutes === 'number') {
+            setSuppressionWindowMinutes(cfg.suppressionWindowMinutes);
+          } else if (typeof s?.suppressionWindowMinutes === 'number') {
+            setSuppressionWindowMinutes(s.suppressionWindowMinutes);
+          }
           if (cfg.updatedAt) setLastSavedTime(cfg.updatedAt);
         } else if (s.channelId) {
           setChannelId(s.channelId);
+          if (typeof s.suppressionWindowMinutes === 'number') {
+            setSuppressionWindowMinutes(s.suppressionWindowMinutes);
+          }
         }
       } catch (err) {
         console.warn('Error loading Telegram configuration:', err);
@@ -85,6 +94,11 @@ export const TelegramBotConfigCard: React.FC = () => {
         if (cfg.botToken && !botToken) setBotToken(cfg.botToken);
         if (cfg.channelId && !channelId) setChannelId(cfg.channelId);
         if (cfg.enabled !== undefined) setIsEnabled(cfg.enabled);
+        if (typeof cfg.suppressionWindowMinutes === 'number') {
+          setSuppressionWindowMinutes(cfg.suppressionWindowMinutes);
+        } else if (typeof s?.suppressionWindowMinutes === 'number') {
+          setSuppressionWindowMinutes(s.suppressionWindowMinutes);
+        }
         if (cfg.updatedAt) setLastSavedTime(cfg.updatedAt);
       } else if (s.channelId && !channelId) {
         setChannelId(s.channelId);
@@ -120,15 +134,29 @@ export const TelegramBotConfigCard: React.FC = () => {
       return;
     }
 
+    const cleanSuppressionMinutes = Math.max(
+      0,
+      Math.min(1440, Math.floor(Number(suppressionWindowMinutes) || 0)),
+    );
+    setSuppressionWindowMinutes(cleanSuppressionMinutes);
+
     setIsSaving(true);
     setFeedback({ type: 'info', text: 'Saving Telegram alert settings...' });
 
     try {
-      const res = await telegramService.saveConfig(effectiveToken, effectiveChannel, isEnabled);
+      const res = await telegramService.saveConfig(
+        effectiveToken,
+        effectiveChannel,
+        isEnabled,
+        cleanSuppressionMinutes,
+      );
       if (res.success) {
         setStatus(res.status || null);
         if (res.config) {
           if (res.config.channelId) setChannelId(res.config.channelId);
+          if (typeof res.config.suppressionWindowMinutes === 'number') {
+            setSuppressionWindowMinutes(res.config.suppressionWindowMinutes);
+          }
           if (res.config.updatedAt) setLastSavedTime(res.config.updatedAt);
           if (!res.config.botToken) setBotToken('');
         }
@@ -259,9 +287,9 @@ export const TelegramBotConfigCard: React.FC = () => {
         </div>
 
         <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800">
-          <span className="text-[11px] text-slate-400">Delivery Mode</span>
+          <span className="text-[11px] text-slate-400">Suppression Window</span>
           <div className="text-sm font-mono font-bold text-emerald-400 mt-1">
-            Instant Push
+            {suppressionWindowMinutes > 0 ? `${suppressionWindowMinutes} min` : 'Disabled'}
           </div>
         </div>
 
@@ -360,6 +388,58 @@ export const TelegramBotConfigCard: React.FC = () => {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+
+        {/* Per-Customer Notification Suppression Period */}
+        <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5 text-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <label
+                htmlFor="telegram-suppression-minutes"
+                className="text-slate-200 font-semibold block"
+              >
+                Per-Customer Suppression Window (minutes)
+              </label>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Suppress duplicate Telegram alerts if a message was successfully sent for that customer within this period (0 disables suppression).
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <input
+                id="telegram-suppression-minutes"
+                type="number"
+                min={0}
+                max={1440}
+                step={1}
+                value={suppressionWindowMinutes}
+                onChange={(e) => {
+                  const val = Number.parseInt(e.target.value, 10);
+                  setSuppressionWindowMinutes(Number.isFinite(val) ? Math.max(0, Math.min(1440, val)) : 0);
+                }}
+                className="w-24 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 font-mono text-white text-xs focus:outline-none focus:border-sky-500"
+              />
+              <span className="text-[11px] text-slate-400 font-mono">min</span>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {[0, 5, 10, 30, 60].map((preset) => {
+              const active = suppressionWindowMinutes === preset;
+              return (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setSuppressionWindowMinutes(preset)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-mono border transition cursor-pointer ${
+                    active
+                      ? 'bg-sky-500/20 text-sky-300 border-sky-500/60 font-bold'
+                      : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white hover:border-slate-700'
+                  }`}
+                >
+                  {preset === 0 ? 'Off (0m)' : `${preset} min`}
+                </button>
+              );
+            })}
           </div>
         </div>
 

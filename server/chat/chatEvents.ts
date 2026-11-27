@@ -14,6 +14,8 @@ export interface ChatMessagePayload {
   transaction_data: Record<string, unknown> | null;
   is_internal_note: boolean;
   created_at: string;
+  sent_at?: string | null;
+  delivery_status?: 'pending' | 'sent' | 'failed';
 }
 
 export interface ChatConversationPayload {
@@ -28,6 +30,12 @@ export interface ChatConversationPayload {
   last_message_at: string;
   created_at: string;
   updated_at: string;
+  pinned_message_id: string | null;
+  pinned_rules_version: string | null;
+  pinned_at: string | null;
+  pinned_by_id: string | null;
+  pinned_by_name: string | null;
+  pinned_message_text: string | null;
 }
 
 export type ChatStreamEvent =
@@ -51,6 +59,12 @@ export type ChatStreamEvent =
       customerId: string;
       conversationId: string;
       status: ChatTicketStatus;
+      conversation: ChatConversationPayload;
+    }
+  | {
+      type: 'conversation_pin_updated';
+      customerId: string;
+      conversationId: string;
       conversation: ChatConversationPayload;
     };
 

@@ -13,6 +13,16 @@ import {
   type CmsPoliciesPayload,
   type CreateFakedCashoutInput,
 } from '../appConfig/appConfigRepo.js';
+import {
+  buildSuppressionLogMetadata,
+  canonicalCustomerIdFromInput,
+  validateSuppressionWindowMinutes,
+} from '../appConfig/telegramSuppression.js';
+import {
+  normalizeCashoutRulesConfig,
+  type CashoutRulesConfig,
+} from '../appConfig/cashoutRules.js';
+import type { Logger } from '../logging/logger.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
 import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
@@ -31,6 +41,8 @@ export interface AppConfigRouterDeps {
   requireAuth: RequestHandler;
   realtimeEvents?: RealtimeEventBroker;
   telegramFetch?: TelegramFetchFn;
+  logger?: Logger;
+  nowFn?: () => number;
 }
 
 const CONTROL_CHAR_REGEX = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
@@ -57,6 +69,7 @@ const ALLOWED_APP_CONFIG_UPDATE_KEYS = new Set([
   'gatewaySimulator',
   'cashoutFeed',
   'platformRules',
+  'cashoutRules',
   'policies',
 ]);
 
@@ -79,7 +92,12 @@ const ALLOWED_FAKED_CASHOUT_BODY_KEYS = new Set([
 ]);
 const ALLOWED_RESEED_BODY_KEYS = new Set(['items']);
 
-const ALLOWED_TELEGRAM_CONFIG_KEYS = new Set(['botToken', 'channelId', 'enabled']);
+const ALLOWED_TELEGRAM_CONFIG_KEYS = new Set([
+  'botToken',
+  'channelId',
+  'enabled',
+  'suppressionWindowMinutes',
+]);
 const ALLOWED_TELEGRAM_TEST_KEYS = new Set(['botToken', 'channelId']);
 const ALLOWED_TELEGRAM_NOTIFY_MSG_KEYS = new Set([
   'customerName',
@@ -637,6 +655,142 @@ function validatePlatformRules(raw: unknown): Record<string, unknown> {
   return out;
 }
 
+function validateCashoutRulesPayload(raw: unknown): Record<string, unknown> {
+  const obj = assertObjectRecord(raw, 'cashoutRules must be an object.');
+  const title = validateSafeText(obj.title, 'cashoutRules.title', {
+    required: true,
+    maxLen: 120,
+  })!;
+  const subtitle =
+    validateSafeText(obj.subtitle, 'cashoutRules.subtitle', {
+      maxLen: 320,
+    }) ?? '';
+  const voidExcessWarning = validateSafeText(
+    obj.voidExcessWarning,
+    'cashoutRules.voidExcessWarning',
+    {
+      required: true,
+      maxLen: 280,
+    },
+  )!;
+
+  if (!Array.isArray(obj.categories) || obj.categories.length === 0) {
+    throw new HttpError(
+      400,
+      'VALIDATION_ERROR',
+      'cashoutRules.categories must be a non-empty array.',
+    );
+  }
+  if (obj.categories.length > 20) {
+    throw new HttpError(
+      400,
+      'VALIDATION_ERROR',
+      'cashoutRules.categories may contain at most 20 tiers.',
+    );
+  }
+
+  const categories = obj.categories.map((entry, idx) => {
+    const item = assertObjectRecord(
+      entry,
+      `cashoutRules.categories[${idx}] must be an object.`,
+    );
+    const id =
+      validateSafeText(item.id, `cashoutRules.categories[${idx}].id`, {
+        maxLen: 60,
+      }) || `tier_${idx + 1}`;
+    const category = validateSafeText(
+      item.category,
+      `cashoutRules.categories[${idx}].category`,
+      { required: true, maxLen: 80 },
+    )!;
+    if (
+      item.kind !== undefined &&
+      item.kind !== 'deposit_range' &&
+      item.kind !== 'minimum_qualifying'
+    ) {
+      throw new HttpError(
+        400,
+        'VALIDATION_ERROR',
+        `cashoutRules.categories[${idx}].kind must be deposit_range or minimum_qualifying.`,
+      );
+    }
+    const kind =
+      item.kind === 'minimum_qualifying' ? 'minimum_qualifying' : 'deposit_range';
+    const conditionLabel = validateSafeText(
+      item.conditionLabel,
+      `cashoutRules.categories[${idx}].conditionLabel`,
+      { required: true, maxLen: 80 },
+    )!;
+    const minimumLabel = validateSafeText(
+      item.minimumLabel,
+      `cashoutRules.categories[${idx}].minimumLabel`,
+      { required: true, maxLen: 80 },
+    )!;
+    const maximumLabel = validateSafeText(
+      item.maximumLabel,
+      `cashoutRules.categories[${idx}].maximumLabel`,
+      { required: true, maxLen: 120 },
+    )!;
+    const notes = validateSafeText(
+      item.notes,
+      `cashoutRules.categories[${idx}].notes`,
+      { maxLen: 240 },
+    );
+
+    let redemptionOptions: Array<{ amountLabel: string; unitLabel: string }> | undefined;
+    if (Array.isArray(item.redemptionOptions)) {
+      if (item.redemptionOptions.length > 5) {
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          `cashoutRules.categories[${idx}].redemptionOptions cannot exceed 5 items.`,
+        );
+      }
+      redemptionOptions = item.redemptionOptions.map((optRaw, optIdx) => {
+        const opt = assertObjectRecord(
+          optRaw,
+          `cashoutRules.categories[${idx}].redemptionOptions[${optIdx}] must be an object.`,
+        );
+        return {
+          amountLabel: validateSafeText(
+            opt.amountLabel,
+            `redemptionOptions[${optIdx}].amountLabel`,
+            { required: true, maxLen: 40 },
+          )!,
+          unitLabel: validateSafeText(
+            opt.unitLabel,
+            `redemptionOptions[${optIdx}].unitLabel`,
+            { required: true, maxLen: 60 },
+          )!,
+        };
+      });
+    }
+
+    return {
+      id,
+      category,
+      kind,
+      conditionLabel,
+      minimumLabel,
+      maximumLabel,
+      ...(redemptionOptions && redemptionOptions.length > 0
+        ? { redemptionOptions }
+        : {}),
+      ...(notes ? { notes } : {}),
+    };
+  });
+
+  const normalized: CashoutRulesConfig = normalizeCashoutRulesConfig({
+    enabled: obj.enabled !== false,
+    title,
+    subtitle,
+    voidExcessWarning,
+    categories,
+  });
+
+  return normalized as unknown as Record<string, unknown>;
+}
+
 export function validatePoliciesPayload(raw: unknown): CmsPoliciesPayload {
   const body = assertObjectRecord(raw);
   assertAllowedKeys(body, ALLOWED_POLICIES_KEYS, 'CMS policies');
@@ -714,6 +868,11 @@ export function validateUpdateAppConfigBody(raw: unknown): AppConfigUpdateInput 
 
   if ('platformRules' in body) {
     input.platformRules = validatePlatformRules(body.platformRules);
+    hasField = true;
+  }
+
+  if ('cashoutRules' in body) {
+    input.cashoutRules = validateCashoutRulesPayload(body.cashoutRules);
     hasField = true;
   }
 
@@ -895,6 +1054,7 @@ function validateTelegramConfigBody(raw: unknown): {
   botToken?: string;
   channelId?: string;
   enabled: boolean;
+  suppressionWindowMinutes?: number;
 } {
   const body = assertObjectRecord(raw);
   assertAllowedKeys(body, ALLOWED_TELEGRAM_CONFIG_KEYS, 'telegram config');
@@ -907,7 +1067,20 @@ function validateTelegramConfigBody(raw: unknown): {
     maxLen: 128,
   });
   const enabled = body.enabled === undefined ? true : Boolean(body.enabled);
-  return { botToken, channelId, enabled };
+  const windowCheck = validateSuppressionWindowMinutes(
+    body.suppressionWindowMinutes,
+  );
+  if (!windowCheck.valid) {
+    throw new HttpError(400, 'VALIDATION_ERROR', windowCheck.error!);
+  }
+  return {
+    botToken,
+    channelId,
+    enabled,
+    ...(windowCheck.value !== undefined
+      ? { suppressionWindowMinutes: windowCheck.value }
+      : {}),
+  };
 }
 
 function validateTelegramTestBody(raw: unknown): {
@@ -954,6 +1127,7 @@ function validateTelegramNotifyBody(raw: unknown): {
   text: string;
   actionType?: string;
   gameName?: string;
+  conversationId?: string;
 } {
   const body = assertObjectRecord(raw);
   assertAllowedKeys(body, ALLOWED_TELEGRAM_NOTIFY_KEYS, 'telegram notify');
@@ -974,7 +1148,15 @@ function validateTelegramNotifyBody(raw: unknown): {
     required: false,
     maxLen: 120,
   });
-  return { title, text, actionType, gameName };
+  const conversationId = validateSafeText(
+    body.conversationId,
+    'conversationId',
+    {
+      required: false,
+      maxLen: 120,
+    },
+  );
+  return { title, text, actionType, gameName, conversationId };
 }
 
 function validateCashoutIdParam(rawId: unknown): string {
@@ -1003,9 +1185,12 @@ export function createAppConfigRouter({
   requireAuth,
   realtimeEvents,
   telegramFetch,
+  logger,
+  nowFn,
 }: AppConfigRouterDeps): Router {
   const router = Router();
   const requireAdmin = requireRole('admin');
+  const clock = nowFn ?? (() => Date.now());
 
   const fetchImpl: TelegramFetchFn =
     telegramFetch ??
@@ -1371,6 +1556,7 @@ export function createAppConfigRouter({
           maskedToken: cfg.botToken
             ? `${cfg.botToken.slice(0, 5)}...${cfg.botToken.slice(-6)}`
             : undefined,
+          suppressionWindowMinutes: cfg.suppressionWindowMinutes,
           mode: cfg.mode,
         };
 
@@ -1379,6 +1565,7 @@ export function createAppConfigRouter({
           botUsername,
           channelId: redacted.channelId,
           enabled: redacted.enabled,
+          suppressionWindowMinutes: redacted.suppressionWindowMinutes,
           updatesReceived: 0,
           lastError,
           tokenConfigured: redacted.tokenConfigured,
@@ -1404,6 +1591,7 @@ export function createAppConfigRouter({
           channelId: cfg.channelId,
           enabled: cfg.enabled,
           tokenConfigured: Boolean(cfg.botToken),
+          suppressionWindowMinutes: cfg.suppressionWindowMinutes,
           mode: cfg.mode,
         }) as Record<string, unknown>;
 
@@ -1439,6 +1627,7 @@ export function createAppConfigRouter({
           status: {
             running: false,
             channelId: saved.channelId,
+            suppressionWindowMinutes: saved.suppressionWindowMinutes,
             updatesReceived: 0,
             tokenConfigured: saved.tokenConfigured,
             maskedToken: saved.maskedToken,
@@ -1530,6 +1719,96 @@ export function createAppConfigRouter({
     },
   );
 
+  const dispatchCustomerTelegramNotification = async (params: {
+    customerId: string;
+    conversationId?: string;
+    text: string;
+  }): Promise<Record<string, unknown>> => {
+    const MAX_IN_FLIGHT_WAIT_ATTEMPTS = 60;
+    let attempt = 0;
+
+    while (attempt <= MAX_IN_FLIGHT_WAIT_ATTEMPTS) {
+      const claim = await appConfigRepo.claimTelegramNotificationDispatch({
+        customerId: params.customerId,
+        conversationId: params.conversationId,
+        nowMs: clock(),
+      });
+
+      if (claim.status === 'disabled') {
+        return {
+          success: false,
+          message: 'Telegram bot not configured or disabled',
+        };
+      }
+
+      if (claim.status === 'suppressed') {
+        logger?.info(
+          'telegram_notification_suppressed',
+          buildSuppressionLogMetadata({
+            customerId: claim.customerId,
+            evaluation: claim.evaluation,
+          }),
+        );
+        return {
+          success: true,
+          suppressed: true,
+          debounced: true,
+          suppressionWindowMinutes: claim.evaluation.windowMinutes,
+          message: `Cooldown active (${claim.evaluation.remainingSec}s)`,
+        };
+      }
+
+      if (claim.status === 'in_flight') {
+        attempt += 1;
+        if (attempt > MAX_IN_FLIGHT_WAIT_ATTEMPTS) {
+          logger?.info('telegram_notification_suppressed', {
+            customerId: claim.customerId,
+            reason: 'concurrent_dispatch_in_flight',
+            suppressionWindowMinutes: claim.suppressionWindowMinutes,
+          });
+          return {
+            success: true,
+            suppressed: true,
+            debounced: true,
+            suppressionWindowMinutes: claim.suppressionWindowMinutes,
+            message: 'Concurrent notification dispatch already in progress',
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, claim.retryAfterMs));
+        continue;
+      }
+
+      let sendResult: {
+        success: boolean;
+        message?: string;
+        suggestedChannelId?: string;
+      } = { success: false, message: 'Telegram delivery failed' };
+      try {
+        sendResult = await sendTelegramText(
+          claim.botToken,
+          claim.channelId,
+          params.text,
+        );
+      } finally {
+        const sentAtMs = clock();
+        await appConfigRepo.finalizeTelegramNotificationDispatch({
+          cooldownKey: claim.cooldownKey,
+          claimToken: claim.claimToken,
+          succeeded: Boolean(sendResult.success),
+          sentAtMs,
+          suppressionWindowMinutes: claim.suppressionWindowMinutes,
+        });
+      }
+
+      return sendResult;
+    }
+
+    return {
+      success: false,
+      message: 'Telegram delivery failed',
+    };
+  };
+
   // Authenticated Telegram alerts (derives actor identity on server)
   router.post(
     '/telegram/notify-message',
@@ -1543,47 +1822,25 @@ export function createAppConfigRouter({
           typeof validateTelegramNotifyMessageBody
         >;
 
-        const cfg = await appConfigRepo.getTelegramInternalConfig();
-        if (!cfg.botToken || !cfg.channelId || !cfg.enabled) {
-          res.status(200).json({
-            success: false,
-            message: 'Telegram bot not configured or disabled',
-          });
-          return;
-        }
-
         const displayName =
           actor.role === 'customer'
             ? actor.displayName || 'Customer'
             : body.customerName || actor.displayName || 'Customer';
-        const convKey =
+        const customerId = canonicalCustomerIdFromInput({
+          actorId: actor.appUserId,
+          actorRole: actor.role,
+          conversationId: body.conversationId,
+        });
+        const conversationId =
           actor.role === 'customer'
-            ? `conv_${actor.appUserId}`.toLowerCase()
-            : (body.conversationId || `conv_${actor.appUserId}`).toLowerCase();
+            ? `conv_${customerId}`
+            : body.conversationId || `conv_${customerId}`;
 
-        const nowMs = Date.now();
-        const lastSent = cfg.lastNotifiedByConv[convKey] || 0;
-        if (nowMs - lastSent < 60_000) {
-          const remainingSec = Math.ceil((60_000 - (nowMs - lastSent)) / 1000);
-          res.status(200).json({
-            success: true,
-            debounced: true,
-            message: `Cooldown active (${remainingSec}s)`,
-          });
-          return;
-        }
-
-        const result = await sendTelegramText(
-          cfg.botToken,
-          cfg.channelId,
-          `💬 New message from ${displayName}`,
-        );
-        if (result.success) {
-          await appConfigRepo.recordTelegramConversationCooldown({
-            cooldownKey: convKey,
-            nowMs,
-          });
-        }
+        const result = await dispatchCustomerTelegramNotification({
+          customerId,
+          conversationId,
+          text: `💬 New message from ${displayName}`,
+        });
         res.status(200).json(result);
       } catch (err) {
         next(err);
@@ -1601,21 +1858,22 @@ export function createAppConfigRouter({
         const actor = req.authContext!.user;
         const body = req.body as ReturnType<typeof validateTelegramNotifyBody>;
 
-        const cfg = await appConfigRepo.getTelegramInternalConfig();
-        if (!cfg.botToken || !cfg.channelId || !cfg.enabled) {
-          res.status(200).json({
-            success: false,
-            message: 'Telegram bot not configured or disabled',
-          });
-          return;
-        }
-
+        const customerId = canonicalCustomerIdFromInput({
+          actorId: actor.appUserId,
+          actorRole: actor.role,
+          conversationId: body.conversationId,
+        });
+        const conversationId =
+          actor.role === 'customer'
+            ? `conv_${customerId}`
+            : body.conversationId || `conv_${customerId}`;
         const safeText = `[${actor.displayName}] ${body.text}`.slice(0, 2000);
-        const result = await sendTelegramText(
-          cfg.botToken,
-          cfg.channelId,
-          safeText,
-        );
+
+        const result = await dispatchCustomerTelegramNotification({
+          customerId,
+          conversationId,
+          text: safeText,
+        });
         res.status(200).json(result);
       } catch (err) {
         next(err);

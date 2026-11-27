@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { DatabaseClient, DatabasePool } from './pool.js';
 import { DEFAULT_WHEEL_OF_LUCK_CONFIG } from '../wheel/wheelLogic.js';
+import { cloneDefaultCashoutRulesConfig } from '../appConfig/cashoutRules.js';
 
 export type Row = Record<string, unknown>;
 
@@ -228,6 +229,7 @@ function createInitialAppConfig(): Record<string, unknown> {
       cryptoRiskWarning:
         'Cryptocurrency transfers are irreversible once finalized on-chain. Ensure destination addresses and network tags match precisely before initiating payment.',
     },
+    cashoutRules: cloneDefaultCashoutRulesConfig(),
     policies: {
       cashoutPolicy:
         'Cashouts are reviewed 24/7. Most verified requests settle within 15 minutes to 2 hours.',
@@ -2684,6 +2686,46 @@ export class InMemoryDatabasePool implements DatabasePool {
     }
 
     if (/^UPDATE public\.conversations\b/i.test(sql)) {
+      if (/pinned_message_id = NULL/i.test(sql)) {
+        const ids = new Set(parseSqlArray(values[0]));
+        const updated: Row[] = [];
+        for (const r of this.state.conversations.values()) {
+          if (ids.has(String(r.id))) {
+            r.pinned_message_id = null;
+            r.pinned_rules_version = null;
+            r.pinned_at = null;
+            r.pinned_by_id = null;
+            r.pinned_by_name = null;
+            r.pinned_message_text = null;
+            r.updated_at = nowIso;
+            updated.push(cloneRow(r));
+          }
+        }
+        return { rows: updated, rowCount: updated.length };
+      }
+
+      if (/pinned_message_id = \$2/i.test(sql)) {
+        const convId = String(values[0] ?? '');
+        const existing = this.state.conversations.get(convId);
+        if (!existing) {
+          return { rows: [], rowCount: 0 };
+        }
+        existing.pinned_message_id = values[1] ? String(values[1]) : null;
+        existing.pinned_rules_version = values[2] ? String(values[2]) : null;
+        existing.pinned_at = values[3] ? toIso(values[3], nowIso) : nowIso;
+        existing.pinned_by_id = values[4] ? String(values[4]) : null;
+        existing.pinned_by_name = values[5] ? String(values[5]) : null;
+        existing.pinned_message_text = values[6] ? String(values[6]) : null;
+        if (Boolean(values[7])) {
+          existing.last_message = String(values[8] ?? existing.last_message);
+          existing.last_message_at = values[9]
+            ? toIso(values[9], nowIso)
+            : nowIso;
+        }
+        existing.updated_at = nowIso;
+        return { rows: [cloneRow(existing)], rowCount: 1 };
+      }
+
       const ids = new Set(parseSqlArray(values[0]));
       const status = values[1];
       const updated: Row[] = [];
@@ -2776,6 +2818,8 @@ export class InMemoryDatabasePool implements DatabasePool {
         transaction_data: null,
         is_internal_note: false,
         created_at: nowIso,
+        sent_at: nowIso,
+        delivery_status: 'sent',
       };
       cols.forEach((col, idx) => {
         if (idx < exprs.length) {
@@ -2788,6 +2832,27 @@ export class InMemoryDatabasePool implements DatabasePool {
       }
       this.state.messages.set(id, row);
       return { rows: [cloneRow(row)], rowCount: 1 };
+    }
+
+    if (/SELECT MAX\(sent_at\) AS last_sent_at/i.test(sql)) {
+      const convIds = new Set(parseSqlArray(values[0]).map((c) => String(c).toLowerCase()));
+      let maxMs = 0;
+      let maxIso: string | null = null;
+      for (const r of this.state.messages.values()) {
+        if (!convIds.has(String(r.conversation_id ?? '').toLowerCase())) continue;
+        const role = String(r.sender_role ?? '').toLowerCase();
+        if (role !== 'agent' && role !== 'admin' && role !== 'system') continue;
+        if (Boolean(r.is_internal_note)) continue;
+        const deliveryStatus = String(r.delivery_status ?? 'sent').toLowerCase();
+        if (deliveryStatus !== 'sent') continue;
+        if (r.sent_at === null || r.sent_at === undefined || r.sent_at === '') continue;
+        const ms = toTimestampMs(r.sent_at);
+        if (ms > maxMs) {
+          maxMs = ms;
+          maxIso = new Date(ms).toISOString();
+        }
+      }
+      return { rows: [{ last_sent_at: maxIso }], rowCount: 1 };
     }
 
     if (/^UPDATE public\.messages SET transaction_data = \$2::jsonb WHERE id = \$1/i.test(sql)) {
@@ -2803,6 +2868,23 @@ export class InMemoryDatabasePool implements DatabasePool {
     }
 
     let rows = Array.from(this.state.messages.values()).map(cloneRow);
+
+    if (/transaction_data IS NOT NULL AND transaction_data->>'rulesVersion' = \$2/i.test(sql)) {
+      const convId = String(values[0] ?? '');
+      const rulesVer = String(values[1] ?? '');
+      rows = rows.filter((r) => {
+        const td = r.transaction_data as Record<string, unknown> | null;
+        return (
+          String(r.conversation_id) === convId &&
+          td &&
+          typeof td === 'object' &&
+          String(td.rulesVersion ?? '') === rulesVer
+        );
+      });
+      rows.sort((a, b) => toTimestampMs(b.created_at) - toTimestampMs(a.created_at));
+      const { limit } = extractLimitOffset(sql, values);
+      return { rows: rows.slice(0, limit), rowCount: Math.min(rows.length, limit) };
+    }
 
     if (/transaction_data IS NOT NULL AND transaction_data->>'requestId' = \$1/i.test(sql)) {
       const reqId = String(values[0] ?? '');

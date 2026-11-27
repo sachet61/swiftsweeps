@@ -2800,6 +2800,11 @@ export default async function handler(req: any, res: any) {
 
   // 8. Stateless Telegram Zero-Egress Notification Endpoints (persisted in Supabase app_config)
   if (url.startsWith('/api/telegram/')) {
+    const parseSuppressionMinutes = (raw: unknown): number => {
+      const n = typeof raw === 'number' ? raw : Number(raw);
+      return Number.isInteger(n) && n >= 0 && n <= 1440 ? n : 5;
+    };
+
     const loadTelegramConfig = async () => {
       const { data } = await supabaseAdmin
         .from('app_config')
@@ -2814,6 +2819,7 @@ export default async function handler(req: any, res: any) {
         botToken,
         channelId,
         enabled: tg.enabled !== false,
+        suppressionWindowMinutes: parseSuppressionMinutes(tg.suppressionWindowMinutes),
         updatedAt: tg.updatedAt,
         lastNotifiedByConv: (tg.lastNotifiedByConv || {}) as Record<string, number>,
         tokenConfigured: Boolean(botToken),
@@ -2858,6 +2864,8 @@ export default async function handler(req: any, res: any) {
           running: false,
           botUsername,
           channelId: cfg.channelId,
+          enabled: cfg.enabled,
+          suppressionWindowMinutes: cfg.suppressionWindowMinutes,
           updatesReceived: 0,
           lastError,
           tokenConfigured: cfg.tokenConfigured,
@@ -2877,6 +2885,7 @@ export default async function handler(req: any, res: any) {
           botToken: cfg.botToken,
           channelId: cfg.channelId,
           enabled: cfg.enabled,
+          suppressionWindowMinutes: cfg.suppressionWindowMinutes,
           tokenConfigured: cfg.tokenConfigured,
           maskedToken: cfg.maskedToken,
           updatedAt: cfg.updatedAt,
@@ -2889,13 +2898,18 @@ export default async function handler(req: any, res: any) {
 
     if (url.includes('/api/telegram/config') && req.method === 'POST') {
       try {
-        const { botToken, channelId, enabled } = getBody(req);
+        const { botToken, channelId, enabled, suppressionWindowMinutes } = getBody(req);
         const cfg = await loadTelegramConfig();
         const updatedAt = new Date().toISOString();
+        const nextWindowMinutes =
+          suppressionWindowMinutes !== undefined
+            ? parseSuppressionMinutes(suppressionWindowMinutes)
+            : cfg.suppressionWindowMinutes;
         const nextTg = {
           botToken: (botToken || '').trim() || cfg.botToken,
           channelId: (channelId || '').trim() || cfg.channelId,
           enabled: enabled !== false,
+          suppressionWindowMinutes: nextWindowMinutes,
           mode: 'zero-egress-notification',
           updatedAt,
           lastNotifiedByConv: cfg.lastNotifiedByConv,
@@ -2913,6 +2927,7 @@ export default async function handler(req: any, res: any) {
           status: {
             running: false,
             channelId: nextTg.channelId,
+            suppressionWindowMinutes: nextTg.suppressionWindowMinutes,
             updatesReceived: 0,
             tokenConfigured: Boolean(nextTg.botToken),
             mode: 'zero-egress-notification',
@@ -2953,38 +2968,56 @@ export default async function handler(req: any, res: any) {
       }
     }
 
+    const sendWithSuppression = async (customerKey: string, convId: string, text: string) => {
+      const cfg = await loadTelegramConfig();
+      if (!cfg.botToken || !cfg.channelId || !cfg.enabled) {
+        return { success: false, message: 'Telegram bot not configured or disabled' };
+      }
+      const cooldownKey = (convId || `conv_${customerKey}`).toLowerCase();
+      const windowMs = cfg.suppressionWindowMinutes * 60_000;
+      const checkMs = Date.now();
+      const lastTgSent = Number(cfg.lastNotifiedByConv[cooldownKey] || 0);
+      if (windowMs > 0 && lastTgSent > 0 && checkMs - lastTgSent < windowMs) {
+        const remainingSec = Math.max(1, Math.ceil((windowMs - (checkMs - lastTgSent)) / 1000));
+        console.info(JSON.stringify({
+          event: 'telegram_notification_suppressed',
+          customerId: customerKey,
+          reason: 'recent_telegram_notification_sent_within_window',
+          suppressionWindowMinutes: cfg.suppressionWindowMinutes,
+        }));
+        return { success: true, suppressed: true, debounced: true, message: `Cooldown active (${remainingSec}s)` };
+      }
+
+      const result = await sendTelegramText(cfg.botToken, cfg.channelId, text);
+      if (result.success) {
+        const sentAtMs = Date.now();
+        const retentionMs = Math.max(windowMs, 24 * 60 * 60 * 1000);
+        const prunedEntries = Object.entries(cfg.lastNotifiedByConv).filter(
+          ([, ts]) => Number.isFinite(Number(ts)) && sentAtMs - Number(ts) < retentionMs
+        );
+        prunedEntries.push([cooldownKey, sentAtMs]);
+        await supabaseAdmin.from('app_config').upsert({
+          id: 'main',
+          data: {
+            ...cfg.appData,
+            telegram: {
+              ...cfg.appData.telegram,
+              lastNotifiedByConv: Object.fromEntries(prunedEntries),
+            },
+          },
+          updated_at: new Date(sentAtMs).toISOString(),
+        });
+      }
+      return result;
+    };
+
     if (url.includes('/api/telegram/notify-message') && req.method === 'POST') {
       try {
         const { customerName, conversationId } = getBody(req);
-        const cfg = await loadTelegramConfig();
-        if (!cfg.botToken || !cfg.channelId || !cfg.enabled) {
-          return res.status(200).json({ success: false, message: 'Telegram bot not configured or disabled' });
-        }
         const cleanName = (customerName || 'Customer').trim();
-        const cooldownKey = (conversationId || cleanName).toLowerCase();
-        const now = Date.now();
-        const lastSent = cfg.lastNotifiedByConv[cooldownKey] || 0;
-        if (now - lastSent < 60_000) {
-          const remainingSec = Math.ceil((60_000 - (now - lastSent)) / 1000);
-          return res.status(200).json({ success: true, debounced: true, message: `Cooldown active (${remainingSec}s)` });
-        }
-
-        const result = await sendTelegramText(cfg.botToken, cfg.channelId, `💬 New message from ${cleanName}`);
-        if (result.success) {
-          const prunedEntries = Object.entries(cfg.lastNotifiedByConv).filter(([, ts]) => now - ts < 600_000);
-          prunedEntries.push([cooldownKey, now]);
-          await supabaseAdmin.from('app_config').upsert({
-            id: 'main',
-            data: {
-              ...cfg.appData,
-              telegram: {
-                ...cfg.appData.telegram,
-                lastNotifiedByConv: Object.fromEntries(prunedEntries),
-              },
-            },
-            updated_at: new Date().toISOString(),
-          });
-        }
+        const convId = String(conversationId || cleanName).trim();
+        const customerKey = convId.replace(/^conv_+/i, '') || cleanName;
+        const result = await sendWithSuppression(customerKey, convId, `💬 New message from ${cleanName}`);
         return res.status(200).json(result);
       } catch (err: any) {
         return res.status(500).json({ success: false, message: err?.message });
@@ -2994,12 +3027,10 @@ export default async function handler(req: any, res: any) {
     if (url.includes('/api/telegram/notify') && req.method === 'POST') {
       try {
         const payload = getBody(req);
-        const cfg = await loadTelegramConfig();
-        if (!cfg.botToken || !cfg.channelId || !cfg.enabled) {
-          return res.status(200).json({ success: false, message: 'Telegram bot not configured or disabled' });
-        }
+        const convId = String(payload.conversationId || payload.customerName || 'customer').trim();
+        const customerKey = convId.replace(/^conv_+/i, '') || 'customer';
         const text = payload.text || payload.message || 'Notification';
-        const result = await sendTelegramText(cfg.botToken, cfg.channelId, text);
+        const result = await sendWithSuppression(customerKey, convId, text);
         return res.status(200).json(result);
       } catch (err: any) {
         return res.status(500).json({ success: false, message: err?.message });

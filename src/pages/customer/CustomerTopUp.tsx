@@ -7,6 +7,7 @@ import {
 } from '../../services/gameCatalogUtils';
 import { telegramService } from '../../services/telegramService';
 import { storageService } from '../../services/storageService';
+import { CashoutRulesShowcase } from '../../components/common/CashoutRulesShowcase';
 import {
   clearTopUpDraft,
   loadTopUpDraft,
@@ -1359,7 +1360,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
             aria-modal="true"
             aria-labelledby="bonus-payout-rules-title"
             onClick={(e) => e.stopPropagation()}
-            className="relative w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-5 sm:p-6 shadow-2xl space-y-4 text-xs text-slate-300 safe-modal-panel overflow-y-auto overscroll-contain"
+            className="relative w-full max-w-xl rounded-2xl bg-slate-900 border border-slate-800 p-5 sm:p-6 shadow-2xl space-y-4 text-xs text-slate-300 safe-modal-panel overflow-y-auto overscroll-contain"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2 text-white font-bold text-sm">
@@ -1399,19 +1400,37 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                   Promotional credits load at a 1:1 rate into active Gaming IDs. Unloading returns Free-Play credits to your Free-Play balance before cashable funds.
                 </p>
               </div>
+
+              <CashoutRulesShowcase
+                rules={config.cashoutRules}
+                compact
+                copyable={false}
+              />
             </div>
 
-            <div className="flex items-center justify-between gap-3 pt-1">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowRulesModal(false);
-                  onNavigateTab('chat');
-                }}
-                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-semibold transition-colors"
-              >
-                Need help? Open Live Chat
-              </button>
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRulesModal(false);
+                    onNavigateTab('rules');
+                  }}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 font-semibold transition-colors"
+                >
+                  Full Rules Page
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRulesModal(false);
+                    onNavigateTab('chat');
+                  }}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-semibold transition-colors"
+                >
+                  Open Live Chat
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={() => setShowRulesModal(false)}

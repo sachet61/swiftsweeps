@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { dataService } from '../../services/dataService';
-import { OfficialPartner } from '../../types';
+import { AppConfig, OfficialPartner } from '../../types';
 import { getMessageLink, sortOfficialPartners } from '../../utils/officialPartnersUtils';
 import { PartnerIcon, PlatformGlyph, getPlatformDisplayName } from '../../components/common/PartnerVisuals';
 import { SafeFormattedText } from '../../components/common/SafeFormattedText';
+import { CashoutRulesShowcase } from '../../components/common/CashoutRulesShowcase';
 import {
   FileText,
   ShieldCheck,
@@ -20,7 +21,7 @@ interface CustomerRulesProps {
 }
 
 export const CustomerRules: React.FC<CustomerRulesProps> = ({ onNavigateTab }) => {
-  const config = dataService.getAppConfig();
+  const [config, setConfig] = useState<AppConfig>(() => dataService.getAppConfig());
   const rules = config.platformRules;
   const [openIndex, setOpenIndex] = useState<number | null>(0);
   const [visiblePartners, setVisiblePartners] = useState<OfficialPartner[]>(() =>
@@ -29,13 +30,25 @@ export const CustomerRules: React.FC<CustomerRulesProps> = ({ onNavigateTab }) =
 
   useEffect(() => {
     let cancelled = false;
+    void dataService.fetchAppConfigFromServer().then((res) => {
+      if (!cancelled && res?.success && res.config) {
+        setConfig(res.config);
+      }
+    });
     void dataService.fetchOfficialPartners().then((res) => {
       if (!cancelled && res.success) {
         setVisiblePartners(sortOfficialPartners(res.partners.filter((p) => p.isVisible)));
       }
     });
+    const onStateChanged = () => {
+      if (!cancelled) {
+        setConfig(dataService.getAppConfig());
+      }
+    };
+    window.addEventListener('aetherpay_state_changed', onStateChanged);
     return () => {
       cancelled = true;
+      window.removeEventListener('aetherpay_state_changed', onStateChanged);
     };
   }, []);
 
@@ -67,11 +80,31 @@ export const CustomerRules: React.FC<CustomerRulesProps> = ({ onNavigateTab }) =
     },
   ];
 
+  const cashoutPolicyHtml = config.policies?.cashoutPolicyHtml?.trim();
+
   return (
     <div className="space-y-6 max-w-4xl mx-auto pb-24 md:pb-8">
       <div>
         <h1 className="text-2xl font-bold text-white tracking-tight">Platform Rules, Cashout &amp; Refund Policy</h1>
       </div>
+
+      <CashoutRulesShowcase
+        rules={config.cashoutRules}
+        onContactSupport={() => onNavigateTab('chat')}
+      />
+
+      {cashoutPolicyHtml && (
+        <div className="p-5 rounded-2xl border border-slate-800 bg-slate-900 space-y-2.5">
+          <h2 className="text-sm font-bold text-white flex items-center gap-2">
+            <FileText className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Additional Cashout &amp; Payout Disclosures</span>
+          </h2>
+          <SafeFormattedText
+            content={cashoutPolicyHtml}
+            className="text-xs text-slate-300 leading-relaxed space-y-2 max-w-none"
+          />
+        </div>
+      )}
 
       <div className="space-y-3" role="region" aria-label="Platform Rules and Policies">
         {sections.map((sec, idx) => {

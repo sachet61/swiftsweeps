@@ -1,3 +1,17 @@
+import type {
+  CashoutRuleCategory,
+  CashoutRuleKind,
+  CashoutRuleOption,
+  CashoutRulesConfig,
+} from '../utils/cashoutRulesUtils';
+
+export type {
+  CashoutRuleCategory,
+  CashoutRuleKind,
+  CashoutRuleOption,
+  CashoutRulesConfig,
+} from '../utils/cashoutRulesUtils';
+
 export type UserRole = 'customer' | 'agent' | 'admin';
 
 export type UserStatus = 'active' | 'suspended';
@@ -226,6 +240,12 @@ export interface SupportConversation {
   unreadCountCustomer: number;
   unreadCountStaff: number;
   relatedRequestId?: string;
+  pinnedMessageId?: string | null;
+  pinnedRulesVersion?: string | null;
+  pinnedAt?: string | null;
+  pinnedById?: string | null;
+  pinnedByName?: string | null;
+  pinnedMessageText?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -483,6 +503,14 @@ export interface AppConfig {
     withdrawalPolicy: string;
     refundPolicy: string;
     cryptoRiskWarning: string;
+  };
+  cashoutRules?: CashoutRulesConfig;
+  policies?: {
+    cashoutPolicyHtml?: string;
+    privacyPolicyHtml?: string;
+    termsPolicyHtml?: string;
+    cashoutPolicy?: string;
+    termsAndPrivacy?: string;
   };
 }
 

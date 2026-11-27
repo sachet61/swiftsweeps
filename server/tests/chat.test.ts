@@ -52,6 +52,12 @@ interface InMemoryConversationRow {
   last_message_at: Date;
   created_at: Date;
   updated_at: Date;
+  pinned_message_id: string | null;
+  pinned_rules_version: string | null;
+  pinned_at: Date | null;
+  pinned_by_id: string | null;
+  pinned_by_name: string | null;
+  pinned_message_text: string | null;
 }
 
 interface InMemoryMessageRow {
@@ -66,6 +72,8 @@ interface InMemoryMessageRow {
   transaction_data: Record<string, unknown> | null;
   is_internal_note: boolean;
   created_at: Date;
+  sent_at: Date | null;
+  delivery_status: string;
 }
 
 interface InMemoryChatAttachmentRow {
@@ -130,7 +138,9 @@ class InMemoryChatDatabase
   public readonly chatAttachments = new Map<string, InMemoryChatAttachmentRow>();
   public readonly topups = new Map<string, InMemoryTopupRow>();
   public readonly auditLogs: InMemoryAuditLogRow[] = [];
+  public appConfigRow: { id: string; data: Record<string, unknown>; updated_at: Date } | null = null;
   public failNextConversationsQueryError: Error | null = null;
+  public failNextPinError: Error | null = null;
 
   public async connect(): Promise<DatabaseClient> {
     return {
@@ -155,6 +165,15 @@ class InMemoryChatDatabase
     }
 
     if (
+      this.failNextPinError &&
+      normalized.includes('SET pinned_message_id =')
+    ) {
+      const err = this.failNextPinError;
+      this.failNextPinError = null;
+      throw err;
+    }
+
+    if (
       normalized === 'BEGIN' ||
       normalized === 'COMMIT' ||
       normalized === 'ROLLBACK'
@@ -164,6 +183,45 @@ class InMemoryChatDatabase
 
     if (normalized === 'SELECT 1 AS ok') {
       return { rows: [{ ok: 1 }] };
+    }
+
+    if (
+      normalized.startsWith(
+        "SELECT data, updated_at FROM public.app_config WHERE id = 'main'",
+      ) ||
+      normalized.startsWith(
+        "SELECT data FROM public.app_config WHERE id = 'main'",
+      )
+    ) {
+      if (!this.appConfigRow) return { rows: [] };
+      return {
+        rows: [
+          {
+            data: structuredClone(this.appConfigRow.data),
+            updated_at: new Date(this.appConfigRow.updated_at.getTime()),
+          },
+        ],
+      };
+    }
+
+    if (normalized.startsWith('INSERT INTO public.app_config')) {
+      const [rawJson, updatedAtRaw] = values as [string, string];
+      const parsed = JSON.parse(rawJson) as Record<string, unknown>;
+      const updatedAt = new Date(updatedAtRaw);
+      this.appConfigRow = {
+        id: 'main',
+        data: parsed,
+        updated_at: updatedAt,
+      };
+      return {
+        rows: [
+          {
+            data: structuredClone(parsed),
+            updated_at: updatedAt,
+          },
+        ],
+        rowCount: 1,
+      };
     }
 
     // --- Auth & UserDirectory queries ---
@@ -395,12 +453,49 @@ class InMemoryChatDatabase
           last_message_at: ts,
           created_at: ts,
           updated_at: ts,
+          pinned_message_id: null,
+          pinned_rules_version: null,
+          pinned_at: null,
+          pinned_by_id: null,
+          pinned_by_name: null,
+          pinned_message_text: null,
         };
         this.conversations.set(id, row);
         return { rows: [{ ...row }], rowCount: 1 };
       }
 
-      // Branch 2: sendMessage (9 args)
+      // Branch 2: pinCashoutRules initial conversation creation (7 args)
+      if (values.length === 7) {
+        const [id, customerId, customerName, agentId, agentName, lastMessage, nowIso] =
+          values as [string, string, string, string | null, string | null, string, string];
+        const ts = new Date(nowIso);
+        const existing = this.conversations.get(id);
+        if (existing) {
+          return { rows: [], rowCount: 0 };
+        }
+        const row: InMemoryConversationRow = {
+          id,
+          customer_id: customerId,
+          customer_name: customerName,
+          agent_id: agentId,
+          agent_name: agentName,
+          status: 'open',
+          last_message: lastMessage,
+          last_message_at: ts,
+          created_at: ts,
+          updated_at: new Date(),
+          pinned_message_id: null,
+          pinned_rules_version: null,
+          pinned_at: null,
+          pinned_by_id: null,
+          pinned_by_name: null,
+          pinned_message_text: null,
+        };
+        this.conversations.set(id, row);
+        return { rows: [{ ...row }], rowCount: 1 };
+      }
+
+      // Branch 3: sendMessage (9 args)
       const [
         id,
         customerId,
@@ -444,9 +539,75 @@ class InMemoryChatDatabase
         last_message_at: msgTs,
         created_at: msgTs,
         updated_at: new Date(),
+        pinned_message_id: null,
+        pinned_rules_version: null,
+        pinned_at: null,
+        pinned_by_id: null,
+        pinned_by_name: null,
+        pinned_message_text: null,
       };
       this.conversations.set(id, row);
       return { rows: [{ ...row }], rowCount: 1 };
+    }
+
+    if (normalized.startsWith('UPDATE public.conversations SET pinned_message_id = NULL')) {
+      const candidateIds = Array.isArray(values[0])
+        ? (values[0] as string[])
+        : [];
+      for (const cid of candidateIds) {
+        const conv = this.conversations.get(cid);
+        if (conv) {
+          conv.pinned_message_id = null;
+          conv.pinned_rules_version = null;
+          conv.pinned_at = null;
+          conv.pinned_by_id = null;
+          conv.pinned_by_name = null;
+          conv.pinned_message_text = null;
+          conv.updated_at = new Date();
+          return { rows: [{ ...conv }], rowCount: 1 };
+        }
+      }
+      return { rows: [], rowCount: 0 };
+    }
+
+    if (normalized.startsWith('UPDATE public.conversations SET pinned_message_id = $2')) {
+      const [
+        id,
+        pinnedMessageId,
+        pinnedRulesVersion,
+        pinnedAtIso,
+        pinnedById,
+        pinnedByName,
+        pinnedMessageText,
+        postedNewMessage,
+        lastMsgLabel,
+        lastMsgAtIso,
+      ] = values as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        boolean,
+        string,
+        string,
+      ];
+      const conv = this.conversations.get(id);
+      if (!conv) return { rows: [], rowCount: 0 };
+      conv.pinned_message_id = pinnedMessageId;
+      conv.pinned_rules_version = pinnedRulesVersion;
+      conv.pinned_at = new Date(pinnedAtIso);
+      conv.pinned_by_id = pinnedById;
+      conv.pinned_by_name = pinnedByName;
+      conv.pinned_message_text = pinnedMessageText;
+      if (postedNewMessage) {
+        conv.last_message = lastMsgLabel;
+        conv.last_message_at = new Date(lastMsgAtIso);
+      }
+      conv.updated_at = new Date();
+      return { rows: [{ ...conv }], rowCount: 1 };
     }
 
     if (normalized.startsWith('UPDATE public.conversations SET status = $2')) {
@@ -473,8 +634,9 @@ class InMemoryChatDatabase
 
     if (
       normalized.startsWith(
-        'SELECT id, conversation_id, sender_id, sender_name, sender_role, content, attachment_url, attachment_name, transaction_data, is_internal_note, created_at FROM public.messages',
-      )
+        'SELECT id, conversation_id, sender_id, sender_name, sender_role, content, attachment_url, attachment_name, transaction_data, is_internal_note, created_at',
+      ) &&
+      normalized.includes('FROM public.messages')
     ) {
       const convIds = new Set(Array.isArray(values[0]) ? (values[0] as string[]) : []);
       const excludeInternal = normalized.includes('COALESCE(is_internal_note, false) = false');
@@ -530,7 +692,75 @@ class InMemoryChatDatabase
       return { rows };
     }
 
+    if (
+      normalized.startsWith(
+        "SELECT * FROM public.messages WHERE conversation_id = $1 AND transaction_data IS NOT NULL AND transaction_data->>'rulesVersion' = $2",
+      )
+    ) {
+      const convId = String(values[0] ?? '');
+      const rulesVersion = String(values[1] ?? '');
+      const rows = [...this.messages.values()]
+        .filter(
+          (m) =>
+            m.conversation_id === convId &&
+            Boolean(m.transaction_data) &&
+            m.transaction_data?.rulesVersion === rulesVersion,
+        )
+        .sort((a, b) => {
+          const dt = b.created_at.getTime() - a.created_at.getTime();
+          return dt !== 0 ? dt : b.id.localeCompare(a.id);
+        })
+        .slice(0, 1)
+        .map((m) => ({ ...m }));
+      return { rows };
+    }
+
     if (normalized.startsWith('INSERT INTO public.messages')) {
+      if (values.length === 8 && normalized.includes('NULL, NULL')) {
+        const [
+          id,
+          conversationId,
+          senderId,
+          senderName,
+          senderRole,
+          content,
+          txJson,
+          createdAtIso,
+        ] = values as [
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+        ];
+        if (this.messages.has(id)) {
+          return { rows: [], rowCount: 0 };
+        }
+        const nowDate = new Date();
+        const row: InMemoryMessageRow = {
+          id,
+          conversation_id: conversationId,
+          sender_id: senderId,
+          sender_name: senderName,
+          sender_role: senderRole,
+          content,
+          attachment_url: null,
+          attachment_name: null,
+          transaction_data: txJson
+            ? (JSON.parse(txJson) as Record<string, unknown>)
+            : null,
+          is_internal_note: false,
+          created_at: new Date(createdAtIso),
+          sent_at: nowDate,
+          delivery_status: 'sent',
+        };
+        this.messages.set(id, row);
+        return { rows: [{ ...row }], rowCount: 1 };
+      }
+
       const [
         id,
         conversationId,
@@ -559,6 +789,7 @@ class InMemoryChatDatabase
       if (this.messages.has(id)) {
         return { rows: [], rowCount: 0 };
       }
+      const nowDate = new Date();
       const row: InMemoryMessageRow = {
         id,
         conversation_id: conversationId,
@@ -571,6 +802,8 @@ class InMemoryChatDatabase
         transaction_data: txJson ? (JSON.parse(txJson) as Record<string, unknown>) : null,
         is_internal_note: Boolean(isInternalNote),
         created_at: new Date(createdAtIso),
+        sent_at: nowDate,
+        delivery_status: 'sent',
       };
       this.messages.set(id, row);
       return { rows: [{ ...row }], rowCount: 1 };
@@ -682,6 +915,45 @@ class InMemoryChatDatabase
           entity_id: entityId,
           details,
           timestamp: new Date(),
+        });
+      } else if (
+        normalized.includes("'CASHOUT_RULES_PINNED'") ||
+        normalized.includes("'CASHOUT_RULES_UNPINNED'")
+      ) {
+        const [id, actorId, actorName, actorRole, entityId, details] = values as [
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+        ];
+        this.auditLogs.push({
+          id,
+          actor_id: actorId,
+          actor_name: actorName,
+          actor_role: actorRole,
+          action: normalized.includes("'CASHOUT_RULES_UNPINNED'")
+            ? 'CASHOUT_RULES_UNPINNED'
+            : 'CASHOUT_RULES_PINNED',
+          entity_type: 'conversation',
+          entity_id: entityId,
+          details,
+          timestamp: new Date(),
+        });
+      } else if (normalized.includes("'settings'")) {
+        const [id, actorId, actorName, actorRole, action, entityId, details, tsRaw] =
+          values as [string, string, string, string, string, string, string, string];
+        this.auditLogs.push({
+          id,
+          actor_id: actorId,
+          actor_name: actorName,
+          actor_role: actorRole,
+          action,
+          entity_type: 'settings',
+          entity_id: entityId,
+          details,
+          timestamp: new Date(tsRaw),
         });
       } else {
         const [id, actorId, actorName, actorRole, action, entityType, entityId, details] =
@@ -2034,3 +2306,236 @@ test('Unexpected chat database failure returns masked 500 error without leaking 
     await srv.close();
   }
 });
+
+test('Per-conversation cashout rules pinning: RBAC, customer isolation, idempotency, rules version update, unpinning, SSE, and DB failure safety', async () => {
+  const srv = await createTestServer();
+  try {
+    const custA = await signupAndSignIn(srv.baseUrl, srv.db, {
+      email: 'pin-cust-a@example.com',
+      name: 'Pin Customer A',
+      role: 'customer',
+    });
+    const custB = await signupAndSignIn(srv.baseUrl, srv.db, {
+      email: 'pin-cust-b@example.com',
+      name: 'Pin Customer B',
+      role: 'customer',
+    });
+    const agent = await signupAndSignIn(srv.baseUrl, srv.db, {
+      email: 'pin-agent@example.com',
+      name: 'Pin Agent',
+      role: 'agent',
+    });
+    const admin = await signupAndSignIn(srv.baseUrl, srv.db, {
+      email: 'pin-admin@example.com',
+      name: 'Pin Admin',
+      role: 'admin',
+    });
+
+    const convA = `conv_${custA.appUserId}`;
+    const convB = `conv_${custB.appUserId}`;
+
+    // Ensure conversations exist
+    await httpRequest(srv.baseUrl, 'POST', '/api/chat/conversations/ensure', {
+      jar: custA.jar,
+      body: {},
+    });
+    await httpRequest(srv.baseUrl, 'POST', '/api/chat/conversations/ensure', {
+      jar: custB.jar,
+      body: {},
+    });
+
+    // 1. Customer cannot pin or unpin any conversation (403)
+    const custPinRes = await httpRequest(
+      srv.baseUrl,
+      'POST',
+      `/api/chat/conversations/${convA}/pin-cashout-rules`,
+      { jar: custA.jar },
+    );
+    assert.equal(custPinRes.status, 403);
+
+    const custUnpinRes = await httpRequest(
+      srv.baseUrl,
+      'DELETE',
+      `/api/chat/conversations/${convA}/pin-cashout-rules`,
+      { jar: custA.jar },
+    );
+    assert.equal(custUnpinRes.status, 403);
+
+    // 2. Open SSE streams for Customer A and Customer B to confirm real-time isolation
+    const streamA = await openSseStream(srv.baseUrl, custA.jar);
+    const streamB = await openSseStream(srv.baseUrl, custB.jar);
+    try {
+      // Agent pins cashout rules on Customer A only
+      const pinRes1 = await httpRequest(
+        srv.baseUrl,
+        'POST',
+        `/api/chat/conversations/${convA}/pin-cashout-rules`,
+        { jar: agent.jar },
+      );
+      assert.equal(pinRes1.status, 200);
+      assert.equal(pinRes1.json.success, true);
+      assert.equal(pinRes1.json.postedNewMessage, true);
+      assert.equal(pinRes1.json.deduplicated, false);
+      assert.ok(pinRes1.json.rulesVersion?.startsWith('crv_'));
+      assert.equal(pinRes1.json.conversation?.pinned_message_id, pinRes1.json.message?.id);
+      assert.equal(pinRes1.json.conversation?.pinned_rules_version, pinRes1.json.rulesVersion);
+      assert.equal(
+        pinRes1.json.message?.transaction_data?.cardType,
+        'cashout_rules',
+      );
+      assert.match(pinRes1.json.message?.content || '', /\$15 game credits OR \$10 cash/);
+      assert.match(pinRes1.json.message?.content || '', /\$30 game points OR \$20 cash/);
+
+      // Wait briefly for SSE delivery
+      await new Promise((r) => setTimeout(r, 40));
+
+      assert.ok(
+        streamA.events.some(
+          (e) =>
+            e.event === 'conversation_pin_updated' &&
+            e.data?.conversation?.id === convA &&
+            e.data?.conversation?.pinned_message_id === pinRes1.json.message?.id,
+        ),
+      );
+      assert.ok(
+        !streamB.events.some((e) => e.event === 'conversation_pin_updated'),
+        'Customer B stream must not receive Customer A pin events',
+      );
+
+      // Customer B conversation & message history remain untouched
+      const custBConvs = await httpRequest(
+        srv.baseUrl,
+        'GET',
+        '/api/chat/conversations',
+        { jar: custB.jar },
+      );
+      assert.equal(custBConvs.status, 200);
+      assert.equal(custBConvs.json.conversations[0]?.id, convB);
+      assert.equal(custBConvs.json.conversations[0]?.pinned_message_id, null);
+
+      const custBMessages = await httpRequest(
+        srv.baseUrl,
+        'GET',
+        `/api/chat/messages?conversationId=${convB}`,
+        { jar: custB.jar },
+      );
+      assert.equal(custBMessages.status, 200);
+      assert.equal(custBMessages.json.messages.length, 0);
+
+      // 3. Re-pinning identical rules on Customer A is idempotent (deduplicated: true, no duplicate message)
+      const pinRes2 = await httpRequest(
+        srv.baseUrl,
+        'POST',
+        `/api/chat/conversations/${convA}/pin-cashout-rules`,
+        { jar: agent.jar },
+      );
+      assert.equal(pinRes2.status, 200);
+      assert.equal(pinRes2.json.deduplicated, true);
+      assert.equal(pinRes2.json.postedNewMessage, false);
+      assert.equal(pinRes2.json.message?.id, pinRes1.json.message?.id);
+
+      const custAMessagesAfterDup = await httpRequest(
+        srv.baseUrl,
+        'GET',
+        `/api/chat/messages?conversationId=${convA}`,
+        { jar: custA.jar },
+      );
+      assert.equal(custAMessagesAfterDup.json.messages.length, 1);
+
+      // 4. Updating cashoutRules in /api/admin/app-config bumps rulesVersion so re-pin posts updated message
+      const updateConfigRes = await httpRequest(
+        srv.baseUrl,
+        'PUT',
+        '/api/admin/app-config',
+        {
+          jar: admin.jar,
+          body: {
+            cashoutRules: {
+              enabled: true,
+              title: 'Cashout & Redemption Limits',
+              subtitle: 'Updated cap policy.',
+              voidExcessWarning:
+                'Any amount exceeding the applicable maximum cashout will be voided.',
+              categories: [
+                {
+                  id: 'tier_10_or_more',
+                  category: '$10 or more',
+                  kind: 'deposit_range',
+                  conditionLabel: 'Deposit range',
+                  minimumLabel: '5× (load + bonus)',
+                  maximumLabel: '20× (load + bonus)',
+                },
+              ],
+            },
+          },
+        },
+      );
+      assert.equal(updateConfigRes.status, 200);
+
+      const repinRes = await httpRequest(
+        srv.baseUrl,
+        'POST',
+        `/api/chat/conversations/${convA}/pin-cashout-rules`,
+        { jar: agent.jar },
+      );
+      assert.equal(repinRes.status, 200);
+      assert.equal(repinRes.json.deduplicated, false);
+      assert.equal(repinRes.json.postedNewMessage, true);
+      assert.notEqual(repinRes.json.rulesVersion, pinRes1.json.rulesVersion);
+      assert.notEqual(repinRes.json.message?.id, pinRes1.json.message?.id);
+      assert.match(repinRes.json.message?.content || '', /20× \(load \+ bonus\)/);
+
+      // 5. Unpinning clears pinned metadata while preserving historical chat messages
+      const unpinRes = await httpRequest(
+        srv.baseUrl,
+        'DELETE',
+        `/api/chat/conversations/${convA}/pin-cashout-rules`,
+        { jar: agent.jar },
+      );
+      assert.equal(unpinRes.status, 200);
+      assert.equal(unpinRes.json.conversation?.pinned_message_id, null);
+      assert.equal(unpinRes.json.conversation?.pinned_rules_version, null);
+
+      const custAMessagesAfterUnpin = await httpRequest(
+        srv.baseUrl,
+        'GET',
+        `/api/chat/messages?conversationId=${convA}`,
+        { jar: custA.jar },
+      );
+      assert.equal(custAMessagesAfterUnpin.json.messages.length, 2);
+
+      // 6. Re-pinning the old-already-sent rules version reuses existing message without posting a duplicate
+      const reuseRes = await httpRequest(
+        srv.baseUrl,
+        'POST',
+        `/api/chat/conversations/${convA}/pin-cashout-rules`,
+        { jar: agent.jar },
+      );
+      assert.equal(reuseRes.status, 200);
+      assert.equal(reuseRes.json.deduplicated, false);
+      assert.equal(reuseRes.json.postedNewMessage, false);
+      assert.equal(reuseRes.json.message?.id, repinRes.json.message?.id);
+
+      // 7. Simulated DB write failure during pin returns masked 500 and leaves target conversation unpinned
+      srv.db.failNextPinError = new Error(
+        'pg failure postgres://secret:pass@db.internal:5432/prod',
+      );
+      const failPinRes = await httpRequest(
+        srv.baseUrl,
+        'POST',
+        `/api/chat/conversations/${convB}/pin-cashout-rules`,
+        { jar: agent.jar },
+      );
+      assert.equal(failPinRes.status, 500);
+      const failRaw = failPinRes.buffer.toString('utf8');
+      assert.ok(!failRaw.includes('postgres://'));
+      assert.equal(srv.db.conversations.get(convB)?.pinned_message_id ?? null, null);
+    } finally {
+      streamA.close();
+      streamB.close();
+    }
+  } finally {
+    await srv.close();
+  }
+});
+

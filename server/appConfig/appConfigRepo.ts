@@ -1,6 +1,23 @@
 import crypto from 'node:crypto';
 import type { AppUserRole } from '../auth/userDirectoryRepo.js';
 import type { DatabaseClient, DatabasePool } from '../db/pool.js';
+import {
+  TELEGRAM_CLAIM_LEASE_MS,
+  canonicalCooldownKeyForCustomer,
+  evaluateTelegramSuppression,
+  normalizeSuppressionWindowMinutes,
+  parseTimestampMs,
+  pruneInFlightLeases,
+  pruneTimestampMap,
+  validateSuppressionWindowMinutes,
+  type TelegramInFlightLease,
+  type TelegramSuppressionEvaluation,
+} from './telegramSuppression.js';
+import {
+  cloneDefaultCashoutRulesConfig,
+  normalizeCashoutRulesConfig,
+  type CashoutRulesConfig,
+} from './cashoutRules.js';
 
 export interface AppConfigActor {
   appUserId: string;
@@ -19,8 +36,10 @@ export interface TelegramStoredConfig {
   channelId: string;
   enabled: boolean;
   mode: 'zero-egress-notification';
+  suppressionWindowMinutes: number;
   updatedAt?: string;
   lastNotifiedByConv: Record<string, number>;
+  inFlightByConv?: Record<string, TelegramInFlightLease>;
 }
 
 export interface TelegramRedactedConfig {
@@ -28,9 +47,38 @@ export interface TelegramRedactedConfig {
   enabled: boolean;
   tokenConfigured: boolean;
   maskedToken?: string;
+  suppressionWindowMinutes: number;
   updatedAt?: string;
   mode: 'zero-egress-notification';
 }
+
+export type ClaimTelegramDispatchResult =
+  | {
+      status: 'disabled';
+    }
+  | {
+      status: 'suppressed';
+      customerId: string;
+      cooldownKey: string;
+      evaluation: TelegramSuppressionEvaluation;
+    }
+  | {
+      status: 'in_flight';
+      customerId: string;
+      cooldownKey: string;
+      suppressionWindowMinutes: number;
+      expiresAtMs: number;
+      retryAfterMs: number;
+    }
+  | {
+      status: 'claimed';
+      customerId: string;
+      cooldownKey: string;
+      claimToken: string;
+      botToken: string;
+      channelId: string;
+      suppressionWindowMinutes: number;
+    };
 
 export interface AppConfigUpdateInput {
   currency?: string;
@@ -39,6 +87,7 @@ export interface AppConfigUpdateInput {
   gatewaySimulator?: Record<string, unknown>;
   cashoutFeed?: Record<string, unknown>;
   platformRules?: Record<string, unknown>;
+  cashoutRules?: Record<string, unknown>;
   policies?: CmsPoliciesPayload;
 }
 
@@ -163,6 +212,9 @@ export function redactTelegramConfig(raw: unknown): TelegramRedactedConfig {
     enabled: obj.enabled !== false,
     tokenConfigured: Boolean(botToken),
     ...(botToken ? { maskedToken: maskTelegramToken(botToken) } : {}),
+    suppressionWindowMinutes: normalizeSuppressionWindowMinutes(
+      obj.suppressionWindowMinutes,
+    ),
     ...(typeof obj.updatedAt === 'string' && obj.updatedAt.trim()
       ? { updatedAt: obj.updatedAt.trim() }
       : {}),
@@ -190,6 +242,7 @@ export function sanitizePublicAppConfigData(
     delete cleanPolicies.supportedPartners;
     clean.policies = cleanPolicies;
   }
+  clean.cashoutRules = normalizeCashoutRulesConfig(clean.cashoutRules);
   return clean;
 }
 
@@ -336,6 +389,20 @@ export class AppConfigRepo {
     };
   }
 
+  public async getAuthoritativeCashoutRules(): Promise<CashoutRulesConfig> {
+    const res = await runQuery<RawAppConfigRow & Record<string, unknown>>(
+      this.pool,
+      `SELECT data FROM public.app_config WHERE id = 'main' LIMIT 1`,
+      [],
+    );
+    const row = res.rows[0];
+    if (!row) {
+      return cloneDefaultCashoutRulesConfig();
+    }
+    const parsed = parseJsonObject(row.data);
+    return normalizeCashoutRulesConfig(parsed.cashoutRules);
+  }
+
   public async getAdminAppConfig(): Promise<AdminAppConfigResult> {
     const res = await runQuery<RawAppConfigRow & Record<string, unknown>>(
       this.pool,
@@ -386,6 +453,12 @@ export class AppConfigRepo {
       }
       if (input.platformRules !== undefined) {
         nextData.platformRules = input.platformRules;
+      }
+      if (input.cashoutRules !== undefined) {
+        nextData.cashoutRules = {
+          ...normalizeCashoutRulesConfig(input.cashoutRules),
+          updatedAt: nowIso,
+        };
       }
       if (input.policies !== undefined) {
         const prevPolicies = parseJsonObject(currentData.policies);
@@ -504,9 +577,9 @@ export class AppConfigRepo {
     const rawNotified = parseJsonObject(tg.lastNotifiedByConv);
     const lastNotifiedByConv: Record<string, number> = {};
     for (const [key, val] of Object.entries(rawNotified)) {
-      const num = Number(val);
-      if (Number.isFinite(num) && num > 0) {
-        lastNotifiedByConv[key] = num;
+      const ts = parseTimestampMs(val);
+      if (ts !== null) {
+        lastNotifiedByConv[key.toLowerCase()] = ts;
       }
     }
     return {
@@ -514,16 +587,30 @@ export class AppConfigRepo {
       channelId: typeof tg.channelId === 'string' ? tg.channelId.trim() : '',
       enabled: tg.enabled !== false,
       mode: 'zero-egress-notification',
+      suppressionWindowMinutes: normalizeSuppressionWindowMinutes(
+        tg.suppressionWindowMinutes,
+      ),
       updatedAt: typeof tg.updatedAt === 'string' ? tg.updatedAt : undefined,
       lastNotifiedByConv,
     };
   }
 
   public async saveTelegramConfig(
-    input: { botToken?: string; channelId?: string; enabled: boolean },
+    input: {
+      botToken?: string;
+      channelId?: string;
+      enabled: boolean;
+      suppressionWindowMinutes?: number;
+    },
     actor: AppConfigActor,
   ): Promise<TelegramRedactedConfig> {
     const nowIso = new Date().toISOString();
+    const windowCheck = validateSuppressionWindowMinutes(
+      input.suppressionWindowMinutes,
+    );
+    if (!windowCheck.valid) {
+      throw new AppConfigValidationError(windowCheck.error);
+    }
 
     return this.withTransaction(async (client) => {
       const existingRes = await runQuery<
@@ -549,15 +636,31 @@ export class AppConfigRepo {
         throw new AppConfigValidationError('Target Telegram Channel / Chat ID is required.');
       }
 
+      const nextSuppressionMinutes =
+        windowCheck.value !== undefined
+          ? windowCheck.value
+          : normalizeSuppressionWindowMinutes(currentTg.suppressionWindowMinutes);
+
+      const existingInFlight = parseJsonObject(currentTg.inFlightByConv);
+
       const nextTg: TelegramStoredConfig = {
         botToken: nextToken,
         channelId: nextChannel,
         enabled: input.enabled,
         mode: 'zero-egress-notification',
+        suppressionWindowMinutes: nextSuppressionMinutes,
         updatedAt: nowIso,
         lastNotifiedByConv: parseJsonObject(
           currentTg.lastNotifiedByConv,
         ) as Record<string, number>,
+        ...(Object.keys(existingInFlight).length > 0
+          ? {
+              inFlightByConv: existingInFlight as Record<
+                string,
+                TelegramInFlightLease
+              >,
+            }
+          : {}),
       };
 
       const nextData: Record<string, unknown> = {
@@ -583,11 +686,222 @@ export class AppConfigRepo {
         actor,
         action: 'TELEGRAM_CONFIG_UPDATED',
         entityId: 'telegram_bot',
-        details: `Updated Telegram alerts (${nextTg.enabled ? 'enabled' : 'paused'}, channel ${nextTg.channelId}).`,
+        details: `Updated Telegram alerts (${nextTg.enabled ? 'enabled' : 'paused'}, channel ${nextTg.channelId}, suppression ${nextTg.suppressionWindowMinutes}m).`,
         timestamp: nowIso,
       });
 
       return redactTelegramConfig(nextTg);
+    });
+  }
+
+  public async claimTelegramNotificationDispatch(params: {
+    customerId: string;
+    conversationId?: string;
+    nowMs: number;
+  }): Promise<ClaimTelegramDispatchResult> {
+    const cleanCustomerId = params.customerId.trim();
+    const cooldownKey = canonicalCooldownKeyForCustomer(cleanCustomerId);
+    const candidateConvIds = Array.from(
+      new Set(
+        [
+          `conv_${cleanCustomerId}`,
+          params.conversationId?.trim() || '',
+        ].filter(Boolean),
+      ),
+    );
+
+    return this.withTransaction(async (client) => {
+      const existingRes = await runQuery<
+        RawAppConfigRow & Record<string, unknown>
+      >(
+        client,
+        `SELECT data FROM public.app_config WHERE id = 'main' FOR UPDATE`,
+        [],
+      );
+      const currentData = parseJsonObject(existingRes.rows[0]?.data);
+      const currentTg = parseJsonObject(currentData.telegram);
+      const botToken =
+        typeof currentTg.botToken === 'string' ? currentTg.botToken.trim() : '';
+      const channelId =
+        typeof currentTg.channelId === 'string' ? currentTg.channelId.trim() : '';
+      const enabled = currentTg.enabled !== false;
+
+      if (!botToken || !channelId || !enabled) {
+        return { status: 'disabled' };
+      }
+
+      const suppressionWindowMinutes = normalizeSuppressionWindowMinutes(
+        currentTg.suppressionWindowMinutes,
+      );
+
+      const rawNotified = parseJsonObject(currentTg.lastNotifiedByConv);
+      const lastTelegramSentAtMs = parseTimestampMs(
+        rawNotified[cooldownKey] ?? rawNotified[`conv_${cleanCustomerId}`],
+      );
+
+      let lastOutboundMessageSentAtMs: number | null = null;
+      const regRes = await runQuery<{ reg: string | null } & Record<string, unknown>>(
+        client,
+        `SELECT to_regclass('public.messages')::text AS reg`,
+        [],
+      );
+      if (regRes.rows[0]?.reg && candidateConvIds.length > 0) {
+        const msgRes = await runQuery<
+          { last_sent_at: Date | string | null } & Record<string, unknown>
+        >(
+          client,
+          `
+            SELECT MAX(sent_at) AS last_sent_at
+            FROM public.messages
+            WHERE conversation_id = ANY($1::text[])
+              AND sender_role IN ('agent', 'admin', 'system')
+              AND COALESCE(is_internal_note, false) = false
+              AND delivery_status = 'sent'
+              AND sent_at IS NOT NULL
+          `,
+          [candidateConvIds],
+        );
+        lastOutboundMessageSentAtMs = parseTimestampMs(
+          msgRes.rows[0]?.last_sent_at,
+        );
+      }
+
+      const evaluation = evaluateTelegramSuppression({
+        suppressionWindowMinutes,
+        nowMs: params.nowMs,
+        lastTelegramSentAtMs,
+        lastOutboundMessageSentAtMs,
+      });
+
+      if (evaluation.suppressed) {
+        return {
+          status: 'suppressed',
+          customerId: cleanCustomerId,
+          cooldownKey,
+          evaluation,
+        };
+      }
+
+      const activeLeases = pruneInFlightLeases(
+        parseJsonObject(currentTg.inFlightByConv),
+        params.nowMs,
+      );
+      const existingLease = activeLeases[cooldownKey];
+      if (existingLease && existingLease.expiresAtMs > params.nowMs) {
+        return {
+          status: 'in_flight',
+          customerId: cleanCustomerId,
+          cooldownKey,
+          suppressionWindowMinutes,
+          expiresAtMs: existingLease.expiresAtMs,
+          retryAfterMs: 30,
+        };
+      }
+
+      const claimToken = crypto.randomBytes(12).toString('hex');
+      activeLeases[cooldownKey] = {
+        token: claimToken,
+        expiresAtMs: params.nowMs + TELEGRAM_CLAIM_LEASE_MS,
+      };
+
+      const nextData: Record<string, unknown> = {
+        ...currentData,
+        telegram: {
+          ...currentTg,
+          inFlightByConv: activeLeases,
+        },
+      };
+
+      const nowIso = new Date(params.nowMs).toISOString();
+      await runQuery(
+        client,
+        `
+          INSERT INTO public.app_config (id, data, updated_at)
+          VALUES ('main', $1::jsonb, $2::timestamptz)
+          ON CONFLICT (id) DO UPDATE SET
+            data = EXCLUDED.data,
+            updated_at = EXCLUDED.updated_at
+        `,
+        [JSON.stringify(nextData), nowIso],
+      );
+
+      return {
+        status: 'claimed',
+        customerId: cleanCustomerId,
+        cooldownKey,
+        claimToken,
+        botToken,
+        channelId,
+        suppressionWindowMinutes,
+      };
+    });
+  }
+
+  public async finalizeTelegramNotificationDispatch(params: {
+    cooldownKey: string;
+    claimToken: string;
+    succeeded: boolean;
+    sentAtMs: number;
+    suppressionWindowMinutes: number;
+  }): Promise<void> {
+    const nowIso = new Date(params.sentAtMs).toISOString();
+
+    await this.withTransaction(async (client) => {
+      const existingRes = await runQuery<
+        RawAppConfigRow & Record<string, unknown>
+      >(
+        client,
+        `SELECT data FROM public.app_config WHERE id = 'main' FOR UPDATE`,
+        [],
+      );
+      const currentData = parseJsonObject(existingRes.rows[0]?.data);
+      const currentTg = parseJsonObject(currentData.telegram);
+
+      const activeLeases = pruneInFlightLeases(
+        parseJsonObject(currentTg.inFlightByConv),
+        params.sentAtMs,
+      );
+      if (activeLeases[params.cooldownKey]?.token === params.claimToken) {
+        delete activeLeases[params.cooldownKey];
+      }
+
+      let nextLastNotified = parseJsonObject(currentTg.lastNotifiedByConv);
+      if (params.succeeded) {
+        const cleaned = pruneTimestampMap(
+          nextLastNotified,
+          params.sentAtMs,
+          params.suppressionWindowMinutes * 60_000,
+        );
+        cleaned[params.cooldownKey] = params.sentAtMs;
+        nextLastNotified = cleaned;
+      }
+
+      const nextTg: Record<string, unknown> = {
+        ...currentTg,
+        lastNotifiedByConv: nextLastNotified,
+      };
+      if (Object.keys(activeLeases).length > 0) {
+        nextTg.inFlightByConv = activeLeases;
+      } else {
+        delete nextTg.inFlightByConv;
+      }
+
+      const nextData: Record<string, unknown> = {
+        ...currentData,
+        telegram: nextTg,
+      };
+
+      await runQuery(
+        client,
+        `
+          INSERT INTO public.app_config (id, data, updated_at)
+          VALUES ('main', $1::jsonb, $2::timestamptz)
+          ON CONFLICT (id) DO UPDATE SET
+            data = EXCLUDED.data,
+            updated_at = EXCLUDED.updated_at
+        `,
+        [JSON.stringify(nextData), nowIso],
+      );
     });
   }
 
@@ -607,17 +921,22 @@ export class AppConfigRepo {
       );
       const currentData = parseJsonObject(existingRes.rows[0]?.data);
       const currentTg = parseJsonObject(currentData.telegram);
-      const existingMap = parseJsonObject(currentTg.lastNotifiedByConv);
-      const prunedEntries = Object.entries(existingMap).filter(
-        ([, ts]) => Number.isFinite(Number(ts)) && params.nowMs - Number(ts) < 600_000,
+      const windowMinutes = normalizeSuppressionWindowMinutes(
+        currentTg.suppressionWindowMinutes,
       );
-      prunedEntries.push([params.cooldownKey, params.nowMs]);
+      const existingMap = parseJsonObject(currentTg.lastNotifiedByConv);
+      const pruned = pruneTimestampMap(
+        existingMap,
+        params.nowMs,
+        windowMinutes * 60_000,
+      );
+      pruned[params.cooldownKey.toLowerCase()] = params.nowMs;
 
       const nextData: Record<string, unknown> = {
         ...currentData,
         telegram: {
           ...currentTg,
-          lastNotifiedByConv: Object.fromEntries(prunedEntries),
+          lastNotifiedByConv: pruned,
         },
       };
 

@@ -7,6 +7,7 @@ export interface TelegramStatus {
   lastError?: string;
   tokenConfigured?: boolean;
   maskedToken?: string;
+  suppressionWindowMinutes?: number;
 }
 
 class TelegramService {
@@ -56,6 +57,7 @@ class TelegramService {
     botUsername?: string;
     tokenConfigured?: boolean;
     maskedToken?: string;
+    suppressionWindowMinutes?: number;
     updatedAt?: string;
     error?: string;
   }> {
@@ -81,7 +83,8 @@ class TelegramService {
   public async saveConfig(
     botToken: string,
     channelId: string,
-    enabled: boolean = true
+    enabled: boolean = true,
+    suppressionWindowMinutes?: number
   ): Promise<{ success: boolean; status?: TelegramStatus; config?: any; error?: string }> {
     const cleanToken = botToken.trim();
     const cleanChatId = channelId.trim();
@@ -93,6 +96,13 @@ class TelegramService {
       };
       if (cleanToken) {
         payload.botToken = cleanToken;
+      }
+      if (
+        typeof suppressionWindowMinutes === 'number' &&
+        Number.isInteger(suppressionWindowMinutes) &&
+        suppressionWindowMinutes >= 0
+      ) {
+        payload.suppressionWindowMinutes = suppressionWindowMinutes;
       }
 
       const resp = await fetch('/api/telegram/config', {
@@ -182,7 +192,7 @@ class TelegramService {
     amount?: number;
     gameName?: string;
     proofUrl?: string;
-  }): Promise<{ success: boolean; message?: string }> {
+  }): Promise<{ success: boolean; message?: string; suppressed?: boolean; debounced?: boolean }> {
     try {
       const resp = await fetch('/api/telegram/notify', {
         method: 'POST',
@@ -204,7 +214,7 @@ class TelegramService {
   public async notifyCustomerMessage(
     customerName: string,
     conversationId?: string
-  ): Promise<{ success: boolean; message?: string; debounced?: boolean }> {
+  ): Promise<{ success: boolean; message?: string; suppressed?: boolean; debounced?: boolean }> {
     try {
       const resp = await fetch('/api/telegram/notify-message', {
         method: 'POST',

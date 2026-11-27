@@ -13,6 +13,7 @@ import {
   AuditLog,
 } from '../types';
 import { DEFAULT_WHEEL_OF_LUCK_CONFIG } from '../utils/wheelOfLuckUtils';
+import { cloneDefaultCashoutRulesConfig } from '../utils/cashoutRulesUtils';
 
 export const INITIAL_CONFIG: AppConfig = {
   currency: 'USD',
@@ -169,6 +170,7 @@ export const INITIAL_CONFIG: AppConfig = {
     refundPolicy: 'Unutilized deposits may be refunded back to the originating funding method within 72 hours of submission, minus applicable network and processor fees.',
     cryptoRiskWarning: 'Cryptocurrency transfers are irreversible once finalized on-chain. Ensure destination addresses and network tags match precisely before initiating payment.',
   },
+  cashoutRules: cloneDefaultCashoutRulesConfig(),
 };
 
 export const INITIAL_USERS: UserProfile[] = [];

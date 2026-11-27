@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { UserProfile, ChatMessage, SupportConversation } from '../../types';
+import { CashoutRulesConfig } from '../../utils/cashoutRulesUtils';
 import { dataService } from '../../services/dataService';
 import { chatStreamClient } from '../../services/chatStreamClient';
 import { mapDbMessageRowToChatMessage, sortAndDeduplicateMessages } from '../../services/chatOrderUtils';
@@ -14,6 +15,8 @@ import {
   isMessageInternalNote,
 } from '../../utils/chatPresentationUtils';
 import { ChatTransactionCard } from '../../components/chat/ChatTransactionCard';
+import { PinnedCashoutRulesBanner } from '../../components/chat/PinnedCashoutRulesBanner';
+import { CashoutRulesShowcase } from '../../components/common/CashoutRulesShowcase';
 import {
   Send,
   Paperclip,
@@ -39,6 +42,8 @@ import {
   Smile,
   AlertCircle,
   Image as ImageIcon,
+  Pin,
+  Scale,
 } from 'lucide-react';
 import { notificationSoundService } from '../../services/notificationSoundService';
 import { storageService } from '../../services/storageService';
@@ -87,6 +92,8 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   const [failedPendingMsgId, setFailedPendingMsgId] = useState<string | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showMobileMenu, setShowMobileMenu] = useState(false);
+  const [appConfig, setAppConfig] = useState(() => dataService.getAppConfig());
+  const [inspectingRulesSnapshot, setInspectingRulesSnapshot] = useState<CashoutRulesConfig | null>(null);
 
   const [browserOnline, setBrowserOnline] = useState(() =>
     typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -354,16 +361,28 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     dataService.markConversationRead(convId, 'customer');
 
     let isUnmounted = false;
+    void dataService.fetchAppConfigFromServer().then((res) => {
+      if (!isUnmounted && res?.success && res.config) {
+        setAppConfig(res.config);
+      }
+    });
+    void dataService.fetchConversationsFromServer({ limit: 10, replaceAll: false }).then(() => {
+      if (isUnmounted) return;
+      const hydrated = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
+      hydrated.id = convId;
+      setConversation({ ...hydrated });
+    });
     dataService.fetchMessagesForConversation(convId, { limit: 50 }).then((freshMsgs) => {
       if (isUnmounted) return;
       setMessages(filterVisibleMessagesForRole(freshMsgs || [], 'customer'));
     });
 
     const handleSync = () => {
+      setAppConfig(dataService.getAppConfig());
       const updated = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
       if (updated) {
         updated.id = convId;
-        setConversation(updated);
+        setConversation({ ...updated });
         setMessages(filterVisibleMessagesForRole(dataService.getMessages(convId), 'customer'));
       }
     };
@@ -377,6 +396,12 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       const now = Date.now();
       if (now - lastCatchUpTime < 800) return;
       lastCatchUpTime = now;
+      void dataService.fetchConversationsFromServer({ limit: 10, replaceAll: false }).then(() => {
+        if (isUnmounted) return;
+        const hydrated = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
+        hydrated.id = convId;
+        setConversation({ ...hydrated });
+      });
       dataService.fetchMessagesForConversation(convId, { limit: 50 }).then((fresh) => {
         if (isUnmounted) return;
         if (fresh && fresh.length > 0) {
@@ -411,6 +436,15 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       onConversationStatus: (event) => {
         if (event?.status && (event.conversationId === convId || event.customerId === currentUser.id)) {
           setConversation((prev) => (prev ? { ...prev, status: event.status as any } : prev));
+        }
+      },
+      onConversationPinUpdated: (event) => {
+        if (!event?.conversation?.id) return;
+        dataService.applyConversationFromStream(event.conversation);
+        if (event.conversationId === convId || event.customerId === currentUser.id) {
+          const hydrated = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
+          hydrated.id = convId;
+          setConversation({ ...hydrated });
         }
       },
     });
@@ -684,6 +718,15 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     }
   };
 
+  const handleJumpToPinnedMessage = useCallback((messageId: string) => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const target = container.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, []);
+
   const shellInlineStyle = resolveFullscreenViewportStyle(viewportState);
 
   return (
@@ -905,6 +948,14 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         </div>
       </div>
 
+      <PinnedCashoutRulesBanner
+        conversation={conversation}
+        cashoutRules={appConfig.cashoutRules}
+        isStaff={false}
+        onJumpToMessage={handleJumpToPinnedMessage}
+        onOpenFullRules={() => onNavigateTab('rules')}
+      />
+
       {/* MESSAGES SCROLL REGION (Independently scrollable, fills all remaining vertical space) */}
       <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden bg-[#080E1D]">
         <div
@@ -1085,6 +1136,28 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                                 }
                               }}
                             />
+                          )}
+
+                          {(msg.transactionData as any)?.cardType === 'cashout_rules' && (
+                            <div className="mt-2.5 pt-2 border-t border-slate-700/60 flex items-center justify-between gap-2 text-[11px]">
+                              <span className="inline-flex items-center gap-1.5 text-emerald-300 font-medium">
+                                <Pin className="w-3 h-3 shrink-0" />
+                                <span>Official Cashout Schedule</span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setInspectingRulesSnapshot(
+                                    ((msg.transactionData as any)?.cashoutRules as CashoutRulesConfig) ||
+                                      appConfig.cashoutRules,
+                                  )
+                                }
+                                className="px-2.5 py-1 rounded-lg bg-[#080E1D] hover:bg-[#172442] border border-slate-700 text-amber-300 font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer"
+                              >
+                                <Scale className="w-3 h-3" />
+                                <span>View Table</span>
+                              </button>
+                            </div>
                           )}
 
                           {/* Image Attachment preview */}
@@ -1540,6 +1613,37 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                 }
               }}
             />
+          </div>
+        </div>
+      )}
+
+      {inspectingRulesSnapshot && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm"
+          onClick={() => setInspectingRulesSnapshot(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Cashout rules table"
+            onClick={(e) => e.stopPropagation()}
+            className="relative w-full max-w-2xl rounded-2xl bg-[#0B1222] border border-slate-800 p-4 sm:p-5 shadow-2xl space-y-4 safe-modal-panel overflow-y-auto overscroll-contain"
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <Scale className="w-3.5 h-3.5 text-amber-400" />
+                <span>Cashout &amp; Redemption Limits</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setInspectingRulesSnapshot(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                aria-label="Close rules table"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <CashoutRulesShowcase rules={inspectingRulesSnapshot} compact />
           </div>
         </div>
       )}

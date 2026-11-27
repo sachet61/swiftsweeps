@@ -15,6 +15,12 @@ import {
   type ListMessagesOptions,
   type SendMessageInput,
 } from '../chat/chatRepo.js';
+import type { AppConfigRepo } from '../appConfig/appConfigRepo.js';
+import {
+  cloneDefaultCashoutRulesConfig,
+  computeCashoutRulesVersion,
+  formatCashoutRulesMessage,
+} from '../appConfig/cashoutRules.js';
 import type { ChatEventBroker, ChatTicketStatus } from '../chat/chatEvents.js';
 import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 import { requireRole } from '../middleware/auth.js';
@@ -25,6 +31,7 @@ export interface ChatRouterDeps {
   chatEvents: ChatEventBroker;
   requireAuth: RequestHandler;
   realtimeEvents?: RealtimeEventBroker;
+  appConfigRepo?: AppConfigRepo;
 }
 
 const ID_REGEX = /^[a-zA-Z0-9_-]{1,140}$/;
@@ -554,6 +561,7 @@ export function createChatRouter({
   chatEvents,
   requireAuth,
   realtimeEvents,
+  appConfigRepo,
 }: ChatRouterDeps): Router {
   const router = Router();
 
@@ -768,6 +776,128 @@ export function createChatRouter({
     requireRole('admin', 'agent'),
     validateStatusBody,
     handleStatusUpdate,
+  );
+
+  // 5b. Staff-only per-conversation Cashout Rules pin & unpin
+  router.post(
+    '/chat/conversations/:conversationId/pin-cashout-rules',
+    requireAuth,
+    requireRole('admin', 'agent'),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const authUser = req.authContext!.user;
+        const conversationId = readRequiredId(
+          req.params.conversationId,
+          'conversationId',
+        );
+
+        const cashoutRules = appConfigRepo
+          ? await appConfigRepo.getAuthoritativeCashoutRules()
+          : cloneDefaultCashoutRulesConfig();
+
+        if (!cashoutRules.enabled) {
+          throw new HttpError(
+            400,
+            'CASHOUT_RULES_DISABLED',
+            'Structured cashout rules are currently disabled in platform configuration.',
+          );
+        }
+
+        const rulesVersion = computeCashoutRulesVersion(cashoutRules);
+        const formattedText = formatCashoutRulesMessage(cashoutRules);
+
+        const result = await chatRepo.pinCashoutRules({
+          actorId: authUser.appUserId,
+          actorName: authUser.displayName,
+          actorRole: authUser.role,
+          conversationId,
+          rulesVersion,
+          formattedText,
+          cashoutRulesSnapshot: cashoutRules as unknown as Record<string, unknown>,
+        });
+
+        if (result.postedNewMessage) {
+          chatEvents.emit({
+            type: 'chat_message',
+            customerId: result.customerId,
+            conversationId: result.canonicalId,
+            isInternalNote: false,
+            message: result.message,
+            conversation: result.conversation,
+          });
+        }
+
+        chatEvents.emit({
+          type: 'conversation_pin_updated',
+          customerId: result.customerId,
+          conversationId: result.canonicalId,
+          conversation: result.conversation,
+        });
+
+        if (!result.deduplicated) {
+          realtimeEvents?.emitDomainInvalidation(
+            { scope: 'admin' },
+            ['audit_logs'],
+            'cashout_rules_pinned',
+            result.customerId,
+          );
+        }
+
+        res.json({
+          success: true,
+          conversation: result.conversation,
+          message: result.message,
+          rulesVersion,
+          postedNewMessage: result.postedNewMessage,
+          deduplicated: result.deduplicated,
+        });
+      } catch (err) {
+        next(mapRepoErrorToHttp(err));
+      }
+    },
+  );
+
+  router.delete(
+    '/chat/conversations/:conversationId/pin-cashout-rules',
+    requireAuth,
+    requireRole('admin', 'agent'),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const authUser = req.authContext!.user;
+        const conversationId = readRequiredId(
+          req.params.conversationId,
+          'conversationId',
+        );
+
+        const result = await chatRepo.unpinCashoutRules({
+          actorId: authUser.appUserId,
+          actorName: authUser.displayName,
+          actorRole: authUser.role,
+          conversationId,
+        });
+
+        chatEvents.emit({
+          type: 'conversation_pin_updated',
+          customerId: result.customerId,
+          conversationId: result.canonicalId,
+          conversation: result.conversation,
+        });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'admin' },
+          ['audit_logs'],
+          'cashout_rules_unpinned',
+          result.customerId,
+        );
+
+        res.json({
+          success: true,
+          conversation: result.conversation,
+        });
+      } catch (err) {
+        next(mapRepoErrorToHttp(err));
+      }
+    },
   );
 
   // 6. Staff-only transaction card status update (replaces direct client Supabase messages update)

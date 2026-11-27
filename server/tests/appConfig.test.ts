@@ -71,6 +71,16 @@ interface InMemoryFakedCashoutRow {
   timestamp: Date;
 }
 
+interface InMemoryMessageRow {
+  id: string;
+  conversation_id: string;
+  sender_role: string;
+  is_internal_note: boolean;
+  delivery_status: string;
+  created_at: Date;
+  sent_at: Date | string | null;
+}
+
 class InMemoryAppConfigDatabase
   implements Pick<DatabasePool, 'query' | 'connect'>
 {
@@ -79,6 +89,7 @@ class InMemoryAppConfigDatabase
   public auditLogs: InMemoryAuditRow[] = [];
   public appConfigRow: InMemoryAppConfigRow | null = null;
   public fakedCashouts = new Map<string, InMemoryFakedCashoutRow>();
+  public messages: InMemoryMessageRow[] = [];
   public failNextQueryOn: 'app_config' | 'faked_cashouts' | 'audit_logs' | null =
     null;
 
@@ -138,6 +149,42 @@ class InMemoryAppConfigDatabase
 
     if (normalized === 'SELECT 1 AS ok') {
       return { rows: [{ ok: 1 }] };
+    }
+
+    if (normalized === "SELECT to_regclass('public.messages')::text AS reg") {
+      return { rows: [{ reg: 'public.messages' }] };
+    }
+
+    if (normalized.startsWith('SELECT MAX(sent_at) AS last_sent_at FROM public.messages')) {
+      const convIds = new Set(
+        (Array.isArray(values[0]) ? values[0] : []).map((c) =>
+          String(c).toLowerCase(),
+        ),
+      );
+      let maxMs = 0;
+      let maxVal: Date | string | null = null;
+      for (const m of this.messages) {
+        if (!convIds.has(m.conversation_id.toLowerCase())) continue;
+        if (
+          m.sender_role !== 'agent' &&
+          m.sender_role !== 'admin' &&
+          m.sender_role !== 'system'
+        ) {
+          continue;
+        }
+        if (m.is_internal_note) continue;
+        if (m.delivery_status !== 'sent') continue;
+        if (!m.sent_at) continue;
+        const ms =
+          m.sent_at instanceof Date
+            ? m.sent_at.getTime()
+            : Date.parse(String(m.sent_at));
+        if (Number.isFinite(ms) && ms > maxMs) {
+          maxMs = ms;
+          maxVal = m.sent_at;
+        }
+      }
+      return { rows: [{ last_sent_at: maxVal }] };
     }
 
     if (
@@ -538,18 +585,26 @@ async function withAppConfigServer(
     db: InMemoryAppConfigDatabase;
     otps: SendOtpEmailPayload[];
     telegramCalls: TelegramCallLog[];
+    infoLogs: Array<Record<string, unknown>>;
+    getNowMs: () => number;
+    setNowMs: (ms: number) => void;
     setTelegramResponder: (
-      fn: (url: string, body?: Record<string, unknown>) => Record<string, unknown>,
+      fn: (
+        url: string,
+        body?: Record<string, unknown>,
+      ) => Promise<Record<string, unknown>> | Record<string, unknown>,
     ) => void;
   }) => Promise<void>,
 ): Promise<void> {
   const db = new InMemoryAppConfigDatabase();
   const { adapter, otps } = createCaptureEmailAdapter();
   const telegramCalls: TelegramCallLog[] = [];
+  const infoLogs: Array<Record<string, unknown>> = [];
+  let currentNowMs = Date.parse('2026-11-27T12:00:00.000Z');
   let responder: (
     url: string,
     body?: Record<string, unknown>,
-  ) => Record<string, unknown> = (url) => {
+  ) => Promise<Record<string, unknown>> | Record<string, unknown> = (url) => {
     if (url.endsWith('/getMe')) {
       return { ok: true, result: { username: 'swiftsweeps_support_bot' } };
     }
@@ -562,7 +617,7 @@ async function withAppConfigServer(
         ? (JSON.parse(init.body) as Record<string, unknown>)
         : undefined;
     telegramCalls.push({ url, body: parsedBody });
-    const payload = responder(url, parsedBody);
+    const payload = await responder(url, parsedBody);
     return {
       ok: true,
       status: 200,
@@ -581,14 +636,21 @@ async function withAppConfigServer(
   const app = createApiApp({
     config: createTestConfig(),
     logger: createLogger({
-      level: 'error',
-      writeStdout: () => {},
+      level: 'info',
+      writeStdout: (line) => {
+        try {
+          infoLogs.push(JSON.parse(line) as Record<string, unknown>);
+        } catch {
+          // ignore non-json
+        }
+      },
       writeStderr: () => {},
     }),
     pool: db,
     authDatabaseOverride: memoryAdapter(authMemoryDb),
     emailDeliveryOverride: adapter,
     telegramFetchOverride,
+    telegramNowFnOverride: () => currentNowMs,
   });
 
   const server = http.createServer(app);
@@ -605,6 +667,11 @@ async function withAppConfigServer(
       db,
       otps,
       telegramCalls,
+      infoLogs,
+      getNowMs: () => currentNowMs,
+      setNowMs: (ms: number) => {
+        currentNowMs = ms;
+      },
       setTelegramResponder: (fn) => {
         responder = fn;
       },
@@ -1656,5 +1723,479 @@ test('app-config & telegram: reject XSS bypass vectors in policies/platformRules
       assert.match(parsedErr.lastError || '', /\[REDACTED\]/);
     },
   );
+});
+
+test('telegram suppression: supports configurable windows, outbound sent_at tracking, failed-send non-suppression, customer isolation, concurrency safety, and non-PII logs', async () => {
+  await withAppConfigServer(
+    async ({
+      baseUrl,
+      db,
+      otps,
+      telegramCalls,
+      infoLogs,
+      getNowMs,
+      setNowMs,
+      setTelegramResponder,
+    }) => {
+      const alice = await signupAndSignIn(baseUrl, otps, {
+        name: 'Alice Player',
+        email: 'alice-suppress@example.com',
+        password: 'Password!123',
+      });
+      const bob = await signupAndSignIn(baseUrl, otps, {
+        name: 'Bob Player',
+        email: 'bob-suppress@example.com',
+        password: 'Password!123',
+      });
+      const admin = await signupAndSignIn(baseUrl, otps, {
+        name: 'Suppression Admin',
+        email: 'admin-suppress@example.com',
+        password: 'Password!123',
+      });
+      db.users.get(admin.userId)!.role = 'admin';
+
+      // 1. Validation rejects out-of-range or non-integer suppressionWindowMinutes
+      const invalidWindowRes = await fetch(`${baseUrl}/api/telegram/config`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: admin.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          botToken: '1234567890:AATestSuppressionToken999',
+          channelId: '-100555666777',
+          enabled: true,
+          suppressionWindowMinutes: -5,
+        }),
+      });
+      assert.equal(invalidWindowRes.status, 400);
+
+      // 2. Admin saves configurable 10-minute suppression period
+      const save10Res = await fetch(`${baseUrl}/api/telegram/config`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: admin.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          botToken: '1234567890:AATestSuppressionToken999',
+          channelId: '-100555666777',
+          enabled: true,
+          suppressionWindowMinutes: 10,
+        }),
+      });
+      assert.equal(save10Res.status, 200);
+      const save10Json = (await save10Res.json()) as {
+        config: { suppressionWindowMinutes: number };
+        status: { suppressionWindowMinutes: number };
+      };
+      assert.equal(save10Json.config.suppressionWindowMinutes, 10);
+      assert.equal(save10Json.status.suppressionWindowMinutes, 10);
+
+      // 3. Failed Telegram delivery does NOT count toward suppression
+      setTelegramResponder(() => ({
+        ok: false,
+        description: 'temporary upstream error',
+      }));
+      const failedRes = await fetch(`${baseUrl}/api/telegram/notify-message`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: alice.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ customerName: 'Alice Player' }),
+      });
+      assert.equal(failedRes.status, 200);
+      assert.equal(((await failedRes.json()) as { success: boolean }).success, false);
+      assert.equal(telegramCalls.length, 1);
+
+      // Subsequent attempt for Alice succeeds immediately because failed send was NOT recorded
+      // Also advance clock during sendTelegramText to prove recorded timestamp is post-send sentAt, not pre-send processing time
+      const tStart = Date.parse('2026-11-27T12:00:00.000Z');
+      setNowMs(tStart);
+      setTelegramResponder(async () => {
+        setNowMs(tStart + 30_000);
+        return { ok: true, result: { message_id: 42 } };
+      });
+
+      const aliceFirstOk = await fetch(`${baseUrl}/api/telegram/notify-message`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: alice.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ customerName: 'Alice Player' }),
+      });
+      assert.equal(aliceFirstOk.status, 200);
+      assert.equal(((await aliceFirstOk.json()) as { success: boolean }).success, true);
+      assert.equal(telegramCalls.length, 2);
+
+      // 4. At tStart + 10m + 5s (which is < 10m after actual sentAt = tStart + 30s, even though > 10m after tStart processing time),
+      // Alice is STILL suppressed! (Proves sent_at vs notification-processing timestamp)
+      setNowMs(tStart + 10 * 60_000 + 5_000);
+      setTelegramResponder(() => ({ ok: true, result: { message_id: 43 } }));
+      const aliceSuppressedRes = await fetch(`${baseUrl}/api/telegram/notify-message`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: alice.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ customerName: 'Alice Player' }),
+      });
+      const aliceSuppressedJson = (await aliceSuppressedRes.json()) as {
+        success: boolean;
+        suppressed?: boolean;
+        debounced?: boolean;
+      };
+      assert.equal(aliceSuppressedJson.success, true);
+      assert.equal(aliceSuppressedJson.suppressed, true);
+      assert.equal(aliceSuppressedJson.debounced, true);
+      assert.equal(telegramCalls.length, 2);
+
+      // Verify suppression log recorded customerId, reason, and suppressionWindowMinutes WITHOUT PII
+      const suppressionLog = infoLogs.find(
+        (l) => l.event === 'telegram_notification_suppressed',
+      );
+      assert.ok(suppressionLog);
+      assert.equal(suppressionLog.customerId, alice.userId);
+      assert.equal(suppressionLog.suppressionWindowMinutes, 10);
+      assert.equal(
+        suppressionLog.reason,
+        'recent_telegram_notification_sent_within_window',
+      );
+      assert.ok(!JSON.stringify(suppressionLog).includes('alice-suppress@example.com'));
+      assert.ok(!JSON.stringify(suppressionLog).includes('AATestSuppressionToken999'));
+
+      // 5. Independent customer handling: Bob is NOT suppressed by Alice's recent message
+      const bobRes = await fetch(`${baseUrl}/api/telegram/notify`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: bob.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text: 'Submitted cash-in receipt' }),
+      });
+      assert.equal(bobRes.status, 200);
+      assert.equal(((await bobRes.json()) as { success: boolean }).success, true);
+      assert.equal(telegramCalls.length, 3);
+
+      // 6. Dynamic config change (10m -> 30m) takes effect without code changes
+      await fetch(`${baseUrl}/api/telegram/config`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: admin.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          enabled: true,
+          suppressionWindowMinutes: 30,
+        }),
+      });
+      // Advance to tStart + 20m (past 10m, within 30m) -> Alice STILL suppressed
+      setNowMs(tStart + 20 * 60_000);
+      const stillSuppressed30 = await fetch(`${baseUrl}/api/telegram/notify`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: alice.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text: 'Second proof attempt' }),
+      });
+      assert.equal(((await stillSuppressed30.json()) as { suppressed?: boolean }).suppressed, true);
+      assert.equal(telegramCalls.length, 3);
+
+      // Advance to tStart + 31m -> window expired for both Alice & Bob!
+      setNowMs(tStart + 31 * 60_000);
+      const afterExpireRes = await fetch(`${baseUrl}/api/telegram/notify-message`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: alice.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ customerName: 'Alice Player' }),
+      });
+      assert.equal(((await afterExpireRes.json()) as { success: boolean; suppressed?: boolean }).suppressed, undefined);
+      assert.equal(telegramCalls.length, 4);
+
+      // 7. Reuses existing public.messages outbound sent_at records:
+      // Advance far past previous notifications
+      const tMsgBase = tStart + 120 * 60_000;
+      setNowMs(tMsgBase);
+      // Add an old creation timestamp message, plus a failed outbound message, plus a missing sent_at message,
+      // and a recent customer-sent message -> NONE of these should suppress!
+      db.messages.push(
+        {
+          id: 'msg_failed_outbound',
+          conversation_id: `conv_${bob.userId}`,
+          sender_role: 'agent',
+          is_internal_note: false,
+          delivery_status: 'failed',
+          created_at: new Date(tMsgBase - 60_000),
+          sent_at: new Date(tMsgBase - 60_000),
+        },
+        {
+          id: 'msg_missing_sent_at',
+          conversation_id: `conv_${bob.userId}`,
+          sender_role: 'agent',
+          is_internal_note: false,
+          delivery_status: 'sent',
+          created_at: new Date(tMsgBase - 60_000),
+          sent_at: null,
+        },
+        {
+          id: 'msg_internal_note',
+          conversation_id: `conv_${bob.userId}`,
+          sender_role: 'agent',
+          is_internal_note: true,
+          delivery_status: 'sent',
+          created_at: new Date(tMsgBase - 60_000),
+          sent_at: new Date(tMsgBase - 60_000),
+        },
+        {
+          id: 'msg_customer_self',
+          conversation_id: `conv_${bob.userId}`,
+          sender_role: 'customer',
+          is_internal_note: false,
+          delivery_status: 'sent',
+          created_at: new Date(tMsgBase - 60_000),
+          sent_at: new Date(tMsgBase - 60_000),
+        },
+      );
+
+      const bobAllowedRes = await fetch(`${baseUrl}/api/telegram/notify-message`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: bob.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ customerName: 'Bob Player' }),
+      });
+      assert.equal(((await bobAllowedRes.json()) as { suppressed?: boolean }).suppressed, undefined);
+      assert.equal(telegramCalls.length, 5);
+
+      // Now advance 40m and add a successfully sent outbound agent message with old created_at (2h ago)
+      // but recent actual sent_at (5m ago, in +05:30 timezone format) -> MUST suppress!
+      const tOutboundCheck = tMsgBase + 40 * 60_000;
+      setNowMs(tOutboundCheck);
+      // 5m before tOutboundCheck expressed as +05:30 offset string
+      const fiveMinEarlierMs = tOutboundCheck - 5 * 60_000;
+      const offsetDate = new Date(fiveMinEarlierMs + 5.5 * 60 * 60_000);
+      const pad2 = (n: number) => String(n).padStart(2, '0');
+      const offsetIso = `${offsetDate.getUTCFullYear()}-${pad2(offsetDate.getUTCMonth() + 1)}-${pad2(offsetDate.getUTCDate())}T${pad2(offsetDate.getUTCHours())}:${pad2(offsetDate.getUTCMinutes())}:${pad2(offsetDate.getUTCSeconds())}.000+05:30`;
+
+      db.messages.push({
+        id: 'msg_sent_outbound_tz',
+        conversation_id: `conv_${bob.userId}`,
+        sender_role: 'agent',
+        is_internal_note: false,
+        delivery_status: 'sent',
+        created_at: new Date(tOutboundCheck - 120 * 60_000), // creation time 2h ago
+        sent_at: offsetIso, // actual sent time 5m ago
+      });
+
+      const bobSuppressedByChatRes = await fetch(`${baseUrl}/api/telegram/notify-message`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: bob.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ customerName: 'Bob Player' }),
+      });
+      const bobSuppressedJson = (await bobSuppressedByChatRes.json()) as {
+        success: boolean;
+        suppressed?: boolean;
+      };
+      assert.equal(bobSuppressedJson.suppressed, true);
+      assert.equal(telegramCalls.length, 5);
+
+      // 8. Concurrency safety: two parallel requests for Alice after window expires send ONLY 1 Telegram message
+      const tConcurrent = getNowMs() + 120 * 60_000;
+      setNowMs(tConcurrent);
+      const beforeConcurrent = telegramCalls.length;
+      setTelegramResponder(async () => {
+        await new Promise((r) => setTimeout(r, 40));
+        return { ok: true, result: { message_id: 99 } };
+      });
+      const [concA, concB] = await Promise.all([
+        fetch(`${baseUrl}/api/telegram/notify-message`, {
+          method: 'POST',
+          headers: {
+            Origin: TRUSTED_ORIGIN,
+            Cookie: alice.cookie,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ customerName: 'Alice Player' }),
+        }),
+        fetch(`${baseUrl}/api/telegram/notify-message`, {
+          method: 'POST',
+          headers: {
+            Origin: TRUSTED_ORIGIN,
+            Cookie: alice.cookie,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ customerName: 'Alice Player' }),
+        }),
+      ]);
+      const concJsonA = (await concA.json()) as { success: boolean; suppressed?: boolean };
+      const concJsonB = (await concB.json()) as { success: boolean; suppressed?: boolean };
+      assert.equal(concJsonA.success, true);
+      assert.equal(concJsonB.success, true);
+      assert.equal(telegramCalls.length, beforeConcurrent + 1);
+      assert.equal(
+        [concJsonA.suppressed, concJsonB.suppressed].filter(Boolean).length,
+        1,
+      );
+    },
+  );
+});
+
+test('app-config: structured cashoutRules backfill, authoritative save, and validation', async () => {
+  await withAppConfigServer(async ({ baseUrl, db, otps }) => {
+    seedConfiguredAppConfig(db);
+
+    const admin = await signupAndSignIn(baseUrl, otps, {
+      name: 'Cashout Rules Admin',
+      email: 'cashout-admin@example.com',
+      password: 'Password!123',
+    });
+    db.users.get(admin.userId)!.role = 'admin';
+
+    // 1. Existing app_config without cashoutRules backfills authoritative defaults on GET /api/app-config
+    const initialRes = await fetch(`${baseUrl}/api/app-config`);
+    assert.equal(initialRes.status, 200);
+    const initialJson = (await initialRes.json()) as {
+      success: boolean;
+      config: {
+        cashoutRules?: {
+          enabled: boolean;
+          voidExcessWarning: string;
+          categories: Array<{ id: string; category: string; maximumLabel: string }>;
+        };
+      };
+    };
+    assert.equal(initialJson.success, true);
+    assert.equal(initialJson.config.cashoutRules?.enabled, true);
+    assert.equal(initialJson.config.cashoutRules?.categories.length, 5);
+    assert.equal(
+      initialJson.config.cashoutRules?.categories[0]?.category,
+      '$10 or more',
+    );
+    assert.equal(
+      initialJson.config.cashoutRules?.categories[3]?.maximumLabel,
+      '$15 game credits OR $10 cash',
+    );
+
+    // 2. Reject invalid / empty cashoutRules payloads with 400
+    const badEmptyCatsRes = await fetch(`${baseUrl}/api/admin/app-config`, {
+      method: 'PUT',
+      headers: {
+        Origin: TRUSTED_ORIGIN,
+        Cookie: admin.cookie,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        cashoutRules: {
+          enabled: true,
+          title: 'Cashout Limits',
+          subtitle: 'Updated rules',
+          voidExcessWarning: 'Any excess will be voided.',
+          categories: [],
+        },
+      }),
+    });
+    assert.equal(badEmptyCatsRes.status, 400);
+
+    const badKindRes = await fetch(`${baseUrl}/api/admin/app-config`, {
+      method: 'PUT',
+      headers: {
+        Origin: TRUSTED_ORIGIN,
+        Cookie: admin.cookie,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        cashoutRules: {
+          enabled: true,
+          title: 'Cashout Limits',
+          subtitle: 'Updated rules',
+          voidExcessWarning: 'Any excess will be voided.',
+          categories: [
+            {
+              id: 'tier_1',
+              category: 'Test',
+              kind: 'invalid_kind',
+              conditionLabel: 'Deposit range',
+              minimumLabel: '$10',
+              maximumLabel: '$20',
+            },
+          ],
+        },
+      }),
+    });
+    assert.equal(badKindRes.status, 400);
+
+    // 3. Valid update saves custom cashoutRules and returns it publicly
+    const validRes = await fetch(`${baseUrl}/api/admin/app-config`, {
+      method: 'PUT',
+      headers: {
+        Origin: TRUSTED_ORIGIN,
+        Cookie: admin.cookie,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        cashoutRules: {
+          enabled: true,
+          title: 'Cashout & Redemption Limits',
+          subtitle: 'Authoritative tier limits.',
+          voidExcessWarning:
+            'Any amount exceeding the applicable maximum cashout will be voided.',
+          categories: [
+            {
+              id: 'tier_10_or_more',
+              category: '$10 or more',
+              kind: 'deposit_range',
+              conditionLabel: 'Deposit range',
+              minimumLabel: '5× (load + bonus)',
+              maximumLabel: '15× (load + bonus)',
+            },
+            {
+              id: 'tier_5_to_9',
+              category: '$5–$9',
+              kind: 'deposit_range',
+              conditionLabel: 'Deposit range',
+              minimumLabel: '$30',
+              maximumLabel: '$65',
+            },
+          ],
+        },
+      }),
+    });
+    assert.equal(validRes.status, 200);
+
+    const publicAfterRes = await fetch(`${baseUrl}/api/app-config`);
+    assert.equal(publicAfterRes.status, 200);
+    const publicAfterJson = (await publicAfterRes.json()) as {
+      config: {
+        cashoutRules: {
+          categories: Array<{ id: string; maximumLabel: string }>;
+        };
+      };
+    };
+    assert.equal(publicAfterJson.config.cashoutRules.categories.length, 2);
+    assert.equal(
+      publicAfterJson.config.cashoutRules.categories[1]?.maximumLabel,
+      '$65',
+    );
+  });
 });
 

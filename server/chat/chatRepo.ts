@@ -114,6 +114,32 @@ export interface UpdateConversationStatusInput {
   status: ChatTicketStatus;
 }
 
+export interface PinCashoutRulesInput {
+  actorId: string;
+  actorName: string;
+  actorRole: AppUserRole;
+  conversationId: string;
+  rulesVersion: string;
+  formattedText: string;
+  cashoutRulesSnapshot: Record<string, unknown>;
+}
+
+export interface PinCashoutRulesResult {
+  canonicalId: string;
+  customerId: string;
+  conversation: ChatConversationPayload;
+  message: ChatMessagePayload;
+  postedNewMessage: boolean;
+  deduplicated: boolean;
+}
+
+export interface UnpinCashoutRulesInput {
+  actorId: string;
+  actorName: string;
+  actorRole: AppUserRole;
+  conversationId: string;
+}
+
 export interface UpdateTransactionCardStatusInput {
   actorId: string;
   actorName: string;
@@ -174,6 +200,12 @@ interface RawConversationRow {
   last_message_at: Date | string;
   created_at: Date | string;
   updated_at?: Date | string | null;
+  pinned_message_id?: string | null;
+  pinned_rules_version?: string | null;
+  pinned_at?: Date | string | null;
+  pinned_by_id?: string | null;
+  pinned_by_name?: string | null;
+  pinned_message_text?: string | null;
 }
 
 interface RawMessageRow {
@@ -188,6 +220,8 @@ interface RawMessageRow {
   transaction_data: unknown;
   is_internal_note: boolean | null;
   created_at: Date | string;
+  sent_at?: Date | string | null;
+  delivery_status?: string | null;
 }
 
 interface RawAttachmentRow {
@@ -367,6 +401,14 @@ function enrichMessageRow(row: RawMessageRow): ChatMessagePayload {
     row.is_internal_note || normalizedTx?.isInternalNote || normalizedTx?.is_internal_note,
   );
 
+  const rawDeliveryStatus = String(row.delivery_status || 'sent')
+    .trim()
+    .toLowerCase();
+  const deliveryStatus: 'pending' | 'sent' | 'failed' =
+    rawDeliveryStatus === 'pending' || rawDeliveryStatus === 'failed'
+      ? rawDeliveryStatus
+      : 'sent';
+
   return {
     id: String(row.id),
     conversation_id: String(row.conversation_id),
@@ -385,6 +427,8 @@ function enrichMessageRow(row: RawMessageRow): ChatMessagePayload {
     transaction_data: normalizedTx,
     is_internal_note: isInternal,
     created_at: toIsoString(row.created_at),
+    sent_at: row.sent_at ? toIsoString(row.sent_at) : null,
+    delivery_status: deliveryStatus,
   };
 }
 
@@ -401,6 +445,17 @@ function mapConversationRow(row: RawConversationRow): ChatConversationPayload {
     last_message_at: toIsoString(row.last_message_at),
     created_at: toIsoString(row.created_at),
     updated_at: toIsoString(row.updated_at || row.last_message_at || row.created_at),
+    pinned_message_id: row.pinned_message_id ? String(row.pinned_message_id) : null,
+    pinned_rules_version: row.pinned_rules_version
+      ? String(row.pinned_rules_version)
+      : null,
+    pinned_at: row.pinned_at ? toIsoString(row.pinned_at) : null,
+    pinned_by_id: row.pinned_by_id ? String(row.pinned_by_id) : null,
+    pinned_by_name: row.pinned_by_name ? String(row.pinned_by_name) : null,
+    pinned_message_text:
+      typeof row.pinned_message_text === 'string' && row.pinned_message_text.trim()
+        ? row.pinned_message_text
+        : null,
   };
 }
 
@@ -572,7 +627,13 @@ export class ChatRepo {
           c.last_message,
           c.last_message_at,
           c.created_at,
-          c.updated_at
+          c.updated_at,
+          c.pinned_message_id,
+          c.pinned_rules_version,
+          c.pinned_at,
+          c.pinned_by_id,
+          c.pinned_by_name,
+          c.pinned_message_text
         FROM public.conversations c
         LEFT JOIN public.users u ON u.id = c.customer_id
         ${whereClause}
@@ -620,7 +681,13 @@ export class ChatRepo {
             last_message,
             last_message_at,
             created_at,
-            updated_at
+            updated_at,
+            pinned_message_id,
+            pinned_rules_version,
+            pinned_at,
+            pinned_by_id,
+            pinned_by_name,
+            pinned_message_text
           FROM public.conversations
           WHERE id = $1
           LIMIT 1
@@ -793,7 +860,9 @@ export class ChatRepo {
           attachment_name,
           transaction_data,
           is_internal_note,
-          created_at
+          created_at,
+          sent_at,
+          delivery_status
         FROM public.messages
         WHERE ${conditions.join(' AND ')}
         ${orderClause}
@@ -1128,9 +1197,11 @@ export class ChatRepo {
             attachment_name,
             transaction_data,
             is_internal_note,
-            created_at
+            created_at,
+            sent_at,
+            delivery_status
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, timezone('utc'::text, now()), 'sent')
           ON CONFLICT (id) DO NOTHING
           RETURNING *
         `,
@@ -1231,6 +1302,337 @@ export class ChatRepo {
         customer_name: userRes.rows[0]?.display_name || updated.customer_name,
         customer_email: userRes.rows[0]?.email ?? null,
       });
+    });
+  }
+
+  public async pinCashoutRules(
+    input: PinCashoutRulesInput,
+  ): Promise<PinCashoutRulesResult> {
+    if (!isStaffRole(input.actorRole)) {
+      throw new ChatForbiddenError(
+        'Forbidden: Only support staff or administrators can pin cashout rules.',
+      );
+    }
+
+    const rawConvId = input.conversationId.trim();
+    if (!rawConvId) {
+      throw new ChatValidationError('conversationId is required.');
+    }
+
+    return this.withTransaction(async (client) => {
+      const resolvedCustomerId = await this.resolveCustomerIdForStaff(
+        client,
+        undefined,
+        rawConvId,
+      );
+      const targetUser = await this.resolveTargetCustomer(
+        client,
+        resolvedCustomerId,
+      );
+      const canonicalConvId = canonicalConversationIdForCustomer(targetUser.id);
+
+      const existingConvRes = await runQuery<
+        RawConversationRow & Record<string, unknown>
+      >(
+        client,
+        `
+          SELECT *
+          FROM public.conversations
+          WHERE id = $1
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [canonicalConvId],
+      );
+      const existingConv = existingConvRes.rows[0];
+
+      // 1. Idempotent short-circuit if this exact rules version is already pinned
+      if (
+        existingConv?.pinned_message_id &&
+        existingConv.pinned_rules_version === input.rulesVersion
+      ) {
+        const pinnedMsgRes = await runQuery<
+          RawMessageRow & Record<string, unknown>
+        >(
+          client,
+          `SELECT * FROM public.messages WHERE id = $1 LIMIT 1`,
+          [existingConv.pinned_message_id],
+        );
+        if (pinnedMsgRes.rows[0]) {
+          return {
+            canonicalId: canonicalConvId,
+            customerId: targetUser.id,
+            conversation: mapConversationRow({
+              ...existingConv,
+              customer_name:
+                targetUser.display_name || existingConv.customer_name,
+              customer_email: targetUser.email,
+            }),
+            message: enrichMessageRow(pinnedMsgRes.rows[0]),
+            postedNewMessage: false,
+            deduplicated: true,
+          };
+        }
+      }
+
+      // 2. Reuse an existing rules message of the exact same rulesVersion if already sent
+      const existingRulesMsgRes = await runQuery<
+        RawMessageRow & Record<string, unknown>
+      >(
+        client,
+        `
+          SELECT *
+          FROM public.messages
+          WHERE conversation_id = $1
+            AND transaction_data IS NOT NULL
+            AND transaction_data->>'rulesVersion' = $2
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+        [canonicalConvId, input.rulesVersion],
+      );
+
+      const nowIso = new Date().toISOString();
+      let pinnedMessageRow = existingRulesMsgRes.rows[0];
+      let postedNewMessage = false;
+
+      if (!pinnedMessageRow) {
+        postedNewMessage = true;
+        const msgId = `msg_rules_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        const txPayload = {
+          cardType: 'cashout_rules',
+          rulesVersion: input.rulesVersion,
+          cashoutRules: input.cashoutRulesSnapshot,
+          pinnedBy: input.actorName,
+          pinnedAt: nowIso,
+        };
+
+        if (!existingConv) {
+          await runQuery(
+            client,
+            `
+              INSERT INTO public.conversations (
+                id,
+                customer_id,
+                customer_name,
+                agent_id,
+                agent_name,
+                status,
+                last_message,
+                last_message_at,
+                created_at,
+                updated_at
+              )
+              VALUES ($1, $2, $3, $4, $5, 'open', $6, $7, $7, timezone('utc'::text, now()))
+              ON CONFLICT (id) DO NOTHING
+            `,
+            [
+              canonicalConvId,
+              targetUser.id,
+              targetUser.display_name || 'Customer',
+              input.actorId,
+              input.actorName,
+              'Pinned Cashout Rules',
+              nowIso,
+            ],
+          );
+        }
+
+        const insertedMsgRes = await runQuery<
+          RawMessageRow & Record<string, unknown>
+        >(
+          client,
+          `
+            INSERT INTO public.messages (
+              id,
+              conversation_id,
+              sender_id,
+              sender_name,
+              sender_role,
+              content,
+              attachment_url,
+              attachment_name,
+              transaction_data,
+              is_internal_note,
+              created_at,
+              sent_at,
+              delivery_status
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, $7::jsonb, false, $8, timezone('utc'::text, now()), 'sent')
+            ON CONFLICT (id) DO NOTHING
+            RETURNING *
+          `,
+          [
+            msgId,
+            canonicalConvId,
+            input.actorId,
+            input.actorName,
+            input.actorRole,
+            input.formattedText,
+            JSON.stringify(txPayload),
+            nowIso,
+          ],
+        );
+
+        pinnedMessageRow = insertedMsgRes.rows[0];
+        if (!pinnedMessageRow) {
+          throw new Error('Failed to create cashout rules message for pinning.');
+        }
+      }
+
+      const pinRes = await runQuery<
+        RawConversationRow & Record<string, unknown>
+      >(
+        client,
+        `
+          UPDATE public.conversations
+          SET pinned_message_id = $2,
+              pinned_rules_version = $3,
+              pinned_at = $4::timestamptz,
+              pinned_by_id = $5,
+              pinned_by_name = $6,
+              pinned_message_text = $7,
+              last_message = CASE WHEN $8::boolean THEN $9 ELSE last_message END,
+              last_message_at = CASE WHEN $8::boolean THEN $10::timestamptz ELSE last_message_at END,
+              updated_at = timezone('utc'::text, now())
+          WHERE id = $1
+          RETURNING *
+        `,
+        [
+          canonicalConvId,
+          String(pinnedMessageRow.id),
+          input.rulesVersion,
+          nowIso,
+          input.actorId,
+          input.actorName,
+          input.formattedText,
+          postedNewMessage,
+          'Pinned Cashout Rules',
+          nowIso,
+        ],
+      );
+
+      const savedConv = pinRes.rows[0];
+      if (!savedConv) {
+        throw new Error('Failed to pin cashout rules on conversation.');
+      }
+
+      const auditId = `audit_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      await runQuery(
+        client,
+        `
+          INSERT INTO public.audit_logs (
+            id, actor_id, actor_name, actor_role, action, entity_type, entity_id, details, timestamp
+          )
+          VALUES ($1, $2, $3, $4, 'CASHOUT_RULES_PINNED', 'conversation', $5, $6, timezone('utc'::text, now()))
+        `,
+        [
+          auditId,
+          input.actorId,
+          input.actorName,
+          input.actorRole,
+          canonicalConvId,
+          `Pinned cashout rules (${input.rulesVersion}) for conversation ${canonicalConvId} (${postedNewMessage ? 'new_message_posted' : 'reused_existing_message'}).`,
+        ],
+      );
+
+      return {
+        canonicalId: canonicalConvId,
+        customerId: targetUser.id,
+        conversation: mapConversationRow({
+          ...savedConv,
+          customer_name: targetUser.display_name || savedConv.customer_name,
+          customer_email: targetUser.email,
+        }),
+        message: enrichMessageRow(pinnedMessageRow),
+        postedNewMessage,
+        deduplicated: false,
+      };
+    });
+  }
+
+  public async unpinCashoutRules(
+    input: UnpinCashoutRulesInput,
+  ): Promise<{ canonicalId: string; customerId: string; conversation: ChatConversationPayload }> {
+    if (!isStaffRole(input.actorRole)) {
+      throw new ChatForbiddenError(
+        'Forbidden: Only support staff or administrators can unpin cashout rules.',
+      );
+    }
+
+    const rawConvId = input.conversationId.trim();
+    if (!rawConvId) {
+      throw new ChatValidationError('conversationId is required.');
+    }
+    const customerId = extractCustomerIdFromConvId(rawConvId);
+    const canonicalConvId = rawConvId.startsWith('conv_')
+      ? canonicalConversationIdForCustomer(customerId)
+      : rawConvId;
+    const candidateIds = Array.from(
+      new Set([rawConvId, canonicalConvId].filter(Boolean)),
+    );
+
+    return this.withTransaction(async (client) => {
+      const updateRes = await runQuery<
+        RawConversationRow & Record<string, unknown>
+      >(
+        client,
+        `
+          UPDATE public.conversations
+          SET pinned_message_id = NULL,
+              pinned_rules_version = NULL,
+              pinned_at = NULL,
+              pinned_by_id = NULL,
+              pinned_by_name = NULL,
+              pinned_message_text = NULL,
+              updated_at = timezone('utc'::text, now())
+          WHERE id = ANY($1::text[])
+          RETURNING *
+        `,
+        [candidateIds],
+      );
+
+      const updated = updateRes.rows[0];
+      if (!updated) {
+        throw new ChatNotFoundError('Conversation not found.');
+      }
+
+      const userRes = await runQuery<
+        { email: string; display_name: string } & Record<string, unknown>
+      >(
+        client,
+        `SELECT email, display_name FROM public.users WHERE id = $1 LIMIT 1`,
+        [updated.customer_id],
+      );
+
+      const auditId = `audit_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      await runQuery(
+        client,
+        `
+          INSERT INTO public.audit_logs (
+            id, actor_id, actor_name, actor_role, action, entity_type, entity_id, details, timestamp
+          )
+          VALUES ($1, $2, $3, $4, 'CASHOUT_RULES_UNPINNED', 'conversation', $5, $6, timezone('utc'::text, now()))
+        `,
+        [
+          auditId,
+          input.actorId,
+          input.actorName,
+          input.actorRole,
+          updated.id,
+          `Unpinned cashout rules for conversation ${updated.id}.`,
+        ],
+      );
+
+      return {
+        canonicalId: String(updated.id),
+        customerId: String(updated.customer_id),
+        conversation: mapConversationRow({
+          ...updated,
+          customer_name: userRes.rows[0]?.display_name || updated.customer_name,
+          customer_email: userRes.rows[0]?.email ?? null,
+        }),
+      };
     });
   }
 

@@ -16,6 +16,12 @@ export interface ChatStreamConversationRow {
   last_message_at: string;
   created_at: string;
   updated_at?: string;
+  pinned_message_id?: string | null;
+  pinned_rules_version?: string | null;
+  pinned_at?: string | null;
+  pinned_by_id?: string | null;
+  pinned_by_name?: string | null;
+  pinned_message_text?: string | null;
 }
 
 export interface ChatStreamMessageRow {
@@ -54,6 +60,12 @@ export type ChatStreamEventPayload =
       conversationId: string;
       status: string;
       conversation: ChatStreamConversationRow;
+    }
+  | {
+      type: 'conversation_pin_updated';
+      customerId: string;
+      conversationId: string;
+      conversation: ChatStreamConversationRow;
     };
 
 export type ChatStreamConnectionStatus =
@@ -67,6 +79,9 @@ export interface ChatStreamListener {
   onMessageUpdated?: (event: Extract<ChatStreamEventPayload, { type: 'message_updated' }>) => void;
   onConversationStatus?: (
     event: Extract<ChatStreamEventPayload, { type: 'conversation_status' }>
+  ) => void;
+  onConversationPinUpdated?: (
+    event: Extract<ChatStreamEventPayload, { type: 'conversation_pin_updated' }>
   ) => void;
   onStatus?: (status: ChatStreamConnectionStatus) => void;
   onReconnect?: (reason?: string) => void;
@@ -242,6 +257,22 @@ class ChatStreamClient {
       for (const listener of Array.from(this.listeners)) {
         try {
           listener.onConversationStatus?.(parsed);
+        } catch {
+          // Ignore listener errors
+        }
+      }
+    });
+
+    source.addEventListener('conversation_pin_updated', (evt) => {
+      if (this.source !== source) return;
+      this.recordEventId(evt);
+      const parsed = parseSseJson<
+        Extract<ChatStreamEventPayload, { type: 'conversation_pin_updated' }>
+      >((evt as MessageEvent).data);
+      if (!parsed || !parsed.conversationId || !parsed.conversation) return;
+      for (const listener of Array.from(this.listeners)) {
+        try {
+          listener.onConversationPinUpdated?.(parsed);
         } catch {
           // Ignore listener errors
         }

@@ -42,6 +42,7 @@ import { TelegramBotConfigCard } from '../../components/admin/TelegramBotConfigC
 import { PolicyAndPartnerCmsCard } from '../../components/admin/PolicyAndPartnerCmsCard';
 import { WheelOfLuckAdminCard } from '../../components/admin/WheelOfLuckAdminCard';
 import { AdminOfficialPartnersTab } from '../../components/admin/AdminOfficialPartnersTab';
+import { CashoutRulesAdminCard } from '../../components/admin/CashoutRulesAdminCard';
 import { normalizeReferralConfig } from '../../utils/referralUtils';
 import { storageService } from '../../services/storageService';
 import { validateImageFile } from '../../utils/uploadUtils';
@@ -1590,36 +1591,15 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
         onConfigSaved={(savedWheel) => setConfig((prev) => ({ ...prev, wheelOfLuck: savedWheel }))}
       />
 
-      {/* Platform Withdrawal Settings */}
-      <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900 shadow-md space-y-4">
-        <h2 className="text-base font-bold text-white flex items-center gap-2">
-          <Shield className="w-4 h-4 text-indigo-400" />
-          <span>Platform Withdrawal Rules &amp; Anti-Fraud Policies</span>
-        </h2>
-        <p className="text-xs text-slate-400">
-          Enforce 1:1 payout channel binding, KYC verification guidelines, and minimum withdrawal limits.
-        </p>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-          <div className="space-y-1">
-            <label className="text-slate-400 text-[11px]">Standard Withdrawal Processing Window</label>
-            <input
-              type="text"
-              defaultValue="15 minutes to 2 hours (24/7 Operations)"
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white"
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-slate-400 text-[11px]">Minimum Cashout Amount ($ USD)</label>
-            <input
-              type="number"
-              defaultValue={30}
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-white"
-            />
-          </div>
-        </div>
-      </div>
+      {/* Authoritative Cashout & Redemption Rules Editor */}
+      <CashoutRulesAdminCard
+        value={config.cashoutRules}
+        onChange={(nextCashoutRules) =>
+          setConfig((prev) => ({ ...prev, cashoutRules: nextCashoutRules }))
+        }
+        onSave={() => handleSaveConfig()}
+        isSaving={isSavingConfig}
+      />
 
       {/* Platform Legal & Terms Disclosures */}
       <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900 shadow-md space-y-4">

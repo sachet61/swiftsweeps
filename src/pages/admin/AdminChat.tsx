@@ -4,6 +4,7 @@ import {
   SupportConversation,
   ChatMessage,
 } from '../../types';
+import type { CashoutRulesConfig } from '../../utils/cashoutRulesUtils';
 import { dataService } from '../../services/dataService';
 import { chatStreamClient } from '../../services/chatStreamClient';
 import { mapDbMessageRowToChatMessage, sortAndDeduplicateMessages } from '../../services/chatOrderUtils';
@@ -19,7 +20,14 @@ import {
   getTicketStatusMeta,
   isMessageInternalNote,
 } from '../../utils/chatPresentationUtils';
+import {
+  computeCashoutRulesVersion,
+  deriveConversationPinStatus,
+  formatCashoutRulesMessage,
+} from '../../utils/cashoutRulesUtils';
 import { ChatTransactionCard } from '../../components/chat/ChatTransactionCard';
+import { PinnedCashoutRulesBanner } from '../../components/chat/PinnedCashoutRulesBanner';
+import { CashoutRulesShowcase } from '../../components/common/CashoutRulesShowcase';
 import { AdminChatTopUpModal } from '../../components/chat/AdminChatTopUpModal';
 import { AdminChatCashoutModal } from '../../components/chat/AdminChatCashoutModal';
 import {
@@ -54,6 +62,10 @@ import {
   Smile,
   AlertCircle,
   Image as ImageIcon,
+  Pin,
+  PinOff,
+  Scale,
+  Copy,
 } from 'lucide-react';
 import { notificationSoundService } from '../../services/notificationSoundService';
 import { storageService } from '../../services/storageService';
@@ -160,6 +172,12 @@ export const AdminChat: React.FC<AdminChatProps> = ({
 
   const [feedbackToast, setFeedbackToast] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [requestsVersion, setRequestsVersion] = useState(0);
+  const [appConfig, setAppConfig] = useState(() => dataService.getAppConfig());
+  const [pinningConvId, setPinningConvId] = useState<string | null>(null);
+  const [unpinningConvId, setUnpinningConvId] = useState<string | null>(null);
+  const [pinErrorByConvId, setPinErrorByConvId] = useState<Record<string, string>>({});
+  const [copiedRulesConvId, setCopiedRulesConvId] = useState<string | null>(null);
+  const [inspectingRulesSnapshot, setInspectingRulesSnapshot] = useState<CashoutRulesConfig | null>(null);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const initialDesktopMountRef = useRef(false);
@@ -430,6 +448,11 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   };
 
   useEffect(() => {
+    void dataService.fetchAppConfigFromServer().then((res) => {
+      if (res?.success && res.config) {
+        setAppConfig(res.config);
+      }
+    });
     dataService.fetchConversations().then(() => {
       syncFromMemory();
     });
@@ -462,6 +485,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     }
 
     const handleSync = () => {
+      setAppConfig(dataService.getAppConfig());
       syncFromMemory();
       setRequestsVersion((v) => v + 1);
       if (selectedConvId) {
@@ -631,6 +655,12 @@ export const AdminChat: React.FC<AdminChatProps> = ({
           void dataService.fetchConversationsFromServer({ limit: 25, replaceAll: false, silentEvent: true }).then(() => {
             syncFromMemory();
           });
+        }
+      },
+      onConversationPinUpdated: (event) => {
+        if (event?.conversation?.id) {
+          dataService.applyConversationFromStream(event.conversation);
+          syncFromMemory();
         }
       },
     });
@@ -829,6 +859,23 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     [activeConv?.status]
   );
 
+  const currentRulesVersion = useMemo(
+    () => computeCashoutRulesVersion(appConfig.cashoutRules),
+    [appConfig.cashoutRules]
+  );
+
+  const activePinStatus = useMemo(
+    () =>
+      deriveConversationPinStatus({
+        pinnedMessageId: activeConv?.pinnedMessageId,
+        pinnedRulesVersion: activeConv?.pinnedRulesVersion,
+        currentRulesVersion,
+      }),
+    [activeConv?.pinnedMessageId, activeConv?.pinnedRulesVersion, currentRulesVersion]
+  );
+
+  const activePinError = activeConv ? pinErrorByConvId[activeConv.id] || null : null;
+
   const handleSelectConversation = (convId: string) => {
     if (selectedConvId && messagesContainerRef.current) {
       saveConversationScrollSnapshot(
@@ -908,6 +955,92 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       setTimeout(() => setFeedbackToast(null), 4500);
     }
   };
+
+  const handlePinCashoutRules = async (convId: string) => {
+    if (!convId || pinningConvId) return;
+    setShowHeaderMenu(false);
+    setPinningConvId(convId);
+    setPinErrorByConvId((prev) => {
+      const next = { ...prev };
+      delete next[convId];
+      return next;
+    });
+
+    const res = await dataService.pinConversationCashoutRulesAsync(convId);
+    setPinningConvId(null);
+
+    if (res.success) {
+      syncFromMemory();
+      if (selectedConvIdRef.current === convId) {
+        setMessages(dataService.getMessages(convId));
+      }
+      setFeedbackToast({
+        text: res.deduplicated
+          ? 'Latest cashout rules are already pinned in this customer chat.'
+          : 'Cashout rules sent and pinned for this customer.',
+        type: 'success',
+      });
+      setTimeout(() => setFeedbackToast(null), 4000);
+    } else {
+      const errMsg = res.message || 'Failed to pin cashout rules.';
+      setPinErrorByConvId((prev) => ({ ...prev, [convId]: errMsg }));
+      setFeedbackToast({
+        text: errMsg,
+        type: 'error',
+      });
+      setTimeout(() => setFeedbackToast(null), 4500);
+    }
+  };
+
+  const handleUnpinCashoutRules = async (convId: string) => {
+    if (!convId || unpinningConvId) return;
+    setShowHeaderMenu(false);
+    setUnpinningConvId(convId);
+    setPinErrorByConvId((prev) => {
+      const next = { ...prev };
+      delete next[convId];
+      return next;
+    });
+
+    const res = await dataService.unpinConversationCashoutRulesAsync(convId);
+    setUnpinningConvId(null);
+
+    if (res.success) {
+      syncFromMemory();
+      setFeedbackToast({
+        text: 'Cashout rules unpinned from this conversation.',
+        type: 'info',
+      });
+      setTimeout(() => setFeedbackToast(null), 3500);
+    } else {
+      const errMsg = res.message || 'Failed to unpin cashout rules.';
+      setPinErrorByConvId((prev) => ({ ...prev, [convId]: errMsg }));
+      setFeedbackToast({
+        text: errMsg,
+        type: 'error',
+      });
+      setTimeout(() => setFeedbackToast(null), 4500);
+    }
+  };
+
+  const handleCopyCashoutRules = async (convId: string) => {
+    try {
+      await navigator.clipboard.writeText(formatCashoutRulesMessage(appConfig.cashoutRules));
+      setCopiedRulesConvId(convId);
+      setTimeout(() => setCopiedRulesConvId(null), 2000);
+    } catch {
+      // Ignore clipboard failures
+    }
+  };
+
+  const handleJumpToPinnedMessage = useCallback((messageId: string) => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const target = container.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, []);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1308,6 +1441,32 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                         </p>
 
                         <div className="flex items-center gap-1 shrink-0">
+                          {conv.pinnedMessageId && (
+                            <span
+                              title={
+                                deriveConversationPinStatus({
+                                  pinnedMessageId: conv.pinnedMessageId,
+                                  pinnedRulesVersion: conv.pinnedRulesVersion,
+                                  currentRulesVersion,
+                                }) === 'outdated'
+                                  ? 'Pinned rules update available'
+                                  : 'Cashout rules pinned'
+                              }
+                              className="inline-flex items-center justify-center p-0.5"
+                            >
+                              <Pin
+                                className={`w-3 h-3 ${
+                                  deriveConversationPinStatus({
+                                    pinnedMessageId: conv.pinnedMessageId,
+                                    pinnedRulesVersion: conv.pinnedRulesVersion,
+                                    currentRulesVersion,
+                                  }) === 'outdated'
+                                    ? 'text-amber-400'
+                                    : 'text-emerald-400'
+                                }`}
+                              />
+                            </span>
+                          )}
                           {convStatusMeta.value !== 'open' && (
                             <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-[#10182D] text-[#77839F] border border-slate-800 font-medium">
                               {convStatusMeta.label}
@@ -1469,6 +1628,37 @@ export const AdminChat: React.FC<AdminChatProps> = ({
 
                       <button
                         type="button"
+                        disabled={pinningConvId === activeConv.id}
+                        onClick={() => void handlePinCashoutRules(activeConv.id)}
+                        className={`px-2.5 py-1.5 rounded-xl border font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 ${
+                          activePinStatus === 'pinned'
+                            ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-300 hover:bg-emerald-500/15'
+                            : activePinStatus === 'outdated'
+                            ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25'
+                            : 'bg-[#0B1224] hover:bg-[#111B30] text-slate-200 border-slate-800'
+                        }`}
+                        title={
+                          activePinStatus === 'pinned'
+                            ? 'Latest cashout rules are pinned'
+                            : activePinStatus === 'outdated'
+                            ? 'Update pinned cashout rules'
+                            : 'Send and pin cashout rules for this customer'
+                        }
+                      >
+                        <Pin className="w-3.5 h-3.5" />
+                        <span>
+                          {pinningConvId === activeConv.id
+                            ? 'Pinning...'
+                            : activePinStatus === 'pinned'
+                            ? 'Pinned'
+                            : activePinStatus === 'outdated'
+                            ? 'Update Pin'
+                            : 'Pin Rules'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => setShowCustomerDetails((prev) => !prev)}
                         className={`p-2 rounded-xl border transition-colors ${
                           showCustomerDetails
@@ -1532,6 +1722,23 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                             >
                               <ArrowUpFromLine className="w-3.5 h-3.5 text-amber-400" />
                               <span>Cashout Desk</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={pinningConvId === activeConv.id}
+                              onClick={() => void handlePinCashoutRules(activeConv.id)}
+                              className="w-full px-3 py-2 rounded-xl hover:bg-[#111B30] text-left flex items-center gap-2.5 text-slate-200 font-medium disabled:opacity-50"
+                            >
+                              <Pin className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>
+                                {pinningConvId === activeConv.id
+                                  ? 'Pinning Cashout Rules...'
+                                  : activePinStatus === 'outdated'
+                                  ? 'Update Pinned Cashout Rules'
+                                  : activePinStatus === 'pinned'
+                                  ? 'Cashout Rules Pinned'
+                                  : 'Pin Cashout Rules'}
+                              </span>
                             </button>
                             <button
                               type="button"
@@ -1703,6 +1910,18 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                 </div>
               )}
 
+              <PinnedCashoutRulesBanner
+                conversation={activeConv}
+                cashoutRules={appConfig.cashoutRules}
+                isStaff
+                isPinning={pinningConvId === activeConv.id}
+                isUnpinning={unpinningConvId === activeConv.id}
+                pinError={activePinError}
+                onPinOrUpdate={() => void handlePinCashoutRules(activeConv.id)}
+                onUnpin={() => void handleUnpinCashoutRules(activeConv.id)}
+                onJumpToMessage={handleJumpToPinnedMessage}
+              />
+
               {/* MESSAGES FEED AREA */}
               <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden bg-[#070D20]">
                 <div
@@ -1845,6 +2064,28 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                                       }
                                     }}
                                   />
+                                )}
+
+                                {(msg.transactionData as any)?.cardType === 'cashout_rules' && (
+                                  <div className="mt-2.5 pt-2 border-t border-slate-700/60 flex items-center justify-between gap-2 text-[11px]">
+                                    <span className="inline-flex items-center gap-1.5 text-emerald-300 font-medium">
+                                      <Pin className="w-3 h-3 shrink-0" />
+                                      <span>Official Cashout Schedule</span>
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setInspectingRulesSnapshot(
+                                          ((msg.transactionData as any)?.cashoutRules as CashoutRulesConfig) ||
+                                            appConfig.cashoutRules,
+                                        )
+                                      }
+                                      className="px-2.5 py-1 rounded-lg bg-[#070D20] hover:bg-[#172442] border border-slate-700 text-amber-300 font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer"
+                                    >
+                                      <Scale className="w-3 h-3" />
+                                      <span>View Table</span>
+                                    </button>
+                                  </div>
                                 )}
 
                                 {(() => {
@@ -2200,8 +2441,11 @@ export const AdminChat: React.FC<AdminChatProps> = ({
               </form>
 
               {/* CUSTOMER INTELLIGENCE DRAWER */}
-              {showCustomerDetails && customerProfile && customerWallet && (
-                <div className="absolute top-16 right-3 bottom-24 w-80 max-w-[calc(100%-1.5rem)] bg-[#10182D] border border-slate-700/80 rounded-2xl shadow-2xl p-4 z-30 overflow-y-auto space-y-4 animate-in slide-in-from-right duration-150">
+              {showCustomerDetails && activeConv && (
+                <div
+                  data-testid="admin-chat-customer-drawer"
+                  className="absolute top-16 right-3 bottom-24 w-80 max-w-[calc(100%-1.5rem)] bg-[#10182D] border border-slate-700/80 rounded-2xl shadow-2xl p-4 z-30 overflow-y-auto space-y-4 animate-in slide-in-from-right duration-150"
+                >
                   <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                     <h3 className="font-bold text-[#F8FAFC] text-xs uppercase tracking-wider flex items-center gap-1.5">
                       <User className="w-3.5 h-3.5 text-[#5538F8]" />
@@ -2218,25 +2462,139 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                   </div>
 
                   {/* Balances */}
-                  <div className="p-3 rounded-xl bg-[#0B1224] border border-slate-800 space-y-1.5 text-xs">
-                    <div className="text-[10px] text-[#77839F] uppercase">Available Balance</div>
-                    <div className="text-xl font-bold text-[#F8FAFC] font-mono">
-                      ${customerWallet.availableBalance.toFixed(2)}
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800 text-[10px]">
-                      <div>
-                        <span className="text-[#77839F]">Reserved:</span>{' '}
-                        <span className="font-mono text-amber-400 font-bold">
-                          ${customerWallet.reservedBalance.toFixed(2)}
-                        </span>
+                  {customerWallet && (
+                    <div className="p-3 rounded-xl bg-[#0B1224] border border-slate-800 space-y-1.5 text-xs">
+                      <div className="text-[10px] text-[#77839F] uppercase">Available Balance</div>
+                      <div className="text-xl font-bold text-[#F8FAFC] font-mono">
+                        ${customerWallet.availableBalance.toFixed(2)}
                       </div>
-                      <div>
-                        <span className="text-[#77839F]">Pending:</span>{' '}
-                        <span className="font-mono text-indigo-300 font-bold">
-                          ${customerWallet.pendingDepositBalance.toFixed(2)}
-                        </span>
+                      <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800 text-[10px]">
+                        <div>
+                          <span className="text-[#77839F]">Reserved:</span>{' '}
+                          <span className="font-mono text-amber-400 font-bold">
+                            ${customerWallet.reservedBalance.toFixed(2)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[#77839F]">Pending:</span>{' '}
+                          <span className="font-mono text-indigo-300 font-bold">
+                            ${customerWallet.pendingDepositBalance.toFixed(2)}
+                          </span>
+                        </div>
                       </div>
                     </div>
+                  )}
+
+                  {/* Per-Customer Cashout Rules Pinning Panel */}
+                  <div className="p-3 rounded-xl bg-[#0B1224] border border-slate-800 space-y-2.5 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-[#F8FAFC] flex items-center gap-1.5">
+                        <Pin className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Cashout Rules Pinning</span>
+                      </span>
+                      <span
+                        className={`text-[11px] font-semibold ${
+                          activePinError
+                            ? 'text-rose-400'
+                            : activePinStatus === 'pinned'
+                            ? 'text-emerald-400'
+                            : activePinStatus === 'outdated'
+                            ? 'text-amber-300'
+                            : 'text-slate-400'
+                        }`}
+                      >
+                        {activePinError
+                          ? 'Pin Failed'
+                          : activePinStatus === 'pinned'
+                          ? 'Pinned'
+                          : activePinStatus === 'outdated'
+                          ? 'Update Available'
+                          : 'Not Pinned'}
+                      </span>
+                    </div>
+
+                    {activeConv.pinnedMessageId && (
+                      <div className="text-[11px] text-slate-400 space-y-0.5">
+                        {activeConv.pinnedByName && (
+                          <div>Pinned by {activeConv.pinnedByName}</div>
+                        )}
+                        {activeConv.pinnedAt && (
+                          <div className="font-mono text-[10px]">
+                            {new Date(activeConv.pinnedAt).toLocaleString()}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {activePinError && (
+                      <div className="p-2 rounded-lg bg-rose-950/60 border border-rose-800/70 text-[11px] text-rose-200">
+                        {activePinError}
+                      </div>
+                    )}
+
+                    <div className="flex flex-col gap-1.5">
+                      <button
+                        type="button"
+                        disabled={pinningConvId === activeConv.id}
+                        onClick={() => void handlePinCashoutRules(activeConv.id)}
+                        className={`w-full py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 ${
+                          activePinError
+                            ? 'bg-rose-600 hover:bg-rose-500 text-white'
+                            : activePinStatus === 'outdated'
+                            ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                            : 'bg-[#5036F5] hover:bg-[#5538F8] text-white'
+                        }`}
+                      >
+                        <Pin className="w-3.5 h-3.5" />
+                        <span>
+                          {pinningConvId === activeConv.id
+                            ? 'Pinning Cashout Rules...'
+                            : activePinError
+                            ? 'Retry Pin Cashout Rules'
+                            : activePinStatus === 'outdated'
+                            ? 'Update Pin to Latest Rules'
+                            : activePinStatus === 'pinned'
+                            ? 'Re-Verify Pinned Rules'
+                            : 'Pin Cashout Rules'}
+                        </span>
+                      </button>
+
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyCashoutRules(activeConv.id)}
+                          className="py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-semibold text-[11px] inline-flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                        >
+                          {copiedRulesConvId === activeConv.id ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-400" />
+                              <span className="text-emerald-300">Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              <span>Copy Rules</span>
+                            </>
+                          )}
+                        </button>
+
+                        {activeConv.pinnedMessageId && (
+                          <button
+                            type="button"
+                            disabled={unpinningConvId === activeConv.id}
+                            onClick={() => void handleUnpinCashoutRules(activeConv.id)}
+                            className="py-1.5 px-2.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/60 border border-rose-800/70 text-rose-200 font-semibold text-[11px] inline-flex items-center justify-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                          >
+                            <PinOff className="w-3 h-3" />
+                            <span>{unpinningConvId === activeConv.id ? 'Removing...' : 'Unpin'}</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <p className="text-[10px] text-slate-400 leading-relaxed pt-1 border-t border-slate-800/80">
+                      Telegram notifications post to a single shared staff channel without per-customer DM chats or Telegram pinning; use Copy Rules for external messages.
+                    </p>
                   </div>
 
                   {/* Linked Game IDs */}
@@ -2621,6 +2979,37 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                 }
               }}
             />
+          </div>
+        </div>
+      )}
+
+      {inspectingRulesSnapshot && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm"
+          onClick={() => setInspectingRulesSnapshot(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Cashout rules table"
+            onClick={(e) => e.stopPropagation()}
+            className="relative w-full max-w-2xl rounded-2xl bg-[#0B1222] border border-slate-800 p-4 sm:p-5 shadow-2xl space-y-4 safe-modal-panel overflow-y-auto overscroll-contain"
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <Scale className="w-3.5 h-3.5 text-amber-400" />
+                <span>Cashout &amp; Redemption Limits</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setInspectingRulesSnapshot(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                aria-label="Close rules table"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <CashoutRulesShowcase rules={inspectingRulesSnapshot} compact />
           </div>
         </div>
       )}

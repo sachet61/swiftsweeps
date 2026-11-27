@@ -72,6 +72,7 @@ import {
   isHtmlFallbackResponse,
   normalizeWheelConfig,
 } from '../utils/wheelOfLuckUtils';
+import { normalizeCashoutRulesConfig } from '../utils/cashoutRulesUtils';
 import {
   normalizeOfficialPartnerRow,
   sortOfficialPartners,
@@ -1919,6 +1920,12 @@ class DataService {
         lastMessageTimestamp: c.last_message_at || new Date().toISOString(),
         unreadCountCustomer: 0,
         unreadCountStaff: 0,
+        pinnedMessageId: c.pinned_message_id ?? c.pinnedMessageId ?? null,
+        pinnedRulesVersion: c.pinned_rules_version ?? c.pinnedRulesVersion ?? null,
+        pinnedAt: c.pinned_at ?? c.pinnedAt ?? null,
+        pinnedById: c.pinned_by_id ?? c.pinnedById ?? null,
+        pinnedByName: c.pinned_by_name ?? c.pinnedByName ?? null,
+        pinnedMessageText: c.pinned_message_text ?? c.pinnedMessageText ?? null,
         createdAt: c.created_at || new Date().toISOString(),
         updatedAt: c.last_message_at || c.created_at || new Date().toISOString(),
       });
@@ -2018,6 +2025,7 @@ class DataService {
     delete (merged as any).telegram;
     merged.referralProgram = normalizeReferralConfig(merged.referralProgram);
     merged.wheelOfLuck = normalizeWheelConfig(merged.wheelOfLuck);
+    merged.cashoutRules = normalizeCashoutRulesConfig(merged.cashoutRules);
     this.cache[STORAGE_KEYS.CONFIG] = merged;
     this.saveToLocalStorage(STORAGE_KEYS.CONFIG, this.cache[STORAGE_KEYS.CONFIG]);
     if (!silentEvent && typeof window !== 'undefined') {
@@ -6442,6 +6450,14 @@ class DataService {
         if (dup.status === 'open') hasOpenStatus = true;
         maxUnreadStaff = Math.max(maxUnreadStaff, dup.unreadCountStaff || 0);
         maxUnreadCustomer = Math.max(maxUnreadCustomer, dup.unreadCountCustomer || 0);
+        if (!primary.pinnedMessageId && dup.pinnedMessageId) {
+          primary.pinnedMessageId = dup.pinnedMessageId;
+          primary.pinnedRulesVersion = dup.pinnedRulesVersion;
+          primary.pinnedAt = dup.pinnedAt;
+          primary.pinnedById = dup.pinnedById;
+          primary.pinnedByName = dup.pinnedByName;
+          primary.pinnedMessageText = dup.pinnedMessageText;
+        }
 
         const dupMsgs = messagesDict[dup.id] || [];
         if (dupMsgs.length > 0) {
@@ -7432,6 +7448,149 @@ class DataService {
     }
 
     return { success: true, status: normalizedStatus };
+  }
+
+  public applyConversationFromStream(convRow: any): void {
+    if (!convRow || !convRow.id) return;
+    this.applyConversationRows([convRow], false);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: {
+            key: 'conversation_pin_updated',
+            conversationId: this.resolveCanonicalConvId(String(convRow.id)),
+          },
+        }),
+      );
+    }
+  }
+
+  public async pinConversationCashoutRulesAsync(
+    conversationId: string,
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    conversation?: SupportConversation;
+    postedMessage?: ChatMessage;
+    deduplicated?: boolean;
+  }> {
+    const actingUser = this.getCurrentUser();
+    if (!actingUser || (actingUser.role !== 'agent' && actingUser.role !== 'admin')) {
+      return { success: false, message: 'Only support staff can pin cashout rules.' };
+    }
+    const targetConvId = this.resolveCanonicalConvId(conversationId);
+    try {
+      const res = await fetch(
+        `/api/chat/conversations/${encodeURIComponent(targetConvId)}/pin-cashout-rules`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.success) {
+        return {
+          success: false,
+          message: extractServerApiError(
+            json,
+            `Failed to pin cashout rules (${res.status}).`,
+          ),
+        };
+      }
+      if (json.message?.id) {
+        this.applyMessageRows([json.message], false);
+      }
+      if (json.conversation) {
+        this.applyConversationRows([json.conversation], false);
+      }
+      const updatedConv = this.getConversations().find(
+        (c) => c.id === targetConvId || c.id === conversationId,
+      );
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'conversation_pin_updated', conversationId: targetConvId },
+          }),
+        );
+      }
+      return {
+        success: true,
+        conversation: updatedConv,
+        postedMessage: json.message
+          ? mapDbMessageRowToChatMessage(json.message, targetConvId)
+          : undefined,
+        deduplicated: Boolean(json.deduplicated),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Network error pinning cashout rules.',
+      };
+    }
+  }
+
+  public async unpinConversationCashoutRulesAsync(
+    conversationId: string,
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    conversation?: SupportConversation;
+  }> {
+    const actingUser = this.getCurrentUser();
+    if (!actingUser || (actingUser.role !== 'agent' && actingUser.role !== 'admin')) {
+      return { success: false, message: 'Only support staff can unpin cashout rules.' };
+    }
+    const targetConvId = this.resolveCanonicalConvId(conversationId);
+    try {
+      const res = await fetch(
+        `/api/chat/conversations/${encodeURIComponent(targetConvId)}/pin-cashout-rules`,
+        {
+          method: 'DELETE',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: {
+            Accept: 'application/json',
+          },
+        },
+      );
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.success) {
+        return {
+          success: false,
+          message: extractServerApiError(
+            json,
+            `Failed to unpin cashout rules (${res.status}).`,
+          ),
+        };
+      }
+      if (json.conversation) {
+        this.applyConversationRows([json.conversation], false);
+      }
+      const updatedConv = this.getConversations().find(
+        (c) => c.id === targetConvId || c.id === conversationId,
+      );
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'conversation_pin_updated', conversationId: targetConvId },
+          }),
+        );
+      }
+      return {
+        success: true,
+        conversation: updatedConv,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Network error unpinning cashout rules.',
+      };
+    }
   }
 
   // Notifications
@@ -8712,6 +8871,11 @@ class DataService {
       cfg.wheelOfLuck = normalizedWheel;
       dirty = true;
     }
+    const normalizedCashout = normalizeCashoutRulesConfig(cfg.cashoutRules);
+    if (!cfg.cashoutRules || !Array.isArray(cfg.cashoutRules.categories) || cfg.cashoutRules.categories.length === 0) {
+      cfg.cashoutRules = normalizedCashout;
+      dirty = true;
+    }
     if (!cfg.gatewaySimulator) {
       cfg.gatewaySimulator = INITIAL_CONFIG.gatewaySimulator;
       dirty = true;
@@ -8804,6 +8968,9 @@ class DataService {
         gatewaySimulator: newConfig.gatewaySimulator,
         cashoutFeed: newConfig.cashoutFeed,
         platformRules: newConfig.platformRules,
+        ...(newConfig.cashoutRules
+          ? { cashoutRules: normalizeCashoutRulesConfig(newConfig.cashoutRules) }
+          : {}),
         ...(newConfig.policies ? { policies: newConfig.policies } : {}),
       };
 
