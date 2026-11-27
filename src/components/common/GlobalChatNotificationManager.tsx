@@ -170,7 +170,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
   if (!activeToast) return null;
 
   return (
-    <div className="fixed top-18 sm:top-20 right-4 sm:right-6 z-50 max-w-sm w-full animate-in slide-in-from-top-4 fade-in duration-300">
+    <div className="fixed safe-toast-top left-4 right-4 sm:left-auto sm:right-6 z-50 sm:max-w-sm sm:w-full animate-in slide-in-from-top-4 fade-in duration-300">
       <div className="p-4 rounded-2xl bg-[#10182D]/98 border border-[#5036F5]/45 shadow-2xl shadow-black/80 backdrop-blur-xl flex items-start gap-3.5 ring-1 ring-[#5036F5]/20">
         <div className="w-10 h-10 rounded-xl bg-[#5036F5] text-white flex items-center justify-center shrink-0 shadow-md shadow-[#5036F5]/30">
           <Headphones className="w-5 h-5" />

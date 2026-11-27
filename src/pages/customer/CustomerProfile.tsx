@@ -6,6 +6,7 @@ import { useVerificationResolution } from '../../hooks/useVerificationResolution
 import { EmailOtpModal } from '../../components/auth/EmailOtpModal';
 import { IOSPwaInstallModal } from '../../components/common/IOSPwaInstallModal';
 import { webPushClient } from '../../services/webPushClient';
+import { usePWAInstall } from '../../hooks/usePWAInstall';
 import {
   User,
   Shield,
@@ -26,6 +27,7 @@ import {
   Check,
   Pencil,
   X,
+  Download,
 } from 'lucide-react';
 import { storageService } from '../../services/storageService';
 import { validateImageFile } from '../../utils/uploadUtils';
@@ -47,6 +49,13 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
   onLogout,
 }) => {
   const verificationUi = useVerificationResolution(currentUser);
+  const {
+    isInstalled: isPwaInstalled,
+    hasNativePrompt,
+    triggerNativeInstall,
+    openInstallModal,
+    env: pwaEnv,
+  } = usePWAInstall();
   const [successNote, setSuccessNote] = useState<string | null>(null);
   const [showOtpModal, setShowOtpModal] = useState(false);
   const [isPushActive, setIsPushActive] = useState<boolean>(false);
@@ -566,13 +575,38 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
             Delivers instant alerts with sound and vibration for chat replies, payout approvals, deposit credits, and gaming credentials.
           </p>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto shrink-0">
+            {!isPwaInstalled && (
+              <button
+                type="button"
+                onClick={async () => {
+                  if (hasNativePrompt) {
+                    const outcome = await triggerNativeInstall();
+                    if (outcome !== 'accepted') {
+                      openInstallModal(pwaEnv.recommendedTab);
+                    }
+                    return;
+                  }
+                  openInstallModal(pwaEnv.recommendedTab);
+                }}
+                data-testid="profile-install-app-btn"
+                className="w-full sm:w-auto min-h-[44px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-amber-500/35 text-amber-300 text-xs font-bold transition flex items-center justify-center gap-1.5 active:scale-95"
+              >
+                {pwaEnv.platform === 'ios' ? (
+                  <Smartphone className="w-3.5 h-3.5" />
+                ) : (
+                  <Download className="w-3.5 h-3.5" />
+                )}
+                <span>{hasNativePrompt ? 'Install App (1-Tap)' : 'Install App Guide'}</span>
+              </button>
+            )}
+
             {isPushActive ? (
               <button
                 type="button"
                 onClick={handleTestPush}
                 disabled={pushLoading}
-                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-400 text-xs font-bold transition flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50"
+                className="w-full sm:w-auto min-h-[44px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-400 text-xs font-bold transition flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50"
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 <span>{pushLoading ? 'Sending...' : 'Send Test Alert'}</span>
@@ -581,7 +615,7 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
               <button
                 type="button"
                 onClick={() => setShowIOSGuide(true)}
-                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 text-xs font-bold hover:brightness-110 transition flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 active:scale-95"
+                className="w-full sm:w-auto min-h-[44px] px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 text-xs font-bold hover:brightness-110 transition flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 active:scale-95"
               >
                 <Smartphone className="w-3.5 h-3.5" />
                 <span>iPhone Setup Guide</span>
@@ -591,7 +625,7 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
                 type="button"
                 onClick={handleEnablePush}
                 disabled={pushLoading}
-                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 text-xs font-bold hover:brightness-110 transition flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 active:scale-95 disabled:opacity-50"
+                className="w-full sm:w-auto min-h-[44px] px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 text-xs font-bold hover:brightness-110 transition flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 active:scale-95 disabled:opacity-50"
               >
                 <BellRing className="w-3.5 h-3.5" />
                 <span>{pushLoading ? 'Activating...' : 'Turn On Alerts'}</span>

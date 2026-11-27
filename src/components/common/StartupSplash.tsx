@@ -150,7 +150,7 @@ export const StartupSplash: React.FC<StartupSplashProps> = ({
       data-testid="startup-splash"
       role="status"
       aria-live="polite"
-      className={`fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#070B14] select-none transition-all duration-300 ease-out motion-reduce:transition-none ${
+      className={`fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#070B14] pt-safe-edge pb-safe-edge select-none transition-all duration-300 ease-out motion-reduce:transition-none ${
         fadingOut ? 'opacity-0 scale-105 pointer-events-none' : 'opacity-100 scale-100'
       }`}
       aria-hidden={fadingOut}

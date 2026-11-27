@@ -240,9 +240,9 @@ export const OfficialPartnerDrawer: React.FC<OfficialPartnerDrawerProps> = ({
         onClick={() => !isSaving && onClose()}
       />
 
-      <div className="relative z-10 w-full md:max-w-lg max-h-[92vh] md:max-h-full bg-[#0A0F1D] border-t md:border-t-0 md:border-l border-slate-800 rounded-t-3xl md:rounded-none shadow-2xl flex flex-col overflow-hidden">
+      <div className="relative z-10 w-full md:max-w-lg safe-sheet-panel md:max-h-full bg-[#0A0F1D] border-t md:border-t-0 md:border-l border-slate-800 rounded-t-3xl md:rounded-none shadow-2xl flex flex-col overflow-hidden pb-safe-edge">
         {/* Drawer Header */}
-        <div className="px-5 py-4 border-b border-slate-800 bg-[#0E1726] flex items-center justify-between gap-3">
+        <div className="px-5 py-4 md:pt-safe-drawer border-b border-slate-800 bg-[#0E1726] flex items-center justify-between gap-3">
           <div>
             <h2 id="partner-drawer-title" className="text-lg font-bold text-white">
               {editingPartner ? 'Edit Official Partner' : 'Add Official Partner'}

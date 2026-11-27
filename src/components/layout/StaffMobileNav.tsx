@@ -62,11 +62,11 @@ export const StaffMobileNav: React.FC<StaffMobileNavProps> = ({
   ];
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 z-40 pointer-events-none pb-safe md:hidden">
+    <div className="fixed bottom-0 left-0 right-0 z-40 pointer-events-none sm:pb-safe md:hidden">
       <div className="max-w-xl mx-auto px-0 sm:px-4 sm:mb-4 pointer-events-auto">
         <nav
           aria-label="Staff Bottom Navigation"
-          className="relative bg-[#0A0F1D]/95 sm:bg-[#0E1726]/95 backdrop-blur-xl border-t sm:border border-amber-500/20 sm:rounded-3xl shadow-2xl shadow-black/90 px-2 sm:px-4"
+          className="relative bg-[#0A0F1D]/95 sm:bg-[#0E1726]/95 backdrop-blur-xl border-t sm:border border-amber-500/20 sm:rounded-3xl shadow-2xl shadow-black/90 px-2 sm:px-4 pb-safe-edge sm:pb-0"
         >
           <div className="absolute inset-x-8 top-0 h-[1px] bg-gradient-to-r from-transparent via-amber-500/40 to-transparent" />
 

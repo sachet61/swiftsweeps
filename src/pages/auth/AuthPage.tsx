@@ -34,6 +34,8 @@ import { ResetPassword } from '../../components/auth/ResetPassword';
 import { EmailOtpModal } from '../../components/auth/EmailOtpModal';
 import { SwiftSweepsLogo } from '../../components/common/SwiftSweepsLogo';
 import { LiveCashoutTicker } from '../../components/common/LiveCashoutTicker';
+import { PWAInstallButton } from '../../components/common/PWAInstallButton';
+import { PWAInstallBanner } from '../../components/common/PWAInstallBanner';
 
 interface AuthPageProps {
   onLoginSuccess: (user: UserProfile) => void;
@@ -313,11 +315,11 @@ export const AuthPage: React.FC<AuthPageProps> = ({
 
       {/* Top Header */}
       {/* Sticky Header Container */}
-      <div className="sticky top-0 z-40">
-        <header className="border-b border-amber-500/15 bg-[#0A0F1D]/90 backdrop-blur-md z-30 px-4 sm:px-6 py-3.5 flex items-center justify-between max-w-7xl mx-auto w-full">
+      <div className="sticky top-0 z-40 bg-[#0A0F1D]/90 backdrop-blur-md pt-safe-edge">
+        <header className="border-b border-amber-500/15 z-30 px-4 sm:px-6 py-3.5 flex items-center justify-between max-w-7xl mx-auto w-full">
           <SwiftSweepsLogo size="md" />
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             {/* Live Platform Highlights */}
             <div className="hidden md:flex items-center gap-3 text-xs">
               <span className="text-emerald-400 font-mono flex items-center gap-1">
@@ -329,11 +331,14 @@ export const AuthPage: React.FC<AuthPageProps> = ({
               </span>
             </div>
 
+            {/* Interactive PWA Install Entry */}
+            <PWAInstallButton variant="compact" showPushButton={false} />
+
             {/* 24/7 Live Care Button */}
             <button
               type="button"
               onClick={() => setShowSupportModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-500/30 bg-[#131C2E] hover:bg-[#1A263D] text-amber-200 text-xs font-semibold transition shadow-sm"
+              className="flex items-center gap-1.5 px-3 py-1.5 min-h-[36px] rounded-xl border border-amber-500/30 bg-[#131C2E] hover:bg-[#1A263D] text-amber-200 text-xs font-semibold transition shadow-sm"
             >
               <Headphones className="w-3.5 h-3.5 text-amber-400" />
               <span className="hidden sm:inline">24/7 Support</span>
@@ -364,6 +369,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
             </div>
           </div>
         )}
+
+        {/* Dismissible Inline PWA Install Card (Android & iPhone) */}
+        <PWAInstallBanner />
 
         {/* Split View Layout: Game Showcase (Left 7 cols) & Auth Portal (Right 5 cols) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
@@ -854,8 +862,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({
 
       {/* 24/7 Support Modal */}
       {showSupportModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#0E1726] border border-amber-500/30 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center safe-modal-overlay">
+          <div className="bg-[#0E1726] border border-amber-500/30 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 safe-modal-panel overflow-y-auto overscroll-contain">
             <div className="flex items-center justify-between pb-2 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Headphones className="w-5 h-5 text-amber-400" />
@@ -916,8 +924,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({
 
       {/* Policy Modal Viewer */}
       {activePolicyModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#0E1628] border border-slate-700/80 rounded-3xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center safe-modal-overlay">
+          <div className="bg-[#0E1628] border border-slate-700/80 rounded-3xl max-w-2xl w-full safe-modal-panel overflow-y-auto p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center gap-2">
                 <ShieldCheck className="w-5 h-5 text-amber-400" />
@@ -981,7 +989,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
       )}
 
       {/* Fixed Mobile & Tablet Bottom Navigation Bar */}
-      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0A0F1D]/95 backdrop-blur-md border-t border-slate-800/80 p-2.5 px-4 flex items-center justify-between gap-2 shadow-2xl">
+      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0A0F1D]/95 backdrop-blur-md border-t border-slate-800/80 pt-2.5 px-4 pb-[calc(0.625rem+max(env(safe-area-inset-bottom,0px),var(--app-safe-area-bottom,0px)))] flex items-center justify-between gap-2 shadow-2xl">
         <button
           type="button"
           onClick={() => {

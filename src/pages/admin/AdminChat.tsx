@@ -1120,7 +1120,11 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       {/* Toast Feedback */}
       {feedbackToast && (
         <div
-          className={`mb-2 p-3 rounded-xl text-xs flex items-center justify-between shadow-xl animate-in fade-in duration-200 border shrink-0 ${
+          className={`${
+            selectedConvId
+              ? 'fixed safe-toast-top left-3 right-3 z-50 md:static md:mb-2'
+              : 'mb-2'
+          } p-3 rounded-xl text-xs flex items-center justify-between shadow-xl animate-in fade-in duration-200 border shrink-0 ${
             feedbackToast.type === 'error'
               ? 'bg-rose-950/90 border-rose-700 text-rose-200'
               : 'bg-emerald-950/90 border-emerald-700 text-emerald-200'
@@ -2325,14 +2329,14 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       {/* ======================================================== */}
       {showGameIdModal && activeConv && (
         <div
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
           onClick={(e) => {
             if (e.target === e.currentTarget) setShowGameIdModal(false);
           }}
         >
           <form
             onSubmit={handleConfirmProvisionGameId}
-            className="relative w-full max-w-md bg-[#10182D] border border-slate-700/80 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto max-h-[90vh] overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-md bg-[#10182D] border border-slate-700/80 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto safe-modal-panel overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
@@ -2518,12 +2522,12 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       {/* ======================================================== */}
       {showNewChatModal && (
         <div
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
           onClick={(e) => {
             if (e.target === e.currentTarget) setShowNewChatModal(false);
           }}
         >
-          <div className="relative w-full max-w-md bg-[#10182D] border border-slate-700/80 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto max-h-[90vh] overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150">
+          <div className="relative w-full max-w-md bg-[#10182D] border border-slate-700/80 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto safe-modal-panel overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-[#F8FAFC] flex items-center gap-2">
                 <MessageSquare className="w-5 h-5 text-[#5538F8]" />
@@ -2582,21 +2586,31 @@ export const AdminChat: React.FC<AdminChatProps> = ({
 
       {/* LIGHTBOX MODAL: Full Resolution Image Viewer */}
       {lightboxImage && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150">
-          <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center">
-            <button
-              type="button"
-              onClick={() => setLightboxImage(null)}
-              className="absolute -top-10 right-0 p-1.5 rounded-full bg-slate-800 text-slate-300 hover:text-white transition-colors"
-              title="Close image viewer"
-              aria-label="Close image viewer"
-            >
-              <X className="w-5 h-5" />
-            </button>
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/85 backdrop-blur-md animate-in fade-in duration-150"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setLightboxImage(null);
+          }}
+        >
+          <div className="relative w-full max-w-4xl safe-modal-panel flex flex-col items-center gap-2 overflow-hidden">
+            <div className="w-full flex items-center justify-between gap-2 px-1 shrink-0">
+              <span className="text-xs font-mono text-slate-300 bg-slate-900/90 px-3 py-1 rounded-full border border-slate-700 truncate">
+                {lightboxImage.name}
+              </span>
+              <button
+                type="button"
+                onClick={() => setLightboxImage(null)}
+                className="p-2 rounded-full bg-slate-800/90 text-slate-200 hover:text-white border border-slate-700 transition-colors shrink-0"
+                title="Close image viewer"
+                aria-label="Close image viewer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
             <img
               src={lightboxImage.url}
               alt={lightboxImage.name}
-              className="max-w-full max-h-[82vh] object-contain rounded-xl border border-slate-700/80 shadow-2xl"
+              className="max-w-full max-h-[72dvh] object-contain rounded-xl border border-slate-700/80 shadow-2xl"
               referrerPolicy="no-referrer"
               onError={(e) => {
                 const target = e.currentTarget;
@@ -2607,9 +2621,6 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                 }
               }}
             />
-            <div className="mt-2 text-xs font-mono text-slate-300 bg-slate-900/90 px-3 py-1 rounded-full border border-slate-700">
-              {lightboxImage.name}
-            </div>
           </div>
         </div>
       )}

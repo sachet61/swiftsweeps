@@ -605,7 +605,7 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
       {/* Activity Audit Detail Modal */}
       {selectedItem && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay"
           role="dialog"
           aria-modal="true"
           aria-labelledby="activity-modal-title"
@@ -614,7 +614,7 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
             className="fixed inset-0 bg-black/75 backdrop-blur-sm"
             onClick={() => setSelectedItem(null)}
           />
-          <div className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-[#0E1726] border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4">
+          <div className="relative w-full max-w-lg safe-modal-panel overflow-y-auto overscroll-contain bg-[#0E1726] border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4">
             <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-800">
               <div>
                 <div className="text-[10px] font-mono uppercase tracking-wider text-amber-400">

@@ -39,7 +39,7 @@ export const OfficialPartnersPreviewModal: React.FC<OfficialPartnersPreviewModal
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay"
       role="dialog"
       aria-modal="true"
       aria-labelledby="preview-partners-title"
@@ -48,7 +48,7 @@ export const OfficialPartnersPreviewModal: React.FC<OfficialPartnersPreviewModal
         className="fixed inset-0 bg-black/80 backdrop-blur-sm"
         onClick={onClose}
       />
-      <div className="relative z-10 w-full max-w-4xl max-h-[88vh] bg-[#0A0F1D] border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+      <div className="relative z-10 w-full max-w-4xl safe-modal-panel bg-[#0A0F1D] border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-800 bg-[#0E1726] flex items-center justify-between gap-3">
           <div>
             <h2 id="preview-partners-title" className="text-lg font-bold text-white">

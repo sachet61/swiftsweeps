@@ -499,7 +499,7 @@ export default function App() {
           role="status"
           aria-live="polite"
           aria-busy="true"
-          className="min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col items-center justify-center px-4 py-8"
+          className="min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col items-center justify-center px-4 py-8 pt-safe-edge pb-safe-edge"
         >
           <div className="w-full max-w-md rounded-2xl bg-[#0E1628] border border-slate-800 shadow-2xl p-6 sm:p-8 flex flex-col items-center text-center space-y-5">
             <SwiftSweepsLogo size="lg" showText={true} />
@@ -530,7 +530,7 @@ export default function App() {
       <div
         data-testid="auth-api-unavailable-screen"
         role="alert"
-        className="min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col items-center justify-center px-4 py-8"
+        className="min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col items-center justify-center px-4 py-8 pt-safe-edge pb-safe-edge"
       >
         <div className="w-full max-w-md rounded-2xl bg-[#0E1628] border border-rose-500/30 shadow-2xl p-6 sm:p-8 flex flex-col items-center text-center space-y-5">
           <SwiftSweepsLogo size="lg" showText={true} />
@@ -1104,7 +1104,7 @@ export default function App() {
             className="fixed inset-0 bg-black/70 backdrop-blur-sm"
             onClick={handleCloseMoreDrawer}
           />
-          <div className="relative w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 z-10 space-y-4 pb-safe animate-in slide-in-from-bottom duration-200">
+          <div className="relative w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 z-10 space-y-4 pb-safe safe-sheet-panel overflow-y-auto animate-in slide-in-from-bottom duration-200">
             <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto -mt-1 mb-2" />
 
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">

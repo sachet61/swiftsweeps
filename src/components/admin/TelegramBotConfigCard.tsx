@@ -466,12 +466,12 @@ export const TelegramBotConfigCard: React.FC = () => {
 
       {/* Step-by-Step Telegram Channel Setup Guide Modal */}
       {showGuideModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay">
           <div
             className="fixed inset-0 bg-black/80 backdrop-blur-sm"
             onClick={() => setShowGuideModal(false)}
           />
-          <div className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl z-10 space-y-4 text-xs text-slate-300 max-h-[90vh] overflow-y-auto animate-in zoom-in-95 duration-150">
+          <div className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl z-10 space-y-4 text-xs text-slate-300 safe-modal-panel overflow-y-auto overscroll-contain animate-in zoom-in-95 duration-150">
             {/* Modal Header */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2.5">

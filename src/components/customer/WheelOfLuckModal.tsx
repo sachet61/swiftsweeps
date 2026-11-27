@@ -391,7 +391,7 @@ export const WheelOfLuckModal: React.FC<WheelOfLuckModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay"
       role="dialog"
       aria-modal="true"
       aria-labelledby="wheel-modal-title"
@@ -403,7 +403,7 @@ export const WheelOfLuckModal: React.FC<WheelOfLuckModalProps> = ({
         }}
       />
 
-      <div className="relative z-10 w-full max-w-4xl max-h-[92dvh] flex flex-col overflow-hidden rounded-2xl border border-amber-500/30 bg-[#0A0F1D] shadow-2xl">
+      <div className="relative z-10 w-full max-w-4xl safe-modal-panel flex flex-col overflow-hidden rounded-2xl border border-amber-500/30 bg-[#0A0F1D] shadow-2xl">
         {/* Non-overlapping Top Modal Header (strictly outside scrollable body so wheel never clips underneath) */}
         <div className="shrink-0 z-20 px-3.5 py-2.5 sm:px-5 sm:py-3.5 border-b border-slate-800/90 bg-[#0E1726]">
           <div className="flex items-center justify-between gap-2.5">

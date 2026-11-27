@@ -1289,8 +1289,8 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
 
       {/* Full-Screen Chime QR Enlarge & Download Modal */}
       {showChimeQrModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="relative w-full max-w-sm rounded-2xl bg-[#0E1628] border border-teal-500/30 p-5 sm:p-6 shadow-2xl flex flex-col items-center text-center space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="relative w-full max-w-sm rounded-2xl bg-[#0E1628] border border-teal-500/30 p-5 sm:p-6 shadow-2xl flex flex-col items-center text-center space-y-4 safe-modal-panel overflow-y-auto overscroll-contain">
             <button
               type="button"
               onClick={() => setShowChimeQrModal(false)}
@@ -1351,7 +1351,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
       {/* Bonus & Payout Rules Modal */}
       {showRulesModal && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150"
+          className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm animate-in fade-in duration-150"
           onClick={() => setShowRulesModal(false)}
         >
           <div
@@ -1359,7 +1359,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
             aria-modal="true"
             aria-labelledby="bonus-payout-rules-title"
             onClick={(e) => e.stopPropagation()}
-            className="relative w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-5 sm:p-6 shadow-2xl space-y-4 text-xs text-slate-300"
+            className="relative w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-5 sm:p-6 shadow-2xl space-y-4 text-xs text-slate-300 safe-modal-panel overflow-y-auto overscroll-contain"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2 text-white font-bold text-sm">

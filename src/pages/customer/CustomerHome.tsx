@@ -8,6 +8,7 @@ import {
 import { LiveCashoutFeedList } from '../../components/common/LiveCashoutFeedList';
 import { GamePlatformCard } from '../../components/customer/GamePlatformCard';
 import { WheelStrip } from '../../components/customer/WheelStrip';
+import { PWAInstallBanner } from '../../components/common/PWAInstallBanner';
 import { useWheelAvailability } from '../../hooks/useWheelAvailability';
 import { toggleGameCardOverlay } from '../../utils/gameCardUtils';
 import { getMessageLink, sortOfficialPartners } from '../../utils/officialPartnersUtils';
@@ -316,6 +317,9 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
 
       {/* Dashboard Wheel of Luck Reminder Strip (Only rendered when spin is available) */}
       <WheelStrip visible={isWheelSpinAvailable} onOpenWheel={handleOpenWheel} />
+
+      {/* Dismissible Inline PWA App Install Prompt (Android & iPhone) */}
+      <PWAInstallBanner />
 
       {/* Referee Welcome Bonus Card (Visible when player signed up via referral or was linked by support) */}
       {welcomeBonus?.hasReferrer && (

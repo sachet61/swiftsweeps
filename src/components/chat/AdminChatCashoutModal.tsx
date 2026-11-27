@@ -265,12 +265,12 @@ export const AdminChatCashoutModal: React.FC<AdminChatCashoutModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+      className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
       onClick={(e) => {
         if (e.target === e.currentTarget && !isSubmitting) onClose();
       }}
     >
-      <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto max-h-[92vh] overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150">
+      <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto safe-modal-panel overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-800">
           <div className="flex items-center gap-2.5 min-w-0">

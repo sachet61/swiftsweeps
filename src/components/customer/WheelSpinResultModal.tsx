@@ -29,7 +29,7 @@ export const WheelSpinResultModal: React.FC<WheelSpinResultModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-4"
+      className="fixed inset-0 z-[70] flex items-center justify-center safe-modal-overlay"
       role="dialog"
       aria-modal="true"
       aria-labelledby="wheel-spin-result-modal-title"
@@ -40,7 +40,7 @@ export const WheelSpinResultModal: React.FC<WheelSpinResultModalProps> = ({
         onClick={onDone}
       />
 
-      <div className="relative z-10 w-full max-w-md max-h-[90dvh] overflow-y-auto overflow-x-hidden rounded-2xl border border-amber-500/45 bg-[#0E1726] shadow-2xl">
+      <div className="relative z-10 w-full max-w-md safe-modal-panel overflow-y-auto overflow-x-hidden rounded-2xl border border-amber-500/45 bg-[#0E1726] shadow-2xl">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 px-4 py-3.5 sm:px-5 sm:py-4 border-b border-slate-800 bg-[#0A0F1D]">
           <div className="flex items-center gap-3 min-w-0">

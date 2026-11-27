@@ -81,7 +81,7 @@ export const WheelPopup: React.FC<WheelPopupProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay"
       role="dialog"
       aria-modal="true"
       aria-labelledby={headingId}
@@ -95,7 +95,7 @@ export const WheelPopup: React.FC<WheelPopupProps> = ({
 
       <div
         ref={dialogRef}
-        className="relative z-10 w-[80vw] max-w-[360px] sm:w-full sm:max-w-[400px] rounded-2xl bg-[#0E1726] border border-amber-500/35 p-6 shadow-2xl text-center motion-reduce:transition-none"
+        className="relative z-10 w-[80vw] max-w-[360px] sm:w-full sm:max-w-[400px] safe-modal-panel overflow-y-auto rounded-2xl bg-[#0E1726] border border-amber-500/35 p-6 shadow-2xl text-center motion-reduce:transition-none"
       >
         <button
           type="button"

@@ -822,7 +822,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
         const isSelf = currentUser.id === selectedUser.id;
 
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay">
             <div
               className="fixed inset-0 bg-black/75 backdrop-blur-sm"
               onClick={() => {
@@ -830,7 +830,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                 setModalFeedback(null);
               }}
             />
-            <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150 text-xs max-h-[92vh] overflow-y-auto">
+            <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150 text-xs safe-modal-panel overflow-y-auto overscroll-contain">
               {/* Header */}
               <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                 <div className="flex items-center gap-3 min-w-0">
@@ -1478,11 +1478,11 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
 
       {/* Modal for Editing Single Game Account Credentials */}
       {editingGameAcc && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay">
           <div className="fixed inset-0 bg-black/75 backdrop-blur-sm" onClick={() => setEditingGameAcc(null)} />
           <form
             onSubmit={handleSaveGameAccount}
-            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 safe-modal-panel overflow-y-auto overscroll-contain animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
@@ -1577,11 +1577,11 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
 
       {/* Modal for Provisioning / Assigning Game ID (Enforcing 1 ID per Game) */}
       {showAddGameModal && selectedUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay">
           <div className="fixed inset-0 bg-black/75 backdrop-blur-sm" onClick={() => setShowAddGameModal(false)} />
           <form
             onSubmit={handleSaveGameAccount}
-            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 safe-modal-panel overflow-y-auto overscroll-contain animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
@@ -1733,9 +1733,9 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
 
       {/* Permanent Delete Confirmation Modal */}
       {userToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay">
           <div className="fixed inset-0 bg-black/80 backdrop-blur-sm" onClick={() => !isDeleting && setUserToDelete(null)} />
-          <div className="relative w-full max-w-md bg-slate-900 border border-rose-700/80 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
+          <div className="relative w-full max-w-md bg-slate-900 border border-rose-700/80 rounded-2xl p-6 shadow-2xl z-10 space-y-4 safe-modal-panel overflow-y-auto overscroll-contain animate-in zoom-in-95 duration-150">
             <div className="flex items-center gap-3 text-rose-400">
               <div className="w-10 h-10 rounded-xl bg-rose-950 border border-rose-800 flex items-center justify-center shrink-0">
                 <Trash2 className="w-5 h-5 text-rose-400" />

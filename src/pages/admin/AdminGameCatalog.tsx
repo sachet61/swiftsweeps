@@ -683,8 +683,8 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
 
       {/* In-App Delete Confirmation Modal */}
       {gameToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
-          <div className="bg-slate-900 border border-rose-900/50 rounded-2xl w-full max-w-md shadow-2xl p-6 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="bg-slate-900 border border-rose-900/50 rounded-2xl w-full max-w-md shadow-2xl p-6 space-y-4 safe-modal-panel overflow-y-auto overscroll-contain">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-rose-950/80 border border-rose-800 flex items-center justify-center text-rose-400 shrink-0">
                 <Trash2 className="w-5 h-5" />
@@ -755,8 +755,8 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
 
       {/* Edit / Add Modal */}
       {(editingItem || isNewItem) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl p-6 space-y-5">
+        <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-2xl safe-modal-panel overflow-y-auto overscroll-contain shadow-2xl p-6 space-y-5">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Gamepad2 className="w-5 h-5 text-indigo-400" />

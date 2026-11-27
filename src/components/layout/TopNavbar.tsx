@@ -207,7 +207,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
 
   return (
     <>
-      <header className="relative z-50 bg-[#0A0F1D]/95 backdrop-blur-md border-b border-slate-800/80 max-w-full">
+      <header className="relative z-50 bg-[#0A0F1D]/95 backdrop-blur-md border-b border-slate-800/80 max-w-full pt-safe-edge">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 xl:gap-4 px-3 sm:px-6 h-16">
           {/* Zone 1: Brand Identity & Portal Role Context */}
           <div className="flex items-center gap-2.5 shrink-0 min-w-0">
@@ -687,7 +687,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       {showNotifications && (
         <div className="fixed inset-0 z-50 flex justify-end">
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={closeNotifications} />
-          <div className="relative w-full max-w-sm bg-slate-900 border-l border-slate-800 h-full p-4 flex flex-col z-10 shadow-2xl animate-in slide-in-from-right duration-200">
+          <div className="relative w-full max-w-sm bg-slate-900 border-l border-slate-800 h-full px-4 pt-safe-drawer pb-safe-edge flex flex-col z-10 shadow-2xl animate-in slide-in-from-right duration-200">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Bell className="w-4 h-4 text-indigo-400" />

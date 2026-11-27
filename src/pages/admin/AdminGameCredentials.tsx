@@ -625,14 +625,14 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
 
       {/* Modal for Assigning / Updating Credentials */}
       {editingAccount && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay">
           <div
             className="fixed inset-0 bg-black/70 backdrop-blur-sm"
             onClick={() => setEditingAccount(null)}
           />
           <form
             onSubmit={handleSaveCredentials}
-            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 safe-modal-panel overflow-y-auto overscroll-contain animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
@@ -751,14 +751,14 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
 
       {/* Direct Staff Provisioning Modal */}
       {showDirectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
           <div
             className="fixed inset-0"
             onClick={() => !isProvisioning && setShowDirectModal(false)}
           />
           <form
             onSubmit={handleSaveDirectProvision}
-            className="relative w-full max-w-lg bg-slate-900 border border-amber-500/40 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-lg bg-slate-900 border border-amber-500/40 rounded-2xl p-6 shadow-2xl z-10 space-y-4 safe-modal-panel overflow-y-auto overscroll-contain animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">

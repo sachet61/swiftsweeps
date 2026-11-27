@@ -1,5 +1,7 @@
 import {createRoot} from 'react-dom/client';
+import './services/pwaInstallService';
 import App from './App.tsx';
+import { PWAInstallModalHost } from './components/common/PWAInstallModal';
 import './index.css';
 
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
@@ -15,4 +17,9 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   }
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(
+  <>
+    <App />
+    <PWAInstallModalHost />
+  </>
+);

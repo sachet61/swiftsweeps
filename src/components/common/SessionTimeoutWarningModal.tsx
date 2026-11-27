@@ -57,8 +57,8 @@ export const SessionTimeoutWarningModal: React.FC<SessionTimeoutWarningModalProp
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-slate-900 border border-amber-600/60 rounded-3xl p-6 max-w-sm w-full shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-200">
+    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center safe-modal-overlay">
+      <div className="bg-slate-900 border border-amber-600/60 rounded-3xl p-6 max-w-sm w-full shadow-2xl space-y-4 safe-modal-panel overflow-y-auto overscroll-contain animate-in fade-in zoom-in-95 duration-200">
         <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 mx-auto">
           <Clock className="w-6 h-6 animate-pulse" />
         </div>

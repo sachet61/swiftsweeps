@@ -329,9 +329,9 @@ export const EmailOtpModal: React.FC<EmailOtpModalProps> = ({
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-[99999] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200 overflow-y-auto"
+      className="fixed inset-0 z-[99999] flex items-center justify-center safe-modal-overlay bg-black/85 backdrop-blur-md animate-in fade-in duration-200 overflow-y-auto"
     >
-      <div className="w-full max-w-md my-auto">
+      <div className="w-full max-w-md my-auto safe-modal-panel overflow-y-auto">
         {content}
       </div>
     </div>

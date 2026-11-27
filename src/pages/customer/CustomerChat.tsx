@@ -1435,14 +1435,14 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
       {/* MODAL: Request Game ID from inside chat */}
       {showGameRequestModal && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center safe-modal-overlay">
           <div
             className="fixed inset-0 bg-black/70 backdrop-blur-sm"
             onClick={() => setShowGameRequestModal(false)}
           />
           <form
             onSubmit={handleConfirmGameRequest}
-            className="relative w-full max-w-md bg-[#10182D] border border-slate-700/80 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-md bg-[#10182D] border border-slate-700/80 rounded-2xl p-6 shadow-2xl z-10 space-y-4 safe-modal-panel overflow-y-auto overscroll-contain animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-[#F8FAFC] flex items-center gap-2">
@@ -1505,21 +1505,31 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
       {/* LIGHTBOX MODAL: Full Resolution Image Viewer */}
       {lightboxImage && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150">
-          <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center">
-            <button
-              type="button"
-              onClick={() => setLightboxImage(null)}
-              className="absolute -top-10 right-0 p-1.5 rounded-full bg-slate-800 text-slate-300 hover:text-white transition-colors"
-              title="Close image viewer"
-              aria-label="Close image viewer"
-            >
-              <X className="w-5 h-5" />
-            </button>
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/85 backdrop-blur-md animate-in fade-in duration-150"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setLightboxImage(null);
+          }}
+        >
+          <div className="relative w-full max-w-4xl safe-modal-panel flex flex-col items-center gap-2 overflow-hidden">
+            <div className="w-full flex items-center justify-between gap-2 px-1 shrink-0">
+              <span className="text-xs font-mono text-slate-300 bg-slate-900/90 px-3 py-1 rounded-full border border-slate-700 truncate">
+                {lightboxImage.name}
+              </span>
+              <button
+                type="button"
+                onClick={() => setLightboxImage(null)}
+                className="p-2 rounded-full bg-slate-800/90 text-slate-200 hover:text-white border border-slate-700 transition-colors shrink-0"
+                title="Close image viewer"
+                aria-label="Close image viewer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
             <img
               src={lightboxImage.url}
               alt={lightboxImage.name}
-              className="max-w-full max-h-[82vh] object-contain rounded-xl border border-slate-700/80 shadow-2xl"
+              className="max-w-full max-h-[72dvh] object-contain rounded-xl border border-slate-700/80 shadow-2xl"
               referrerPolicy="no-referrer"
               onError={(e) => {
                 const target = e.currentTarget;
@@ -1530,9 +1540,6 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                 }
               }}
             />
-            <div className="mt-2 text-xs font-mono text-slate-300 bg-slate-900/90 px-3 py-1 rounded-full border border-slate-700">
-              {lightboxImage.name}
-            </div>
           </div>
         </div>
       )}

@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import type { UserProfile } from '../../types';
 import { SwiftSweepsLogo } from '../common/SwiftSweepsLogo';
+import { PWAInstallButton } from '../common/PWAInstallButton';
 import {
   ADMIN_DRAWER_FEATURED_ITEM,
   canRenderAdminDrawer,
@@ -154,10 +155,10 @@ export const AdminMobileDrawer: React.FC<AdminMobileDrawerProps> = ({
         aria-modal="true"
         aria-label="Swift Sweeps Admin Menu"
         data-testid="admin-mobile-drawer"
-        className="relative w-[78vw] max-w-[320px] bg-[#0A0F1D] border-l border-slate-800 h-full max-h-dvh flex flex-col z-10 shadow-2xl animate-in slide-in-from-right duration-200 motion-reduce:animate-none"
+        className="relative w-[78vw] max-w-[320px] bg-[#0A0F1D] border-l border-slate-800 h-full max-h-dvh pb-safe-edge flex flex-col z-10 shadow-2xl animate-in slide-in-from-right duration-200 motion-reduce:animate-none"
       >
         {/* 1. Header: Logo, "Swift Sweeps", Close (X) button */}
-        <div className="shrink-0 flex items-center justify-between gap-2 px-4 py-3 border-b border-slate-800/80 bg-[#0E1726]/70">
+        <div className="shrink-0 flex items-center justify-between gap-2 px-4 pb-3 pt-safe-drawer-sm border-b border-slate-800/80 bg-[#0E1726]/70">
           <div className="flex items-center gap-2.5 min-w-0">
             <SwiftSweepsLogo size="sm" showText={false} />
             <span className="text-base font-extrabold tracking-tight text-white truncate">
@@ -252,6 +253,15 @@ export const AdminMobileDrawer: React.FC<AdminMobileDrawerProps> = ({
                 </button>
               );
             })}
+          </div>
+
+          <div className="pt-1.5">
+            <PWAInstallButton
+              currentUser={currentUser}
+              variant="drawer"
+              showPushButton={false}
+              onBeforeOpenModal={onClose}
+            />
           </div>
         </nav>
 

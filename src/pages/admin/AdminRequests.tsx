@@ -713,14 +713,14 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
       {/* Game Credentials Assignment Modal (For Customer Support) */}
       {actionGameAccount && (
         <div 
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
           onClick={(e) => {
             if (e.target === e.currentTarget) setActionGameAccount(null);
           }}
         >
           <form
             onSubmit={handleSaveGameCredentials}
-            className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 sm:p-6 shadow-2xl z-10 space-y-4 my-auto overscroll-contain animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-lg safe-modal-panel overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 sm:p-6 shadow-2xl z-10 space-y-4 my-auto overscroll-contain animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -831,12 +831,12 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
       {/* Top-Up Action Modal */}
       {actionTopUp && (
         <div 
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
           onClick={(e) => {
             if (e.target === e.currentTarget) setActionTopUp(null);
           }}
         >
-          <div className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 sm:p-6 shadow-2xl z-10 space-y-4 my-auto overscroll-contain animate-in zoom-in-95 duration-150">
+          <div className="relative w-full max-w-lg safe-modal-panel overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 sm:p-6 shadow-2xl z-10 space-y-4 my-auto overscroll-contain animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <ArrowDownToLine className="w-4 h-4 text-indigo-400" />
@@ -1050,12 +1050,12 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
       {/* Withdrawal Action Modal */}
       {actionWithdrawal && (
         <div 
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
           onClick={(e) => {
             if (e.target === e.currentTarget) setActionWithdrawal(null);
           }}
         >
-          <div className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 sm:p-6 shadow-2xl z-10 space-y-4 my-auto overscroll-contain animate-in zoom-in-95 duration-150">
+          <div className="relative w-full max-w-lg safe-modal-panel overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 sm:p-6 shadow-2xl z-10 space-y-4 my-auto overscroll-contain animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <ArrowUpFromLine className="w-4 h-4 text-amber-400" />
@@ -1178,12 +1178,12 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
       {/* Receipt Preview Lightbox */}
       {viewReceiptUrl && (
         <div 
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          className="fixed inset-0 z-[100] flex items-center justify-center safe-modal-overlay bg-black/85 backdrop-blur-sm animate-in fade-in overflow-y-auto"
           onClick={(e) => {
             if (e.target === e.currentTarget) setViewReceiptUrl(null);
           }}
         >
-          <div className="relative max-w-2xl w-full max-h-[90vh] overflow-y-auto bg-slate-900 rounded-2xl overflow-hidden border border-slate-700 my-auto overscroll-contain shadow-2xl">
+          <div className="relative max-w-2xl w-full safe-modal-panel overflow-y-auto bg-slate-900 rounded-2xl border border-slate-700 my-auto overscroll-contain shadow-2xl">
             <div className="p-3 bg-slate-950 flex items-center justify-between border-b border-slate-800">
               <span className="text-xs font-semibold text-white">Payment Receipt Inspection</span>
               <button

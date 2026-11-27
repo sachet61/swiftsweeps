@@ -1,18 +1,15 @@
-import React, { useState, useEffect } from 'react';
-import { Download, Smartphone, Share, PlusSquare, X, Bell, Check } from 'lucide-react';
+import React, { useState } from 'react';
+import { Bell, Check, ChevronRight, Download, Smartphone } from 'lucide-react';
+import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { webPushClient } from '../../services/webPushClient';
 import { UserProfile } from '../../types';
-
-interface BeforeInstallPromptEvent extends Event {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
-}
 
 interface PWAInstallButtonProps {
   currentUser?: UserProfile | null;
   className?: string;
-  variant?: 'navbar' | 'banner' | 'compact';
+  variant?: 'navbar' | 'banner' | 'compact' | 'drawer';
   showPushButton?: boolean;
+  onBeforeOpenModal?: () => void;
 }
 
 export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
@@ -20,64 +17,45 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
   className = '',
   variant = 'navbar',
   showPushButton = true,
+  onBeforeOpenModal,
 }) => {
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [isInstalled, setIsInstalled] = useState(false);
-  const [isIOS, setIsIOS] = useState(false);
-  const [showIOSModal, setShowIOSModal] = useState(false);
-  const [pushStatus, setPushStatus] = useState<NotificationPermission>(() => webPushClient.getPermission());
+  const {
+    isInstalled,
+    hasNativePrompt,
+    isPrompting,
+    env,
+    triggerNativeInstall,
+    openInstallModal,
+  } = usePWAInstall();
+
+  const [pushStatus, setPushStatus] = useState<NotificationPermission>(() =>
+    webPushClient.getPermission()
+  );
   const [isSubscribingPush, setIsSubscribingPush] = useState(false);
   const [pushSuccess, setPushSuccess] = useState(false);
 
-  useEffect(() => {
-    // Check if already installed in standalone mode
-    const isStandalone =
-      window.matchMedia('(display-mode: standalone)').matches ||
-      (window.navigator as any).standalone === true;
-    setIsInstalled(isStandalone);
-
-    // Detect iOS
-    const ua = window.navigator.userAgent.toLowerCase();
-    const isIOSDevice = /iphone|ipad|ipod/.test(ua) && !(window as any).MSStream;
-    setIsIOS(isIOSDevice);
-
-    const handleBeforeInstall = (e: Event) => {
-      e.preventDefault();
-      setDeferredPrompt(e as BeforeInstallPromptEvent);
-    };
-
-    const handleAppInstalled = () => {
-      setIsInstalled(true);
-      setDeferredPrompt(null);
-    };
-
-    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
-    window.addEventListener('appinstalled', handleAppInstalled);
-
-    // Register service worker on initial mount
-    webPushClient.registerServiceWorker();
-
-    return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
-      window.removeEventListener('appinstalled', handleAppInstalled);
-    };
-  }, []);
-
   const handleInstallClick = async () => {
-    if (deferredPrompt) {
-      await deferredPrompt.prompt();
-      const choice = await deferredPrompt.userChoice;
-      if (choice.outcome === 'accepted') {
-        setIsInstalled(true);
-        setDeferredPrompt(null);
+    if (hasNativePrompt) {
+      const outcome = await triggerNativeInstall();
+      if (outcome !== 'accepted') {
+        onBeforeOpenModal?.();
+        openInstallModal(env.recommendedTab);
       }
-    } else if (isIOS) {
-      setShowIOSModal(true);
+      return;
     }
+
+    onBeforeOpenModal?.();
+    openInstallModal(env.recommendedTab);
   };
 
   const handleEnablePush = async () => {
     if (!currentUser) return;
+    if (env.platform === 'ios' && !isInstalled) {
+      onBeforeOpenModal?.();
+      openInstallModal('ios');
+      return;
+    }
+
     setIsSubscribingPush(true);
     const res = await webPushClient.subscribeToPushNotifications(currentUser);
     setIsSubscribingPush(false);
@@ -88,113 +66,97 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
     }
   };
 
-  // If already running standalone and push permission is granted, we can render a subtle indicator or nothing
-  const canInstall = !isInstalled && (!!deferredPrompt || isIOS);
+  const canInstall = !isInstalled;
   const canShowPush = showPushButton && !!currentUser && pushStatus !== 'granted';
 
   if (!canInstall && !canShowPush) {
     return null;
   }
 
+  if (variant === 'drawer') {
+    if (!canInstall) return null;
+    const isIOS = env.platform === 'ios';
+
+    return (
+      <button
+        type="button"
+        onClick={handleInstallClick}
+        disabled={isPrompting}
+        data-testid="drawer-install-app"
+        className={`w-full min-h-[44px] flex items-center justify-between gap-2.5 px-3 py-2.5 rounded-xl bg-amber-500/12 hover:bg-amber-500/20 border border-amber-500/35 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 disabled:opacity-60 ${className}`}
+      >
+        <span className="flex items-center gap-3 min-w-0">
+          {isIOS ? (
+            <Smartphone className="w-4 h-4 text-amber-400 shrink-0" />
+          ) : (
+            <Download className="w-4 h-4 text-amber-400 shrink-0" />
+          )}
+          <span className="min-w-0">
+            <span className="block text-sm font-bold text-white truncate">
+              {hasNativePrompt ? 'Install App (1-Tap)' : 'Install App'}
+            </span>
+            <span className="block text-[11px] text-amber-200/85 truncate">
+              {isIOS ? 'iPhone Home Screen guide' : 'Android & Desktop quick launch'}
+            </span>
+          </span>
+        </span>
+        <ChevronRight className="w-4 h-4 text-amber-300 shrink-0" />
+      </button>
+    );
+  }
+
+  const isCompact = variant === 'compact';
+
   return (
-    <>
-      <div className={`flex items-center gap-1.5 ${className}`}>
-        {/* PWA Install Button */}
-        {canInstall && (
-          <button
-            type="button"
-            onClick={handleInstallClick}
-            className="flex items-center gap-1.5 px-2.5 py-2 text-xs font-semibold rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 transition-colors active:scale-95 whitespace-nowrap shrink-0"
-            title="Install Swift Sweeps app for home screen access and instant notifications"
-            aria-label="Install Swift Sweeps app"
-          >
+    <div className={`flex items-center gap-1.5 ${className}`}>
+      {canInstall && (
+        <button
+          type="button"
+          onClick={handleInstallClick}
+          disabled={isPrompting}
+          data-testid="pwa-install-button"
+          className={`flex items-center justify-center gap-1.5 font-semibold rounded-xl border transition-colors active:scale-95 whitespace-nowrap shrink-0 disabled:opacity-60 ${
+            isCompact
+              ? 'px-3 py-1.5 min-h-[36px] text-xs bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-500/35'
+              : 'px-2.5 sm:px-3 min-h-[44px] sm:min-h-[36px] text-xs bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-500/35'
+          }`}
+          title="Install Swift Sweeps app on Android, iPhone, or Desktop"
+          aria-label="Install Swift Sweeps app"
+        >
+          {env.platform === 'ios' ? (
+            <Smartphone className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          ) : (
             <Download className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span className="hidden 2xl:inline">Install App</span>
-          </button>
-        )}
-
-        {/* Background Notifications Prompt (when permission not yet granted) */}
-        {canShowPush && (
-          <button
-            type="button"
-            onClick={handleEnablePush}
-            disabled={isSubscribingPush}
-            className="flex items-center gap-1.5 px-2.5 py-2 text-xs font-semibold rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-200 border border-indigo-700/50 transition-colors active:scale-95 disabled:opacity-50 whitespace-nowrap shrink-0"
-            title="Enable Background Notifications to receive alerts when the browser is closed"
-            aria-label="Enable Background Alerts"
-          >
-            {pushSuccess ? (
-              <>
-                <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                <span className="text-emerald-300 hidden 2xl:inline">Alerts On</span>
-              </>
-            ) : (
-              <>
-                <Bell className="w-3.5 h-3.5 text-indigo-300 shrink-0" />
-                <span className="hidden 2xl:inline">
-                  {isSubscribingPush ? 'Enabling...' : 'Background Alerts'}
-                </span>
-              </>
-            )}
-          </button>
-        )}
-      </div>
-
-      {/* iOS Safari Guided Install Modal */}
-      {showIOSModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in">
-          <div className="w-full max-w-sm rounded-2xl bg-[#0E1628] border border-amber-500/30 p-5 shadow-2xl text-slate-200">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
-              <div className="flex items-center gap-2">
-                <Smartphone className="w-5 h-5 text-amber-400" />
-                <h3 className="font-bold text-sm text-white">Install Swift Sweeps on iOS</h3>
-              </div>
-              <button
-                onClick={() => setShowIOSModal(false)}
-                className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3.5 text-xs">
-              <div className="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
-                <div className="w-6 h-6 rounded-lg bg-amber-500/20 text-amber-300 flex items-center justify-center font-bold text-xs shrink-0">
-                  1
-                </div>
-                <div className="leading-relaxed">
-                  In Safari, tap the <strong className="text-white">Share</strong> button <Share className="w-3.5 h-3.5 inline text-indigo-400" /> at the bottom or top of your screen.
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
-                <div className="w-6 h-6 rounded-lg bg-amber-500/20 text-amber-300 flex items-center justify-center font-bold text-xs shrink-0">
-                  2
-                </div>
-                <div className="leading-relaxed">
-                  Scroll down the options and select <strong className="text-white">Add to Home Screen</strong> <PlusSquare className="w-3.5 h-3.5 inline text-emerald-400" />.
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
-                <div className="w-6 h-6 rounded-lg bg-amber-500/20 text-amber-300 flex items-center justify-center font-bold text-xs shrink-0">
-                  3
-                </div>
-                <div className="leading-relaxed">
-                  Tap <strong className="text-white">Add</strong> in the top-right corner to launch Swift Sweeps directly from your home screen with native push alerts.
-                </div>
-              </div>
-            </div>
-
-            <button
-              onClick={() => setShowIOSModal(false)}
-              className="mt-5 w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 font-bold text-xs text-slate-950 hover:brightness-110 transition-all shadow-md shadow-amber-500/20"
-            >
-              Got It
-            </button>
-          </div>
-        </div>
+          )}
+          <span className="sm:hidden">{hasNativePrompt ? 'Get App' : 'Install'}</span>
+          <span className="hidden sm:inline">
+            {isPrompting ? 'Installing...' : 'Install App'}
+          </span>
+        </button>
       )}
-    </>
+
+      {canShowPush && (
+        <button
+          type="button"
+          onClick={handleEnablePush}
+          disabled={isSubscribingPush}
+          className="flex items-center gap-1.5 px-2.5 py-2 min-h-[36px] text-xs font-semibold rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-200 border border-indigo-700/50 transition-colors active:scale-95 disabled:opacity-50 whitespace-nowrap shrink-0"
+          title="Enable Background Notifications to receive alerts when the browser is closed"
+          aria-label="Enable Background Alerts"
+        >
+          {pushSuccess ? (
+            <>
+              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="text-emerald-300">Alerts On</span>
+            </>
+          ) : (
+            <>
+              <Bell className="w-3.5 h-3.5 text-indigo-300 shrink-0" />
+              <span>{isSubscribingPush ? 'Enabling...' : 'Background Alerts'}</span>
+            </>
+          )}
+        </button>
+      )}
+    </div>
   );
 };

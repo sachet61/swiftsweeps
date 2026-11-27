@@ -635,7 +635,7 @@ export const AdminOfficialPartnersTab: React.FC<AdminOfficialPartnersTabProps> =
       {/* Delete Confirmation Modal */}
       {deleteTarget && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center safe-modal-overlay"
           role="dialog"
           aria-modal="true"
           aria-labelledby="delete-partner-title"
@@ -644,7 +644,7 @@ export const AdminOfficialPartnersTab: React.FC<AdminOfficialPartnersTabProps> =
             className="fixed inset-0 bg-black/80 backdrop-blur-sm"
             onClick={() => !isDeleting && setDeleteTarget(null)}
           />
-          <div className="relative z-10 w-full max-w-md rounded-2xl bg-[#0E1726] border border-slate-800 p-6 shadow-2xl space-y-4">
+          <div className="relative z-10 w-full max-w-md rounded-2xl bg-[#0E1726] border border-slate-800 p-6 shadow-2xl space-y-4 safe-modal-panel overflow-y-auto overscroll-contain">
             <h3 id="delete-partner-title" className="text-lg font-bold text-white">
               Remove Official Partner
             </h3>
