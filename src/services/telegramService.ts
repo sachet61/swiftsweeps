@@ -12,15 +12,32 @@ export interface TelegramStatus {
 class TelegramService {
   public async getStatus(): Promise<TelegramStatus> {
     try {
-      const resp = await fetch('/api/telegram/status');
-      if (resp.ok) {
-        const text = await resp.text();
-        try {
-          return JSON.parse(text);
-        } catch {
-          // not valid json
-        }
+      const resp = await fetch('/api/telegram/status', {
+        credentials: 'include',
+        cache: 'no-store',
+      });
+      const text = await resp.text();
+      let data: any = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = null;
       }
+      if (resp.ok && data) {
+        return data;
+      }
+      if (data && (data.error || data.message || data.lastError)) {
+        return {
+          running: false,
+          updatesReceived: 0,
+          lastError: data.lastError || data.error || data.message,
+        };
+      }
+      return {
+        running: false,
+        updatesReceived: 0,
+        lastError: `Telegram status unavailable (${resp.status})`,
+      };
     } catch (e) {
       console.warn('[TelegramService] getStatus error:', e);
     }
@@ -40,16 +57,25 @@ class TelegramService {
     tokenConfigured?: boolean;
     maskedToken?: string;
     updatedAt?: string;
+    error?: string;
   }> {
     try {
-      const resp = await fetch('/api/telegram/config');
+      const resp = await fetch('/api/telegram/config', {
+        credentials: 'include',
+        cache: 'no-store',
+      });
+      const data = await resp.json().catch(() => ({}));
       if (resp.ok) {
-        return await resp.json();
+        return data;
       }
-    } catch (e) {
+      return {
+        success: false,
+        error: data?.error || data?.message || `Failed to load config (${resp.status})`,
+      };
+    } catch (e: any) {
       console.warn('[TelegramService] getConfig error:', e);
+      return { success: false, error: e?.message || 'Unable to load Telegram config' };
     }
-    return {};
   }
 
   public async saveConfig(
@@ -61,10 +87,19 @@ class TelegramService {
     const cleanChatId = channelId.trim();
 
     try {
+      const payload: Record<string, unknown> = {
+        channelId: cleanChatId,
+        enabled,
+      };
+      if (cleanToken) {
+        payload.botToken = cleanToken;
+      }
+
       const resp = await fetch('/api/telegram/config', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ botToken: cleanToken, channelId: cleanChatId, enabled }),
+        body: JSON.stringify(payload),
       });
 
       const text = await resp.text();
@@ -78,7 +113,7 @@ class TelegramService {
       if (resp.ok && data.success) {
         return { success: true, status: data.status, config: data.config };
       }
-      return { success: false, error: data.error || 'Failed to update configuration' };
+      return { success: false, error: data.error || data.message || `Failed to update configuration (${resp.status})` };
     } catch (err: any) {
       return { success: false, error: err.message || 'Error updating Telegram configuration.' };
     }
@@ -86,100 +121,54 @@ class TelegramService {
 
   public async testConnection(
     botToken: string,
-    channelId: string
+    channelId: string,
+    allowStoredToken: boolean = false
   ): Promise<{ success: boolean; message: string; suggestedChannelId?: string }> {
     const cleanToken = botToken.trim();
     const cleanChatId = channelId.trim();
 
-    if (!cleanToken) return { success: false, message: 'Please provide a Telegram Bot Token.' };
-    if (!cleanChatId) return { success: false, message: 'Please provide a Target Chat / Channel ID.' };
-
-    // 1. Try server backend endpoint first
-    try {
-      const resp = await fetch('/api/telegram/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ botToken: cleanToken, channelId: cleanChatId }),
-      });
-
-      if (resp.ok) {
-        const text = await resp.text();
-        try {
-          const data = JSON.parse(text);
-          if (data && typeof data.success === 'boolean') {
-            return data;
-          }
-        } catch {
-          // Fallback to direct client call below
-        }
-      }
-    } catch {
-      // Fallback to direct client call below
+    if (!cleanToken && !allowStoredToken) {
+      return { success: false, message: 'Please provide a Telegram Bot Token.' };
+    }
+    if (!cleanChatId) {
+      return { success: false, message: 'Please provide a Target Chat / Channel ID.' };
     }
 
-    // 2. Direct browser fallback: Telegram Bot API supports CORS directly
     try {
-      const meRes = await fetch(`https://api.telegram.org/bot${cleanToken}/getMe`);
-      const meData = await meRes.json();
-      if (!meData.ok) {
-        return { success: false, message: `Invalid Bot Token: ${meData.description || 'Token verification failed.'}` };
+      const payload: Record<string, string> = { channelId: cleanChatId };
+      if (cleanToken) {
+        payload.botToken = cleanToken;
       }
 
-      const botUser = meData.result?.username;
-      const testMsg = `🚀 *Swift Sweeps Telegram Bot Connected!*\n\nBot: @${botUser}\nChat ID: ${cleanChatId}\nStatus: 24/7 Operations Ready!`;
-      
-      const sendRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
+      const resp = await fetch('/api/telegram/test', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: cleanChatId,
-          text: testMsg,
-          parse_mode: 'Markdown',
-        }),
+        body: JSON.stringify(payload),
       });
 
-      let sendData = await sendRes.json();
-
-      // Smart Supergroup Auto-Retry: if chat not found and ID starts with single minus, retry with -100
-      if (!sendData.ok && sendData.description?.includes('chat not found') && cleanChatId.startsWith('-') && !cleanChatId.startsWith('-100')) {
-        const supergroupId = `-100${cleanChatId.replace(/^-/, '')}`;
-        const retryRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: supergroupId,
-            text: testMsg,
-            parse_mode: 'Markdown',
-          }),
-        });
-        const retryData = await retryRes.json();
-        if (retryData.ok) {
-          return {
-            success: true,
-            suggestedChannelId: supergroupId,
-            message: `Connection successful! Auto-detected supergroup ID format: ${supergroupId}. Test message delivered to @${botUser}.`,
-          };
-        }
+      const text = await resp.text();
+      let data: any = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        return { success: false, message: 'Server returned an invalid response during Telegram test.' };
       }
 
-      if (!sendData.ok) {
-        const hint = cleanChatId.startsWith('-') && !cleanChatId.startsWith('-100')
-          ? ` (Hint: Telegram supergroups and channels require '-100' prefix, e.g. -100${cleanChatId.replace(/^-/, '')})`
-          : '';
-
+      if (resp.ok && typeof data.success === 'boolean') {
         return {
-          success: false,
-          suggestedChannelId: cleanChatId.startsWith('-') && !cleanChatId.startsWith('-100') ? `-100${cleanChatId.replace(/^-/, '')}` : undefined,
-          message: `Bot @${botUser} verified, but cannot send message to ${cleanChatId}: ${sendData.description}.${hint} Ensure bot is added as Administrator!`,
+          success: data.success,
+          message: data.message || (data.success ? 'Telegram test succeeded.' : 'Telegram test failed.'),
+          ...(data.suggestedChannelId ? { suggestedChannelId: data.suggestedChannelId } : {}),
         };
       }
 
       return {
-        success: true,
-        message: `Connection successful! Test message sent to ${cleanChatId} from @${botUser}.`,
+        success: false,
+        message: data.error || data.message || `Telegram connection test failed (${resp.status}).`,
       };
-    } catch (clientErr: any) {
-      return { success: false, message: `Telegram API test error: ${clientErr.message}` };
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'Unable to reach Telegram test endpoint.' };
     }
   }
 
@@ -197,6 +186,7 @@ class TelegramService {
     try {
       const resp = await fetch('/api/telegram/notify', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
       });
@@ -218,6 +208,7 @@ class TelegramService {
     try {
       const resp = await fetch('/api/telegram/notify-message', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ customerName, conversationId }),
       });

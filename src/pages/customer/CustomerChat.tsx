@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { UserProfile, ChatMessage, SupportConversation } from '../../types';
 import { dataService } from '../../services/dataService';
-import { realtimeChatHub } from '../../services/chatRealtime';
+import { chatStreamClient } from '../../services/chatStreamClient';
 import { mapDbMessageRowToChatMessage, sortAndDeduplicateMessages } from '../../services/chatOrderUtils';
 import {
   CHAT_QUICK_EMOJIS,
@@ -371,38 +371,32 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     window.addEventListener('aetherpay_state_changed', handleSync);
     window.addEventListener('storage', handleSync);
 
-    const unsubRoom = realtimeChatHub.subscribeChatRoom(
-      `chat_${convId}`,
-      {
-        postgresFilter: {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-          filter: `conversation_id=eq.${convId}`,
-        },
+    const unsubRoom = chatStreamClient.subscribe({
+      onStatus: (status) => setRealtimeStatus(status),
+      onChatMessage: (event) => {
+        if (!event?.message?.id) return;
+        const incoming = mapDbMessageRowToChatMessage(event.message, convId);
+        if (isMessageInternalNote(incoming)) return;
+        dataService.appendIncomingMessage(incoming);
+        setMessages((prev) =>
+          filterVisibleMessagesForRole(sortAndDeduplicateMessages([...prev, incoming], true), 'customer')
+        );
       },
-      {
-        onStatus: (status) => setRealtimeStatus(status),
-        onBroadcast: (payload) => {
-          if (!payload || !payload.id) return;
-          if (isMessageInternalNote(payload)) return;
-          dataService.appendIncomingMessage(payload);
-          setMessages((prev) =>
-            filterVisibleMessagesForRole(sortAndDeduplicateMessages([...prev, payload], true), 'customer')
-          );
-        },
-        onPostgresChange: (payload) => {
-          const row: any = payload?.new;
-          if (!row || !row.id) return;
-          const incoming = mapDbMessageRowToChatMessage(row, convId);
-          if (isMessageInternalNote(incoming)) return;
-          dataService.appendIncomingMessage(incoming);
-          setMessages((prev) =>
-            filterVisibleMessagesForRole(sortAndDeduplicateMessages([...prev, incoming], true), 'customer')
-          );
-        },
-      }
-    );
+      onMessageUpdated: (event) => {
+        if (!event?.message?.id) return;
+        const updated = mapDbMessageRowToChatMessage(event.message, convId);
+        if (isMessageInternalNote(updated)) return;
+        dataService.appendIncomingMessage(updated);
+        setMessages((prev) =>
+          filterVisibleMessagesForRole(sortAndDeduplicateMessages([...prev, updated], true), 'customer')
+        );
+      },
+      onConversationStatus: (event) => {
+        if (event?.status && (event.conversationId === convId || event.customerId === currentUser.id)) {
+          setConversation((prev) => (prev ? { ...prev, status: event.status as any } : prev));
+        }
+      },
+    });
 
     let lastCatchUpTime = 0;
     const performCatchUp = () => {

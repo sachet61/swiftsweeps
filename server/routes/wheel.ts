@@ -5,6 +5,7 @@ import {
   type RequestHandler,
   type Response,
 } from 'express';
+import type { ChatEventBroker } from '../chat/chatEvents.js';
 import type { UserDirectoryRepo } from '../auth/userDirectoryRepo.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
@@ -21,6 +22,7 @@ export interface WheelRouterDeps {
   wheelRepo: WheelRepo;
   userRepo: UserDirectoryRepo;
   requireAuth: RequestHandler;
+  chatEvents?: ChatEventBroker;
   nowFn?: () => number;
   randomUnitFn?: () => number;
 }
@@ -271,6 +273,7 @@ function mapRepoError(err: unknown): unknown {
 export function createWheelRouter({
   wheelRepo,
   requireAuth,
+  chatEvents,
   nowFn,
   randomUnitFn,
 }: WheelRouterDeps): Router {
@@ -417,6 +420,36 @@ export function createWheelRouter({
           actorRole: actor.role,
           nowMs: nowFn ? nowFn() : Date.now(),
         });
+        if (chatEvents && result.staffMessage && result.staffMessage.id) {
+          const staffMsg = result.staffMessage as Record<string, unknown>;
+          const convId = String(
+            staffMsg.conversation_id ?? `conv_${body.customerId || actor.appUserId}`,
+          );
+          const msgCustId = convId.replace(/^conv_/, '');
+          chatEvents.emit({
+            type: 'chat_message',
+            customerId: msgCustId,
+            conversationId: convId,
+            isInternalNote: Boolean(staffMsg.is_internal_note),
+            message: {
+              id: String(staffMsg.id),
+              conversation_id: convId,
+              sender_id: String(staffMsg.sender_id ?? actor.appUserId),
+              sender_name: String(staffMsg.sender_name ?? actor.displayName),
+              sender_role: String(staffMsg.sender_role ?? actor.role),
+              content: String(staffMsg.content ?? ''),
+              attachment_url: null,
+              attachment_name: null,
+              transaction_data:
+                (staffMsg.transaction_data as Record<string, unknown> | null) ??
+                null,
+              is_internal_note: Boolean(staffMsg.is_internal_note),
+              created_at: String(
+                staffMsg.created_at ?? new Date().toISOString(),
+              ),
+            },
+          });
+        }
         res.status(200).json(result);
       } catch (err) {
         next(mapRepoError(err));

@@ -7,7 +7,10 @@ import {
   type EmailDeliveryAdapter,
 } from './auth/emailDelivery.js';
 import { UserDirectoryRepo } from './auth/userDirectoryRepo.js';
+import { AppConfigRepo } from './appConfig/appConfigRepo.js';
 import { GameCatalogRepo } from './catalog/gameCatalogRepo.js';
+import { ChatEventBroker } from './chat/chatEvents.js';
+import { ChatRepo } from './chat/chatRepo.js';
 import { DepositRepo } from './deposits/depositRepo.js';
 import { GameAccountRepo } from './gameAccounts/gameAccountRepo.js';
 import type { ServerConfig } from './config/env.js';
@@ -27,7 +30,12 @@ import {
   createSecurityMiddleware,
 } from './middleware/security.js';
 import { createAdminAuthRouter } from './routes/adminAuth.js';
+import {
+  createAppConfigRouter,
+  type TelegramFetchFn,
+} from './routes/appConfig.js';
 import { createAuthProfileRouter } from './routes/authProfile.js';
+import { createChatRouter } from './routes/chat.js';
 import { createDepositRouter } from './routes/deposits.js';
 import { createGameAccountRouter } from './routes/gameAccounts.js';
 import { createGameCatalogRouter } from './routes/gameCatalog.js';
@@ -62,6 +70,7 @@ export interface ApiAppDependencies {
   authDatabaseOverride?: BetterAuthOptions['database'];
   emailDeliveryOverride?: EmailDeliveryAdapter;
   webPushSenderOverride?: WebPushSender;
+  telegramFetchOverride?: TelegramFetchFn;
   wheelNowFnOverride?: () => number;
   wheelRandomUnitOverride?: () => number;
 }
@@ -74,6 +83,7 @@ export function createApiApp({
   authDatabaseOverride,
   emailDeliveryOverride,
   webPushSenderOverride,
+  telegramFetchOverride,
   wheelNowFnOverride,
   wheelRandomUnitOverride,
 }: ApiAppDependencies): Express {
@@ -87,7 +97,10 @@ export function createApiApp({
   app.set('trust proxy', config.trustProxy);
 
   const userRepo = new UserDirectoryRepo(pool);
+  const appConfigRepo = new AppConfigRepo(pool);
   const gameCatalogRepo = new GameCatalogRepo(pool);
+  const chatRepo = new ChatRepo(pool);
+  const chatEvents = new ChatEventBroker();
   const gameAccountRepo = new GameAccountRepo(pool);
   const depositRepo = new DepositRepo(pool);
   const notificationRepo = new NotificationRepo(pool);
@@ -127,6 +140,8 @@ export function createApiApp({
     },
   );
 
+  // Allow bounded 3 MB base64 JSON payloads strictly for authenticated chat image attachments.
+  app.post('/api/chat/attachments', express.json({ limit: '3mb' }));
   app.use(express.json({ limit: config.requestBodyLimit }));
 
   app.use(
@@ -207,8 +222,17 @@ export function createApiApp({
       wheelRepo,
       userRepo,
       requireAuth,
+      chatEvents,
       nowFn: wheelNowFnOverride,
       randomUnitFn: wheelRandomUnitOverride,
+    }),
+  );
+  app.use(
+    '/api',
+    createChatRouter({
+      chatRepo,
+      chatEvents,
+      requireAuth,
     }),
   );
   app.use(
@@ -226,6 +250,14 @@ export function createApiApp({
       webPushSender,
       requireAuth,
       optionalAuth,
+    }),
+  );
+  app.use(
+    '/api',
+    createAppConfigRouter({
+      appConfigRepo,
+      requireAuth,
+      telegramFetch: telegramFetchOverride,
     }),
   );
 

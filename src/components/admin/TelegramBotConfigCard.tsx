@@ -128,9 +128,9 @@ export const TelegramBotConfigCard: React.FC = () => {
       if (res.success) {
         setStatus(res.status || null);
         if (res.config) {
-          if (res.config.botToken) setBotToken(res.config.botToken);
           if (res.config.channelId) setChannelId(res.config.channelId);
           if (res.config.updatedAt) setLastSavedTime(res.config.updatedAt);
+          if (!res.config.botToken) setBotToken('');
         }
         setFeedback({
           type: 'success',
@@ -148,7 +148,8 @@ export const TelegramBotConfigCard: React.FC = () => {
 
   const handleTest = async () => {
     const effectiveToken = botToken.trim();
-    if (!effectiveToken && !status?.tokenConfigured) {
+    const allowStoredToken = Boolean(status?.tokenConfigured);
+    if (!effectiveToken && !allowStoredToken) {
       setFeedback({ type: 'error', text: 'Please enter your Telegram Bot Token.' });
       return;
     }
@@ -162,14 +163,18 @@ export const TelegramBotConfigCard: React.FC = () => {
     setFeedback({ type: 'info', text: 'Sending test dispatch through Telegram API...' });
 
     try {
-      const res = await telegramService.testConnection(effectiveToken, effectiveChannel);
+      const res = await telegramService.testConnection(
+        effectiveToken,
+        effectiveChannel,
+        allowStoredToken
+      );
       if (res.success) {
-        if ((res as any).suggestedChannelId) {
-          setChannelId((res as any).suggestedChannelId);
+        if (res.suggestedChannelId) {
+          setChannelId(res.suggestedChannelId);
         }
         setFeedback({ type: 'success', text: res.message });
       } else {
-        const suggestedFix = (res as any).suggestedChannelId || (isMissingSupergroupPrefix ? suggestedSupergroupId : undefined);
+        const suggestedFix = res.suggestedChannelId || (isMissingSupergroupPrefix ? suggestedSupergroupId : undefined);
         setFeedback({
           type: 'error',
           text: res.message,

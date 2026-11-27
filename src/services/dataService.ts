@@ -53,7 +53,6 @@ import { supabaseAuthService } from './supabaseAuthService';
 import { supabaseTokenManager } from './supabaseTokenManager';
 import { SESSION_EXPIRED_USER_MESSAGE } from './authTokenUtils';
 import { webPushClient } from './webPushClient';
-import { realtimeChatHub } from './chatRealtime';
 import {
   filterRealtimeRowsForUser,
   shouldAcceptIncomingChatMessage,
@@ -241,6 +240,8 @@ class DataService {
   private lastHydrationError: string | null = null;
   private authoritativelyLoadedTopupsForUser: Set<string> = new Set();
   private conversationAliasMap: Map<string, string> = new Map();
+  private ensuredServerConversations: Set<string> = new Set();
+  private inFlightEnsureConversations: Set<string> = new Set();
   private officialPartnersCache: OfficialPartner[] | null = null;
 
   constructor() {
@@ -467,6 +468,8 @@ class DataService {
     } else {
       console.log('[SwiftSweeps] Supabase credentials pending in .env. Running in in-memory mode with LocalStorage persistence.');
       void this.fetchGameCatalogFromServer();
+      void this.fetchAppConfigFromServer();
+      void this.fetchFakedCashoutsFromServer();
     }
   }
 
@@ -501,18 +504,6 @@ class DataService {
     window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
     const channel = supabase.channel('swiftsweeps_realtime_stream')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, (p) => {
-        this.queueRealtimeMutation('messages', p.eventType, p.new, p.old);
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, (p) => {
-        this.queueRealtimeMutation('conversations', p.eventType, p.new, p.old);
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'faked_cashouts' }, (p) => {
-        this.queueRealtimeMutation('faked_cashouts', p.eventType, p.new, p.old);
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'app_config' }, (p) => {
-        this.queueRealtimeMutation('app_config', p.eventType, p.new, p.old);
-      })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'audit_logs' }, (p) => {
         this.queueRealtimeMutation('audit_logs', p.eventType, p.new, p.old);
       })
@@ -558,8 +549,6 @@ class DataService {
 
     const messageRows = filterRealtimeRowsForUser('messages', rowsByTable['messages'], activeUser);
     const conversationRows = filterRealtimeRowsForUser('conversations', rowsByTable['conversations'], activeUser);
-    const cashoutRows = filterRealtimeRowsForUser('faked_cashouts', rowsByTable['faked_cashouts'], activeUser);
-    const appConfigRows = filterRealtimeRowsForUser('app_config', rowsByTable['app_config'], activeUser);
     const auditLogRows = filterRealtimeRowsForUser('audit_logs', rowsByTable['audit_logs'], activeUser);
 
     if (messageRows.length) {
@@ -569,17 +558,6 @@ class DataService {
     if (conversationRows.length) {
       this.applyConversationRows(conversationRows, false);
       tablesModified.add('conversations');
-    }
-    if (cashoutRows.length) {
-      this.applyCashoutRows(cashoutRows, false);
-      tablesModified.add('faked_cashouts');
-    }
-    if (appConfigRows.length) {
-      const latest = appConfigRows[appConfigRows.length - 1];
-      if (latest?.data) {
-        this.applyAppConfig(latest.data);
-        tablesModified.add('app_config');
-      }
     }
     if (auditLogRows.length && activeUser?.role === 'admin') {
       const normalizedLogs = auditLogRows
@@ -610,6 +588,8 @@ class DataService {
       const user = this.getCurrentUser();
       const isStaff = user?.role === 'admin' || user?.role === 'agent';
       const selfHostedTasks: Promise<unknown>[] = [
+        this.fetchAppConfigFromServer({ silentEvent: true }),
+        this.fetchFakedCashoutsFromServer({ limit: 25, silentEvent: true }),
         this.fetchGameCatalogFromServer({ silentEvent: true }),
       ];
       if (user?.id) {
@@ -619,6 +599,7 @@ class DataService {
             this.fetchDepositsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
             this.fetchWithdrawalsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
             this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
+            this.fetchConversationsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
           );
         } else {
           selfHostedTasks.push(
@@ -647,6 +628,8 @@ class DataService {
               replaceAll: true,
               silentEvent: true,
             }),
+            this.fetchConversationsFromServer({ limit: 10, replaceAll: true, silentEvent: true }),
+            this.fetchMessagesForConversation(`conv_${user.id}`, { limit: 40 }),
           );
         }
         selfHostedTasks.push(
@@ -655,8 +638,11 @@ class DataService {
         );
       }
       await Promise.allSettled(selfHostedTasks);
+      this.lastSyncTimestamp = new Date().toISOString();
+      this.syncStatus = 'connected';
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'initial_compact_load' } }));
+        window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
       }
       return;
     }
@@ -669,18 +655,14 @@ class DataService {
       const isAdmin = user?.role === 'admin' || user?.role === 'agent';
       const currentUserId = user?.id;
 
-      // Always load app config (single row)
-      const appConfigPromise = supabase.from('app_config').select('data').eq('id', 'main').maybeSingle();
-
-      // Load public live ticker cashouts (limit 15)
-      const cashoutsPromise = supabase.from('faked_cashouts').select('*').order('timestamp', { ascending: false }).limit(15);
-
-      // Load authoritative game catalog from self-hosted API
+      // Always load authoritative app_config, faked_cashouts, and game_catalog from self-hosted API
+      const appConfigPromise = this.fetchAppConfigFromServer({ silentEvent: true });
+      const cashoutsPromise = this.fetchFakedCashoutsFromServer({ limit: 25, silentEvent: true });
       const catPromise = this.fetchGameCatalogFromServer({ silentEvent: true });
 
       if (isAdmin) {
         // Staff/Admin session: bounded administrative queue queries (Users fetched on-demand on tab open)
-        const [appConfigRes, cashoutsRes, _catRes, depositsApiRes, withdrawalsApiRes, walletsApiRes, convsRes, _gameAccsApiRes] =
+        const [_appConfigRes, _cashoutsRes, _catRes, depositsApiRes, withdrawalsApiRes, walletsApiRes, _convsRes, _gameAccsApiRes] =
           await Promise.all([
             appConfigPromise,
             cashoutsPromise,
@@ -688,19 +670,10 @@ class DataService {
             this.fetchDepositsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
             this.fetchWithdrawalsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
             this.fetchWalletsFromServer({ limit: 50, silentEvent: true }),
-            supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
+            this.fetchConversationsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
             this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
           ]);
 
-        if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
-        if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
-        if (!convsRes.error && Array.isArray(convsRes.data)) {
-          this.applyConversationRows(convsRes.data, true);
-          if (convsRes.data.length === 0) {
-            this.cache[STORAGE_KEYS.MESSAGES] = {};
-            this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, {});
-          }
-        }
         if (!depositsApiRes.success && !withdrawalsApiRes.success && !walletsApiRes.success) {
           this.lastHydrationError = depositsApiRes.error || withdrawalsApiRes.error || walletsApiRes.error || 'Unable to load staff operations data.';
         }
@@ -713,16 +686,16 @@ class DataService {
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
         const [
-          appConfigRes,
-          cashoutsRes,
+          _appConfigRes,
+          _cashoutsRes,
           _catRes,
           profileRes,
           walletApiRes,
           depositsApiRes,
           withdrawalsApiRes,
           txApiRes,
-          gameAccsRes,
-          convRes,
+          _gameAccsRes,
+          convApiRes,
         ] = await Promise.all([
           appConfigPromise,
           cashoutsPromise,
@@ -753,17 +726,10 @@ class DataService {
             replaceAll: true,
             silentEvent: true,
           }),
-          supabase
-            .from('conversations')
-            .select('*')
-            .eq('customer_id', currentUserId)
-            .order('created_at', { ascending: true })
-            .limit(10),
+          this.fetchConversationsFromServer({ limit: 10, replaceAll: true, silentEvent: true }),
         ]);
         void this.fetchNotificationsFromServer({ limit: 50, silentEvent: true });
 
-        if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
-        if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
         if (profileRes?.success && profileRes.user) {
           const synced = this.syncAuthenticatedUser(profileRes.user);
           if (synced) {
@@ -785,46 +751,28 @@ class DataService {
           this.lastHydrationError = walletApiRes.error || depositsApiRes.error || withdrawalsApiRes.error || 'Unable to load wallet and transaction history.';
         }
 
-        if (!convRes?.error && Array.isArray(convRes?.data)) {
-          if (convRes.data.length > 0) {
-            this.applyConversationRows(convRes.data, false);
-            // Hydrate customer's active chat messages capped at 40
-            const convIds = convRes.data.map((c: any) => c.id);
-            const activeConv = this.getOrCreateConversationForCustomer(currentUserId, user?.displayName || 'Player');
-            const allTargetIds = Array.from(new Set([...convIds, activeConv.id, `conv_${currentUserId}`].filter(Boolean)));
-            let msgQuery = supabase.from('messages').select('*');
-            if (allTargetIds.length === 1) {
-              msgQuery = msgQuery.eq('conversation_id', allTargetIds[0]);
-            } else {
-              msgQuery = msgQuery.in('conversation_id', allTargetIds);
-            }
-            const { data: msgData } = await msgQuery
-              .order('created_at', { ascending: false })
-              .limit(40);
-            if (msgData) this.applyMessageRows(msgData);
-          } else {
-            const canonicalConvId = `conv_${currentUserId}`;
-            const remainingConvs = this.getConversations().filter(
-              (c) => c.customerId !== currentUserId && c.id !== canonicalConvId
-            );
-            this.cache[STORAGE_KEYS.CONVERSATIONS] = remainingConvs;
-            this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, remainingConvs);
+        if (convApiRes.success && convApiRes.conversations.length > 0) {
+          await this.fetchMessagesForConversation(`conv_${currentUserId}`, { limit: 40 });
+        } else if (convApiRes.success) {
+          const canonicalConvId = `conv_${currentUserId}`;
+          const remainingConvs = this.getConversations().filter(
+            (c) => c.customerId !== currentUserId && c.id !== canonicalConvId
+          );
+          this.cache[STORAGE_KEYS.CONVERSATIONS] = remainingConvs;
+          this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, remainingConvs);
 
-            const allMsgs = { ...this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES) };
-            delete allMsgs[canonicalConvId];
-            this.cache[STORAGE_KEYS.MESSAGES] = allMsgs;
-            this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, allMsgs);
-          }
+          const allMsgs = { ...this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES) };
+          delete allMsgs[canonicalConvId];
+          this.cache[STORAGE_KEYS.MESSAGES] = allMsgs;
+          this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, allMsgs);
         }
       } else {
         // Unauthenticated visitor: only public app config, catalog, and ticker
-        const [appConfigRes, cashoutsRes] = await Promise.all([
+        await Promise.all([
           appConfigPromise,
           cashoutsPromise,
           catPromise,
         ]);
-        if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
-        if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
       }
 
       this.lastSyncTimestamp = new Date().toISOString();
@@ -843,15 +791,23 @@ class DataService {
     if (!supabase || !isSupabaseConfigured()) {
       const user = this.getCurrentUser();
       const isStaff = user?.role === 'admin' || user?.role === 'agent';
-      const selfHostedTasks: Promise<unknown>[] = [this.fetchGameCatalogFromServer()];
+      const selfHostedTasks: Promise<unknown>[] = [
+        this.fetchAppConfigFromServer({ silentEvent: true }),
+        this.fetchFakedCashoutsFromServer({ limit: 25, silentEvent: true }),
+        this.fetchGameCatalogFromServer(),
+      ];
       if (user?.id) {
         if (isStaff) {
           selfHostedTasks.push(
             this.fetchDepositsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
             this.fetchWithdrawalsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
             this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
+            this.fetchConversationsFromServer({ limit: 25, replaceAll: false, silentEvent: true }),
           );
         } else {
+          const querySince = this.lastSyncTimestamp
+            ? new Date(Math.max(0, Date.parse(this.lastSyncTimestamp) - 10000)).toISOString()
+            : undefined;
           selfHostedTasks.push(
             this.fetchWalletFromServer({ customerId: user.id }),
             this.fetchWalletTransactionsFromServer({ customerId: user.id, limit: 25 }),
@@ -873,10 +829,16 @@ class DataService {
               replaceAll: true,
               silentEvent: true,
             }),
+            this.fetchConversationsFromServer({ limit: 10, replaceAll: false, silentEvent: true }),
+            this.fetchMessagesForConversation(`conv_${user.id}`, {
+              ...(querySince ? { afterCreatedAt: querySince } : {}),
+              limit: 50,
+            }),
           );
         }
       }
       await Promise.allSettled(selfHostedTasks);
+      this.lastSyncTimestamp = new Date().toISOString();
       return;
     }
     if (this.isSyncingDelta) return;
@@ -896,34 +858,25 @@ class DataService {
         const canonicalConvId = `conv_${currentUserId}`;
         const querySince = this.lastSyncTimestamp
           ? new Date(Math.max(0, Date.parse(this.lastSyncTimestamp) - 10000)).toISOString()
-          : null;
-        const msgQuery = querySince
-          ? supabase
-              .from('messages')
-              .select('*')
-              .in('conversation_id', [canonicalConvId, currentUserId])
-              .gt('created_at', querySince)
-              .order('created_at', { ascending: false })
-              .limit(50)
-          : supabase
-              .from('messages')
-              .select('*')
-              .in('conversation_id', [canonicalConvId, currentUserId])
-              .order('created_at', { ascending: false })
-              .limit(50);
+          : undefined;
 
-        const [walletApiRes, depositsApiRes, withdrawalsApiRes, txApiRes, gameAccsRes, catRes, msgsRes] = await Promise.all([
+        const [walletApiRes, depositsApiRes, withdrawalsApiRes, txApiRes, gameAccsRes, catRes, appCfgRes, fakedRes, deltaMsgs] = await Promise.all([
           this.fetchWalletFromServer({ customerId: currentUserId, silentEvent: true }),
           this.fetchDepositsFromServer({ customerId: currentUserId, limit: 15, replaceAll: false, silentEvent: true }),
           this.fetchWithdrawalsFromServer({ customerId: currentUserId, limit: 15, replaceAll: false, silentEvent: true }),
           this.fetchWalletTransactionsFromServer({ customerId: currentUserId, limit: 25, replaceAll: false, silentEvent: true }),
           this.fetchGameAccountsFromServer({ customerId: currentUserId, limit: 50, replaceAll: true, silentEvent: true }),
           this.fetchGameCatalogFromServer({ silentEvent: true }),
-          msgQuery,
+          this.fetchAppConfigFromServer({ silentEvent: true }),
+          this.fetchFakedCashoutsFromServer({ limit: 25, silentEvent: true }),
+          this.fetchMessagesForConversation(canonicalConvId, {
+            ...(querySince ? { afterCreatedAt: querySince } : {}),
+            limit: 50,
+          }),
         ]);
 
         // Apply requests & ledger BEFORE wallet reconciliation
-        if (catRes.success) {
+        if (catRes.success || appCfgRes.success || fakedRes.success) {
           changed = true;
         }
         if (depositsApiRes.success && depositsApiRes.deposits.length > 0) {
@@ -944,38 +897,22 @@ class DataService {
         } else if (depositsApiRes.success && depositsApiRes.deposits.length > 0) {
           this.reconcileCustomerWallet(currentUserId);
         }
-        if (msgsRes.data && msgsRes.data.length > 0) {
-          this.applyMessageRows(msgsRes.data, Boolean(this.lastSyncTimestamp));
+        if (deltaMsgs.length > 0) {
           changed = true;
         }
       } else if (isAdmin) {
-        // Admin: refresh recent deposits, withdrawals, conversations, and delta chat messages
-        const querySince = this.lastSyncTimestamp
-          ? new Date(Math.max(0, Date.parse(this.lastSyncTimestamp) - 10000)).toISOString()
-          : null;
-        const adminMsgQuery = querySince
-          ? supabase
-              .from('messages')
-              .select('*')
-              .gt('created_at', querySince)
-              .order('created_at', { ascending: false })
-              .limit(50)
-          : supabase
-              .from('messages')
-              .select('*')
-              .order('created_at', { ascending: false })
-              .limit(50);
-
-        const [depositsApiRes, withdrawalsApiRes, gameAccsApiRes, convsRes, catRes, msgsRes] = await Promise.all([
+        // Admin: refresh recent deposits, withdrawals, game accounts, and conversations
+        const [depositsApiRes, withdrawalsApiRes, gameAccsApiRes, convsApiRes, catRes, appCfgRes, fakedRes] = await Promise.all([
           this.fetchDepositsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
           this.fetchWithdrawalsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
           this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
-          supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
+          this.fetchConversationsFromServer({ limit: 25, replaceAll: false, silentEvent: true }),
           this.fetchGameCatalogFromServer({ silentEvent: true }),
-          adminMsgQuery,
+          this.fetchAppConfigFromServer({ silentEvent: true }),
+          this.fetchFakedCashoutsFromServer({ limit: 25, silentEvent: true }),
         ]);
 
-        if (catRes.success) {
+        if (catRes.success || appCfgRes.success || fakedRes.success) {
           changed = true;
         }
         if (depositsApiRes.success && depositsApiRes.deposits.length > 0) {
@@ -987,19 +924,7 @@ class DataService {
         if (gameAccsApiRes.success && gameAccsApiRes.accounts.length > 0) {
           changed = true;
         }
-        if (!convsRes.error && Array.isArray(convsRes.data)) {
-          const replaceAll = convsRes.data.length < 25;
-          if (convsRes.data.length > 0 || (replaceAll && this.getConversations().length > 0)) {
-            this.applyConversationRows(convsRes.data, replaceAll);
-            if (convsRes.data.length === 0) {
-              this.cache[STORAGE_KEYS.MESSAGES] = {};
-              this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, {});
-            }
-            changed = true;
-          }
-        }
-        if (msgsRes.data && msgsRes.data.length > 0) {
-          this.applyMessageRows(msgsRes.data);
+        if (convsApiRes.success && convsApiRes.conversations.length > 0) {
           changed = true;
         }
         if (user?.role === 'admin') {
@@ -1093,124 +1018,28 @@ class DataService {
         return this.getMessages(targetConvId);
       };
 
-      const buildChatAuthHeaders = async (
-        forceRefresh = false,
-        rejectedToken?: string | null
-      ): Promise<{ headers: Record<string, string>; token: string | null; requiresReauth: boolean }> => {
-        const headers: Record<string, string> = { 'Cache-Control': 'no-cache' };
-        if (activeUser?.id) headers['x-user-id'] = activeUser.id;
-        if (activeUser?.role) headers['x-user-role'] = activeUser.role;
-        const tokenRes = await supabaseTokenManager.getAccessToken({ forceRefresh, rejectedToken });
-        if (tokenRes.token) {
-          headers['Authorization'] = `Bearer ${tokenRes.token}`;
-          headers['x-supabase-token'] = tokenRes.token;
+      const queryCustId = customerId || (targetConvId.startsWith('conv_') ? targetConvId.replace(/^conv_/, '') : '');
+      const params = new URLSearchParams({
+        conversationId: targetConvId,
+        limit: String(limit),
+      });
+      if (queryCustId) params.set('customerId', queryCustId);
+      if (options?.beforeCreatedAt) params.set('beforeCreatedAt', options.beforeCreatedAt);
+      if (options?.afterCreatedAt) params.set('afterCreatedAt', options.afterCreatedAt);
+
+      const srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      if (srvRes.ok) {
+        const srvData = await srvRes.json().catch(() => ({}));
+        if (srvData.success && Array.isArray(srvData.messages)) {
+          return persistAndReturnMerged(srvData.messages);
         }
-        return { headers, token: tokenRes.token, requiresReauth: tokenRes.requiresReauth };
-      };
-
-      // 1. Authoritative cross-browser fetch via server endpoint (Service Role + Cache-Control: no-store)
-      try {
-        const queryCustId = customerId || (targetConvId.startsWith('conv_') ? targetConvId.replace(/^conv_/, '') : '');
-        const params = new URLSearchParams({
-          conversationId: targetConvId,
-          customerId: queryCustId || '',
-          limit: String(limit),
-        });
-        if (activeUser?.id) params.set('userId', activeUser.id);
-        if (options?.beforeCreatedAt) params.set('beforeCreatedAt', options.beforeCreatedAt);
-        if (options?.afterCreatedAt) params.set('afterCreatedAt', options.afterCreatedAt);
-
-        const initialAuth = await buildChatAuthHeaders(false);
-        let srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
-          cache: 'no-store',
-          headers: initialAuth.headers,
-        });
-        if (srvRes.status === 401) {
-          const retryAuth = await buildChatAuthHeaders(true, initialAuth.token);
-          if (retryAuth.token) {
-            srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
-              cache: 'no-store',
-              headers: retryAuth.headers,
-            });
-          }
-        }
-        if (srvRes.ok) {
-          const srvData = await srvRes.json();
-          if (srvData.success && Array.isArray(srvData.messages)) {
-            return persistAndReturnMerged(srvData.messages);
-          }
-        }
-      } catch (srvErr) {
-        console.warn('[DataService] /api/chat/messages notice:', srvErr);
       }
-
-      if (!supabase || !isSupabaseConfigured()) {
-        return localMsgs;
-      }
-
-      if (customerId) {
-        try {
-          const { data: dbConvs } = await supabase
-            .from('conversations')
-            .select('id')
-            .eq('customer_id', customerId)
-            .limit(10);
-          if (dbConvs && dbConvs.length > 0) {
-            for (const row of dbConvs) {
-              candidateIds.add(row.id);
-            }
-          }
-        } catch {}
-      }
-      const queryIds = Array.from(candidateIds);
-
-      let query = supabase.from('messages').select('*');
-      if (queryIds.length === 1) {
-        query = query.eq('conversation_id', queryIds[0]);
-      } else {
-        query = query.in('conversation_id', queryIds);
-      }
-
-      if (options?.afterCreatedAt) {
-        query = query.gt('created_at', options.afterCreatedAt).order('created_at', { ascending: true }).limit(limit);
-      } else {
-        if (options?.beforeCreatedAt) {
-          query = query.lt('created_at', options.beforeCreatedAt);
-        }
-        query = query.order('created_at', { ascending: false }).limit(limit);
-      }
-
-      const { data, error } = await query;
-
-      if (error) {
-        console.warn('fetchMessagesForConversation notice:', error);
-        return localMsgs;
-      }
-
-      const merged = persistAndReturnMerged(data || []);
-
-      // Consolidate legacy thread messages in PostgreSQL asynchronously
-      const legacyIds = queryIds.filter((id) => id !== targetConvId);
-      if (legacyIds.length > 0 && supabase && isSupabaseConfigured()) {
-        (async () => {
-          try {
-            await supabase
-              .from('messages')
-              .update({ conversation_id: targetConvId })
-              .in('conversation_id', legacyIds);
-            await supabase
-              .from('conversations')
-              .delete()
-              .in('id', legacyIds);
-          } catch (err) {
-            console.warn('Error consolidating legacy threads:', err);
-          }
-        })();
-      }
-
-      return merged;
     } catch (e) {
-      console.warn('fetchMessagesForConversation exception:', e);
+      console.warn('[DataService] fetchMessagesForConversation notice:', e);
     }
 
     return localMsgs;
@@ -1263,74 +1092,27 @@ class DataService {
     };
 
     try {
-      const headers: Record<string, string> = { 'Cache-Control': 'no-cache' };
-      if (activeUser?.id) headers['x-user-id'] = activeUser.id;
-      if (activeUser?.role) headers['x-user-role'] = activeUser.role;
-      const tokenRes = await supabaseTokenManager.getAccessToken();
-      if (tokenRes.token) {
-        headers['Authorization'] = `Bearer ${tokenRes.token}`;
-        headers['x-supabase-token'] = tokenRes.token;
-      }
-
       const params = new URLSearchParams({
         conversationId: canonicalId,
         beforeCreatedAt,
         limit: String(limit),
       });
-      if (activeUser?.id) params.set('userId', activeUser.id);
-      let srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
+      const srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
+        credentials: 'include',
         cache: 'no-store',
-        headers,
+        headers: { Accept: 'application/json' },
       });
-      if (srvRes.status === 401) {
-        const retryToken = await supabaseTokenManager.getAccessToken({
-          forceRefresh: true,
-          rejectedToken: tokenRes.token,
-        });
-        if (retryToken.token) {
-          srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
-            cache: 'no-store',
-            headers: {
-              ...headers,
-              Authorization: `Bearer ${retryToken.token}`,
-              'x-supabase-token': retryToken.token,
-            },
-          });
-        }
-      }
       if (srvRes.ok) {
-        const srvJson = await srvRes.json();
+        const srvJson = await srvRes.json().catch(() => ({}));
         if (srvJson.success && Array.isArray(srvJson.messages)) {
           return applyOlderRows(srvJson.messages, Boolean(srvJson.hasMore));
         }
       }
-    } catch {
-      // Fallback to direct Supabase query below
-    }
-
-    if (!supabase || !isSupabaseConfigured()) {
-      return { newCount: 0, hasMore: false };
-    }
-
-    try {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('conversation_id', canonicalId)
-        .lt('created_at', beforeCreatedAt)
-        .order('created_at', { ascending: false })
-        .limit(limit);
-
-      if (error || !data) {
-        console.warn('fetchOlderMessages notice:', error);
-        return { newCount: 0, hasMore: false };
-      }
-
-      return applyOlderRows(data, data.length === limit);
     } catch (e) {
-      console.warn('fetchOlderMessages exception:', e);
-      return { newCount: 0, hasMore: false };
+      console.warn('[DataService] fetchOlderMessages notice:', e);
     }
+
+    return { newCount: 0, hasMore: false };
   }
 
   // On-demand pagination for older topups (self-hosted API)
@@ -1880,17 +1662,21 @@ class DataService {
     this.saveToLocalStorage(STORAGE_KEYS.GAME_CATALOG, updated);
   }
 
-  private applyCashoutRows(rows: any[], replaceAll: boolean = false): void {
-    const mapped = rows.map((c: any) => ({
-      id: c.id,
-      customerName: c.customer_name,
-      amount: Number(c.amount),
-      currency: c.currency,
-      methodName: c.method_name,
-      gameName: c.game_name,
-      isFake: c.is_fake,
-      timestamp: c.timestamp,
-    }));
+  private applyCashoutRows(rows: any[], replaceAll: boolean = false, silentEvent: boolean = true): void {
+    const mapped = rows.map((c: any) => {
+      const customerName = String(c.customerName ?? c.customer_name ?? c.playerHandle ?? '').trim();
+      return {
+        id: String(c.id),
+        customerName,
+        playerHandle: String(c.playerHandle ?? customerName),
+        amount: Number(c.amount ?? 0),
+        currency: String(c.currency || 'USD'),
+        methodName: String(c.methodName ?? c.method_name ?? ''),
+        gameName: String(c.gameName ?? c.game_name ?? ''),
+        isFake: (c.isFake ?? c.is_fake) !== false,
+        timestamp: String(c.timestamp || new Date().toISOString()),
+      };
+    });
     if (replaceAll) {
       this.cache[STORAGE_KEYS.FAKED_CASHOUTS] = mapped;
     } else {
@@ -1901,6 +1687,9 @@ class DataService {
       this.cache[STORAGE_KEYS.FAKED_CASHOUTS] = Array.from(map.values()).slice(0, 50);
     }
     this.saveToLocalStorage(STORAGE_KEYS.FAKED_CASHOUTS, this.cache[STORAGE_KEYS.FAKED_CASHOUTS]);
+    if (!silentEvent && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'cashout_feed_updated' } }));
+    }
   }
 
   private applyConversationRows(rows: any[], replaceAll: boolean = false): void {
@@ -1915,6 +1704,7 @@ class DataService {
       if (user && (user.role === 'agent' || user.role === 'admin')) {
         continue;
       }
+      this.ensuredServerConversations.add(c.id);
       convMap.set(c.id, {
         id: c.id,
         customerId: c.customer_id,
@@ -2013,16 +1803,24 @@ class DataService {
     }
   }
 
-  private applyAppConfig(data: any): void {
+  private applyAppConfig(data: any, silentEvent: boolean = true): void {
     const currentConfig = this.getAppConfig();
-    const merged = {
+    const sanitizedData = data && typeof data === 'object' ? { ...data } : {};
+    delete (sanitizedData as any).telegram;
+    delete (sanitizedData as any).push_subscriptions;
+    delete (sanitizedData as any).supportedPartners;
+    const merged: AppConfig = {
       ...currentConfig,
-      ...data,
+      ...sanitizedData,
     };
+    delete (merged as any).telegram;
     merged.referralProgram = normalizeReferralConfig(merged.referralProgram);
     merged.wheelOfLuck = normalizeWheelConfig(merged.wheelOfLuck);
     this.cache[STORAGE_KEYS.CONFIG] = merged;
     this.saveToLocalStorage(STORAGE_KEYS.CONFIG, this.cache[STORAGE_KEYS.CONFIG]);
+    if (!silentEvent && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.CONFIG } }));
+    }
   }
 
   private load<T>(key: string, defaultValue: T): T {
@@ -2056,7 +1854,7 @@ class DataService {
 
     try {
       if (key === STORAGE_KEYS.CONFIG) {
-        await supabase.from('app_config').upsert({ id: 'main', data: value });
+        // App Config migrated to self-hosted /api/admin/app-config endpoints
       } else if (key === STORAGE_KEYS.USERS) {
         // Users & admin directory migrated to self-hosted /api/profile and /api/admin/users
       } else if (key === STORAGE_KEYS.WALLETS && typeof value === 'object' && value !== null) {
@@ -2102,26 +1900,10 @@ class DataService {
         // Withdrawals migrated to self-hosted /api/withdrawals endpoints
       } else if (key === STORAGE_KEYS.GAME_ACCOUNTS) {
         // Game accounts migrated to self-hosted /api/game-accounts endpoints
-      } else if (key === STORAGE_KEYS.CONVERSATIONS && Array.isArray(value) && value.length > 0) {
-        const currentUserId = this.getCurrentUser()?.id;
-        const c = currentUserId
-          ? ((value as SupportConversation[]).find((x) => x.customerId === currentUserId) || value[0])
-          : value[0];
-        if (c && c.id && c.customerId) {
-          await supabase.from('conversations').upsert({
-            id: c.id,
-            customer_id: c.customerId,
-            customer_name: c.customerName,
-            agent_id: c.assignedAgentId || null,
-            agent_name: c.assignedAgentName || null,
-            status: c.status,
-            last_message: c.lastMessageText,
-            last_message_at: c.lastMessageTimestamp,
-            created_at: c.createdAt,
-          });
-        }
+      } else if (key === STORAGE_KEYS.CONVERSATIONS) {
+        // Conversations migrated to self-hosted /api/chat endpoints
       } else if (key === STORAGE_KEYS.MESSAGES) {
-        // Individual messages are already persisted directly in sendChatMessage() without triggering query bursts
+        // Messages migrated to self-hosted /api/chat endpoints
       } else if (key === STORAGE_KEYS.FAKED_CASHOUTS) {
         // Client-side simulated ticker cashouts remain purely local and are never synced to Supabase
       }
@@ -2194,66 +1976,9 @@ class DataService {
 
       // 4 & 5. Deposits (topups) & Withdrawals migrated to self-hosted /api/deposits and /api/withdrawals endpoints
 
-      // 6. Conversations & Messages (game_catalog migrated to self-hosted /api/game-catalog)
-      const convs = this.load<SupportConversation[]>(STORAGE_KEYS.CONVERSATIONS, INITIAL_CONVERSATIONS);
-      if (convs.length > 0) {
-        const rows = convs.map((c) => ({
-          id: c.id,
-          customer_id: c.customerId,
-          customer_name: c.customerName,
-          agent_id: c.assignedAgentId || null,
-          agent_name: c.assignedAgentName || null,
-          status: c.status,
-          last_message: c.lastMessageText || '',
-          last_message_at: c.lastMessageTimestamp || new Date().toISOString(),
-          created_at: c.createdAt,
-        }));
-        const { error } = await supabase.from('conversations').upsert(rows);
-        if (!error) counts['conversations'] = rows.length;
-      }
+      // 6. Conversations & Messages migrated to self-hosted /api/chat endpoints
 
-      const allMsgs: any[] = [];
-      const msgDict = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-      for (const mList of Object.values(msgDict)) {
-        allMsgs.push(...mList);
-      }
-      if (allMsgs.length > 0) {
-        const rows = allMsgs.map((m) => {
-          const normalizedAtt = m.attachmentUrl ? toProxyStorageUrl(m.attachmentUrl) || m.attachmentUrl : null;
-          const txPayload =
-            m.transactionData || normalizedAtt || m.attachmentName
-              ? {
-                  ...(m.transactionData || {}),
-                  ...(normalizedAtt ? { attachmentUrl: normalizedAtt } : {}),
-                  ...(m.attachmentName ? { attachmentName: m.attachmentName } : {}),
-                }
-              : null;
-          return {
-            id: m.id,
-            conversation_id: m.conversationId,
-            sender_id: m.senderId,
-            sender_name: m.senderName,
-            sender_role: m.senderRole,
-            content: m.text || '',
-            attachment_url: normalizedAtt,
-            attachment_name: m.attachmentName || null,
-            transaction_data: txPayload,
-            created_at: m.createdAt,
-          };
-        });
-        let { error } = await supabase.from('messages').upsert(rows);
-        if (error && (error.code === '42703' || error.code === 'PGRST204' || String(error.message || '').includes('attachment_url'))) {
-          const fallbackRows = rows.map(({ attachment_url, attachment_name, ...rest }) => rest);
-          const retryRes = await supabase.from('messages').upsert(fallbackRows);
-          error = retryRes.error;
-        }
-        if (!error) counts['messages'] = rows.length;
-      }
-
-      // 8. App Config
-      const cfg = this.load<AppConfig>(STORAGE_KEYS.CONFIG, INITIAL_CONFIG);
-      await supabase.from('app_config').upsert({ id: 'main', data: cfg });
-      counts['app_config'] = 1;
+      // 8. App Config migrated to self-hosted /api/admin/app-config endpoints
 
       const totalItems = Object.values(counts).reduce((a, b) => a + b, 0);
 
@@ -2487,6 +2212,8 @@ class DataService {
     }
     this.lastSyncTimestamp = null;
     this.authoritativelyLoadedTopupsForUser.clear();
+    this.ensuredServerConversations.clear();
+    this.inFlightEnsureConversations.clear();
   }
 
   public setCurrentUserId(userId: string): void {
@@ -3070,7 +2797,7 @@ class DataService {
     this.cache[STORAGE_KEYS.USERS] = allUsers;
 
     if (newRole === 'agent' || newRole === 'admin') {
-      // Purge any customer support conversation belonging to this newly elevated staff member
+      // Purge any cached customer support conversation belonging to this newly elevated staff member
       const convs = (this.cache[STORAGE_KEYS.CONVERSATIONS] as SupportConversation[] || []).filter(
         (c) =>
           c.customerId !== updatedUser.id &&
@@ -3078,26 +2805,6 @@ class DataService {
       );
       this.cache[STORAGE_KEYS.CONVERSATIONS] = convs;
       this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, convs);
-
-      // Clean up unmigrated customer conversations in Supabase PostgreSQL until conversations domain migrates
-      if (supabase && isSupabaseConfigured()) {
-        (async () => {
-          try {
-            const { data: userConvs } = await supabase
-              .from('conversations')
-              .select('id')
-              .or(`customer_id.eq.${updatedUser.id},customer_email.eq.${updatedUser.email}`);
-            if (userConvs && userConvs.length > 0) {
-              const ids = userConvs.map((c: any) => c.id);
-              await supabase.from('messages').delete().in('conversation_id', ids);
-              await supabase.from('conversations').delete().in('id', ids);
-              console.log(`[Staff Inbox Guard] Purged customer conversation for elevated user ${updatedUser.email}`);
-            }
-          } catch (e) {
-            console.warn('Supabase conversation purge error:', e);
-          }
-        })();
-      }
     }
 
     if (updatedUser.id === this.getCurrentUser()?.id) {
@@ -3287,8 +2994,52 @@ class DataService {
       ...updated,
     };
     delete (config as any).supportedPartners;
-    this.save(STORAGE_KEYS.CONFIG, config);
+    this.save(STORAGE_KEYS.CONFIG, config, true);
+    void this.updateCmsPoliciesAsync(updated);
     return { success: true, message: 'Policy settings saved successfully!' };
+  }
+
+  public async updateCmsPoliciesAsync(updated: Partial<{
+    cashoutPolicyHtml: string;
+    privacyPolicyHtml: string;
+    termsPolicyHtml: string;
+  }>): Promise<{ success: boolean; message: string }> {
+    try {
+      const attempt = await this.fetchWithAuthTokenRetry('/api/admin/app-config/policies', (headers) => ({
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify(updated),
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success) {
+        return {
+          success: false,
+          message: extractServerApiError(
+            json,
+            `Failed to save policy settings (${attempt.response?.status || 401}).`,
+          ),
+        };
+      }
+      const config = this.getAppConfig();
+      const nextCfg: AppConfig = {
+        ...config,
+        policies: json.policies || {
+          ...this.getCmsPolicies(),
+          ...updated,
+        },
+      };
+      this.cache[STORAGE_KEYS.CONFIG] = nextCfg;
+      this.saveToLocalStorage(STORAGE_KEYS.CONFIG, nextCfg);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.CONFIG } }));
+      }
+      return { success: true, message: json.message || 'Policy settings saved successfully!' };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to save policy settings.',
+      };
+    }
   }
 
   public getUserRegisteredMethod(userId: string): {
@@ -4283,10 +4034,15 @@ class DataService {
           finalCredit: updatedReq.finalWalletCredit,
         },
       );
-      await this.persistChatTransactionStatusInSupabase(
-        updatedReq.id,
-        updatedReq.customerId,
-      );
+      await this.persistChatTransactionStatusOnServer({
+        requestId: updatedReq.id,
+        customerId: updatedReq.customerId,
+        status: 'completed',
+        notes: updatedReq.reviewNotes,
+        amount: updatedReq.amount,
+        bonusAmount: updatedReq.bonusAmount,
+        finalCredit: updatedReq.finalWalletCredit,
+      });
 
       try {
         const conv = this.getOrCreateConversationForCustomer(
@@ -4441,10 +4197,12 @@ class DataService {
         updatedReq.reviewerName || params.reviewerName,
         cleanReason,
       );
-      await this.persistChatTransactionStatusInSupabase(
-        updatedReq.id,
-        updatedReq.customerId,
-      );
+      await this.persistChatTransactionStatusOnServer({
+        requestId: updatedReq.id,
+        customerId: updatedReq.customerId,
+        status: 'rejected',
+        notes: cleanReason,
+      });
 
       if (typeof window !== 'undefined') {
         window.dispatchEvent(
@@ -5180,15 +4938,6 @@ class DataService {
         },
       });
 
-      this.sendChatMessage({
-        conversationId: conv.id,
-        senderId: 'usr_admin_1',
-        senderName: 'System / Treasury Desk',
-        senderRole: 'system',
-        text: `⏳ Payout Review: $${newReq.amount.toFixed(2)}\n${newReq.customerName} • ${lastMethodName}${lastMethodDetail}`,
-        isInternalNote: false,
-      });
-
       this.createNotification({
         userId: newReq.customerId,
         title: 'Cashout Request Submitted',
@@ -5395,11 +5144,17 @@ class DataService {
         }
       }
 
-      if (isSupabaseConfigured() && supabase) {
-        await this.persistChatTransactionStatusInSupabase(
-          updatedReq.id,
-          updatedReq.customerId,
-        );
+      if (
+        params.newStatus === 'completed' ||
+        params.newStatus === 'rejected' ||
+        params.newStatus === 'cancelled'
+      ) {
+        await this.persistChatTransactionStatusOnServer({
+          requestId: updatedReq.id,
+          customerId: updatedReq.customerId,
+          status: params.newStatus === 'completed' ? 'completed' : 'rejected',
+          notes: params.note,
+        });
       }
 
       if (typeof window !== 'undefined') {
@@ -6545,32 +6300,6 @@ class DataService {
     this.cache[STORAGE_KEYS.CONVERSATIONS] = deduplicated;
     this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, deduplicated);
 
-    // Asynchronously update Supabase database to maintain single persistent thread invariant:
-    // Re-assign messages to canonicalId, and delete duplicate conversation shells ONLY.
-    // Invariant: Never delete message history records during deduplication.
-    if ((messagesToReassignInDb.length > 0 || duplicateIdsToDeleteInDb.length > 0) && supabase && isSupabaseConfigured()) {
-      (async () => {
-        try {
-          for (const item of messagesToReassignInDb) {
-            if (item.fromIds.length > 0) {
-              await supabase
-                .from('messages')
-                .update({ conversation_id: item.toId })
-                .in('conversation_id', item.fromIds);
-            }
-          }
-          if (duplicateIdsToDeleteInDb.length > 0) {
-            await supabase
-              .from('conversations')
-              .delete()
-              .in('id', duplicateIdsToDeleteInDb);
-          }
-        } catch (dbErr) {
-          console.warn('[SwiftSweeps] Supabase conversation consolidation sync notice:', dbErr);
-        }
-      })();
-    }
-
     return deduplicated;
   }
 
@@ -6665,34 +6394,132 @@ class DataService {
     return run;
   }
 
-  public async fetchConversations(): Promise<SupportConversation[]> {
-    if (!supabase || !isSupabaseConfigured()) {
-      return this.getConversations();
+  public async fetchConversationsFromServer(options?: {
+    status?: TicketStatusValue;
+    q?: string;
+    limit?: number;
+    offset?: number;
+    replaceAll?: boolean;
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    conversations: SupportConversation[];
+    total: number;
+    error?: string;
+  }> {
+    const activeUser = this.getCurrentUser();
+    if (!activeUser?.id || typeof fetch !== 'function') {
+      return {
+        success: false,
+        conversations: this.getConversations(),
+        total: this.getConversations().length,
+      };
     }
-    try {
-      const { data, error } = await supabase
-        .from('conversations')
-        .select('*')
-        .order('last_message_at', { ascending: false })
-        .limit(50);
 
-      if (!error && Array.isArray(data)) {
-        const replaceAll = data.length < 50;
-        this.applyConversationRows(data, replaceAll);
-        if (data.length === 0) {
-          this.cache[STORAGE_KEYS.MESSAGES] = {};
-          this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, {});
-        }
+    try {
+      const limit = Math.min(Math.max(1, options?.limit ?? 50), 200);
+      const offset = Math.max(0, options?.offset ?? 0);
+      const params = new URLSearchParams({
+        limit: String(limit),
+        offset: String(offset),
+      });
+      if (options?.status) params.set('status', options.status);
+      if (options?.q) params.set('q', options.q);
+
+      const res = await fetch(`/api/chat/conversations?${params.toString()}`, {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success || !Array.isArray(data.conversations)) {
+        return {
+          success: false,
+          conversations: this.getConversations(),
+          total: this.getConversations().length,
+          error:
+            typeof data?.error === 'string'
+              ? data.error
+              : data?.error?.message || `Failed to load conversations (${res.status}).`,
+        };
+      }
+
+      const replaceAll =
+        options?.replaceAll !== undefined
+          ? options.replaceAll
+          : data.conversations.length < limit && offset === 0;
+      this.applyConversationRows(data.conversations, replaceAll);
+
+      if (replaceAll && data.conversations.length === 0) {
+        this.cache[STORAGE_KEYS.MESSAGES] = {};
+        this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, {});
+      }
+
+      if (!options?.silentEvent && typeof window !== 'undefined') {
         window.dispatchEvent(
           new CustomEvent('aetherpay_state_changed', {
-            detail: { key: 'conversations_fetched', count: data.length },
-          })
+            detail: { key: 'conversations_fetched', count: data.conversations.length },
+          }),
         );
       }
-      return this.getConversations();
-    } catch (err) {
-      console.warn('[DataService] fetchConversations notice:', err);
-      return this.getConversations();
+
+      return {
+        success: true,
+        conversations: this.getConversations(),
+        total: Number(data.total ?? data.conversations.length),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        conversations: this.getConversations(),
+        total: this.getConversations().length,
+        error: err?.message || 'Unable to connect to chat service.',
+      };
+    }
+  }
+
+  public async fetchConversations(): Promise<SupportConversation[]> {
+    const res = await this.fetchConversationsFromServer({ limit: 50, replaceAll: true });
+    return res.conversations;
+  }
+
+  private async ensureConversationOnServer(customerId: string): Promise<void> {
+    const cleanId = (customerId || '').trim();
+    if (!cleanId || typeof fetch !== 'function') return;
+    const activeUser = this.getCurrentUser();
+    if (!activeUser?.id) return;
+    const canonicalId = `conv_${cleanId}`;
+    if (
+      this.ensuredServerConversations.has(canonicalId) ||
+      this.inFlightEnsureConversations.has(canonicalId)
+    ) {
+      return;
+    }
+
+    this.inFlightEnsureConversations.add(canonicalId);
+    try {
+      const res = await fetch('/api/chat/conversations/ensure', {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ customerId: cleanId }),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data?.success && data?.conversation) {
+          this.ensuredServerConversations.add(canonicalId);
+          this.applyConversationRows([data.conversation], false);
+        }
+      }
+    } catch {
+      // Non-blocking background ensure; sendMessage also ensures atomically on server
+    } finally {
+      this.inFlightEnsureConversations.delete(canonicalId);
     }
   }
 
@@ -6773,24 +6600,6 @@ class DataService {
           this.cache[STORAGE_KEYS.MESSAGES] = allMsgs;
           this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, allMsgs);
         }
-
-        // Re-parent in database asynchronously
-        if (supabase && isSupabaseConfigured()) {
-          (async () => {
-            try {
-              await supabase
-                .from('messages')
-                .update({ conversation_id: canonicalId })
-                .eq('conversation_id', oldId);
-              await supabase
-                .from('conversations')
-                .delete()
-                .eq('id', oldId);
-            } catch (err) {
-              console.warn('Error re-parenting messages in Supabase:', err);
-            }
-          })();
-        }
       }
 
       if (conv.customerId !== customerId) {
@@ -6806,7 +6615,7 @@ class DataService {
         needsSave = true;
       }
       if (needsSave) {
-        this.save(STORAGE_KEYS.CONVERSATIONS, list);
+        this.save(STORAGE_KEYS.CONVERSATIONS, list, true);
       }
     }
 
@@ -6827,29 +6636,10 @@ class DataService {
         updatedAt: new Date().toISOString(),
       };
       list.unshift(conv);
-      this.save(STORAGE_KEYS.CONVERSATIONS, list);
+      this.save(STORAGE_KEYS.CONVERSATIONS, list, true);
     }
 
-    // Ensure conversation is immediately recorded in Supabase PostgreSQL
-    if (supabase && isSupabaseConfigured()) {
-      supabase
-        .from('conversations')
-        .upsert({
-          id: conv.id,
-          customer_id: conv.customerId,
-          customer_name: conv.customerName,
-          agent_id: conv.assignedAgentId || null,
-          agent_name: conv.assignedAgentName || null,
-          status: conv.status,
-          last_message: conv.lastMessageText,
-          last_message_at: conv.lastMessageTimestamp,
-          created_at: conv.createdAt,
-        })
-        .then(
-          () => {},
-          (err) => console.warn('Supabase conv sync notice:', err)
-        );
-    }
+    void this.ensureConversationOnServer(customerId);
 
     return conv;
   }
@@ -6912,7 +6702,6 @@ class DataService {
         : targetConvId.startsWith('conv_')
         ? targetConvId.replace(/^conv_/, '')
         : '');
-    const customerUser = customerId ? this.getUserById(customerId) : undefined;
 
     const normalizedAttachmentUrl = newMsg.attachmentUrl
       ? toProxyStorageUrl(newMsg.attachmentUrl) || newMsg.attachmentUrl
@@ -6935,63 +6724,37 @@ class DataService {
     let confirmedMsg: ChatMessage | null = null;
     let lastErrorMessage = '';
 
-    // 1. Authoritative server write with deterministic client ID (guarantees parent users + conversations FK)
+    // Authoritative self-hosted server write (derives senderId & senderRole from session cookie)
     try {
-      const sendHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-      const currentActor = this.getCurrentUser();
-      if (currentActor?.id) sendHeaders['x-user-id'] = currentActor.id;
-      if (currentActor?.role) sendHeaders['x-user-role'] = currentActor.role;
-      const tokenRes = await supabaseTokenManager.getAccessToken();
-      if (tokenRes.token) {
-        sendHeaders['Authorization'] = `Bearer ${tokenRes.token}`;
-        sendHeaders['x-supabase-token'] = tokenRes.token;
-      }
-
-      const bodyPayload = JSON.stringify({
+      const sendBody: Record<string, unknown> = {
         id: newMsg.id,
         conversationId: targetConvId,
-        senderId: newMsg.senderId,
-        senderName: newMsg.senderName,
-        senderRole: newMsg.senderRole,
-        recipientId: customerId,
-        recipientName: conv?.customerName || customerUser?.displayName,
-        senderEmail: newMsg.senderRole === 'customer' ? customerUser?.email : undefined,
-        recipientEmail: customerUser?.email || conv?.customerEmail,
         text: newMsg.text,
-        attachmentUrl: normalizedAttachmentUrl,
-        attachmentName: newMsg.attachmentName,
-        transactionData: txPayload,
-        isInternalNote: newMsg.isInternalNote,
+        isInternalNote: Boolean(newMsg.isInternalNote),
         createdAt: newMsg.createdAt,
-      });
+      };
+      if (customerId) sendBody.recipientId = customerId;
+      if (normalizedAttachmentUrl) sendBody.attachmentUrl = normalizedAttachmentUrl;
+      if (newMsg.attachmentName) sendBody.attachmentName = newMsg.attachmentName;
+      if (txPayload) sendBody.transactionData = txPayload;
+      if (newMsg.deskLabel) sendBody.deskLabel = newMsg.deskLabel;
 
-      let srvRes = await fetch('/api/chat/send', {
+      const srvRes = await fetch('/api/chat/send', {
         method: 'POST',
+        credentials: 'include',
         cache: 'no-store',
-        headers: sendHeaders,
-        body: bodyPayload,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(sendBody),
       });
-      if (srvRes.status === 401) {
-        const retryToken = await supabaseTokenManager.getAccessToken({
-          forceRefresh: true,
-          rejectedToken: tokenRes.token,
-        });
-        if (retryToken.token) {
-          srvRes = await fetch('/api/chat/send', {
-            method: 'POST',
-            cache: 'no-store',
-            headers: {
-              ...sendHeaders,
-              Authorization: `Bearer ${retryToken.token}`,
-              'x-supabase-token': retryToken.token,
-            },
-            body: bodyPayload,
-          });
-        }
-      }
 
       const srvJson = await srvRes.json().catch(() => ({}));
       if (srvRes.ok && srvJson?.success && srvJson?.message) {
+        if (srvJson.conversation) {
+          this.applyConversationRows([srvJson.conversation], false);
+        }
         const mapped = mapDbMessageRowToChatMessage(srvJson.message, targetConvId);
         confirmedMsg = {
           ...newMsg,
@@ -7003,85 +6766,14 @@ class DataService {
           deliveryError: undefined,
         };
       } else {
-        lastErrorMessage = srvJson?.error || `Server rejected message (${srvRes.status})`;
+        lastErrorMessage =
+          typeof srvJson?.error === 'string'
+            ? srvJson.error
+            : srvJson?.error?.message || `Server rejected message (${srvRes.status})`;
       }
     } catch (apiErr: any) {
       lastErrorMessage = apiErr?.message || 'Network error reaching chat server';
       console.warn('[DataService] /api/chat/send notice:', apiErr);
-    }
-
-    // 2. Fallback to ordered direct Supabase write only if /api/chat/send did not confirm persistence
-    if (!confirmedMsg && supabase && isSupabaseConfigured()) {
-      try {
-        if (customerId) {
-          await supabase.from('conversations').upsert(
-            {
-              id: targetConvId,
-              customer_id: customerId,
-              customer_name: conv?.customerName || customerUser?.displayName || 'Customer',
-              status: conv?.status || 'open',
-              last_message: newMsg.isInternalNote ? conv?.lastMessageText || '' : newMsg.text || (normalizedAttachmentUrl ? '[Photo Attachment]' : ''),
-              last_message_at: newMsg.createdAt || new Date().toISOString(),
-            },
-            { onConflict: 'id' }
-          );
-        }
-
-        const directRow: any = {
-          id: newMsg.id,
-          conversation_id: targetConvId,
-          sender_id: newMsg.senderId,
-          sender_name: newMsg.senderName,
-          sender_role: newMsg.senderRole,
-          content: newMsg.text,
-          attachment_url: normalizedAttachmentUrl || null,
-          attachment_name: newMsg.attachmentName || null,
-          is_internal_note: Boolean(newMsg.isInternalNote),
-          transaction_data: txPayload,
-          created_at: newMsg.createdAt,
-        };
-
-        let { data: directData, error: directErr } = await supabase
-          .from('messages')
-          .upsert(directRow, { onConflict: 'id' })
-          .select()
-          .single();
-
-        if (
-          directErr &&
-          (directErr.code === '42703' ||
-            directErr.code === 'PGRST204' ||
-            String(directErr.message || '').includes('attachment_url') ||
-            String(directErr.message || '').includes('attachment_name') ||
-            String(directErr.message || '').includes('is_internal_note'))
-        ) {
-          delete directRow.attachment_url;
-          delete directRow.attachment_name;
-          delete directRow.is_internal_note;
-          const retryRes = await supabase
-            .from('messages')
-            .upsert(directRow, { onConflict: 'id' })
-            .select()
-            .single();
-          directData = retryRes.data;
-          directErr = retryRes.error;
-        }
-
-        if (!directErr && directData) {
-          const mapped = mapDbMessageRowToChatMessage(directData, targetConvId);
-          confirmedMsg = {
-            ...newMsg,
-            ...mapped,
-            intentAction: newMsg.intentAction,
-            deliveryStatus: 'sent',
-            deliveryError: undefined,
-          };
-        } else if (directErr) {
-          lastErrorMessage = lastErrorMessage || directErr.message;
-        }
-      } catch (fbErr: any) {
-        lastErrorMessage = lastErrorMessage || fbErr?.message || 'Failed to save message';
-      }
     }
 
     if (confirmedMsg) {
@@ -7093,19 +6785,11 @@ class DataService {
           deliveryError: undefined,
         })) || confirmedMsg;
 
-      // Broadcast via ref-counted, collision-free Realtime hub on aligned topics.
-      // Security invariant: NEVER broadcast internal notes to customer room `chat_${targetConvId}`.
-      if (supabase && isSupabaseConfigured()) {
-        if (!updated.isInternalNote) {
-          void realtimeChatHub.broadcastMessage(`chat_${targetConvId}`, updated);
-        }
-        void realtimeChatHub.broadcastMessage('room_admin_support', updated);
-      }
-
       // Zero-Egress Telegram Alert for customer messages
       if (updated.senderRole === 'customer' && typeof fetch === 'function') {
         fetch('/api/telegram/notify-message', {
           method: 'POST',
+          credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             customerName: updated.senderName || 'Customer',
@@ -7171,6 +6855,7 @@ class DataService {
     attachmentName?: string;
     isInternalNote?: boolean;
     transactionData?: ChatTransactionData;
+    deskLabel?: string;
   }): ChatMessage {
     const targetConvId = this.resolveCanonicalConvId(params.conversationId);
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
@@ -7226,6 +6911,7 @@ class DataService {
       isInternalNote: !!params.isInternalNote,
       intentAction,
       transactionData: params.transactionData,
+      deskLabel: params.deskLabel,
       createdAt: nowIso,
       isRead: false,
       deliveryStatus: 'sending',
@@ -7274,6 +6960,7 @@ class DataService {
     attachmentName?: string;
     isInternalNote?: boolean;
     transactionData?: ChatTransactionData;
+    deskLabel?: string;
   }): Promise<ChatMessage> {
     const newMsg = this.sendChatMessage(params);
     const inFlight = this.inFlightMessageDeliveries.get(newMsg.id);
@@ -7361,90 +7048,43 @@ class DataService {
     }
   }
 
-  private async persistChatTransactionStatusInSupabase(
-    requestId: string,
-    customerId?: string
-  ): Promise<void> {
-    if (!supabase || !isSupabaseConfigured()) return;
-
-    const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-    const matchedMessages: ChatMessage[] = [];
-    for (const convId in all) {
-      for (const msg of all[convId] || []) {
-        if (msg.transactionData && msg.transactionData.requestId === requestId) {
-          matchedMessages.push(msg);
+  private async persistChatTransactionStatusOnServer(params: {
+    requestId: string;
+    customerId?: string;
+    status: 'completed' | 'rejected';
+    notes?: string;
+    amount?: number;
+    bonusAmount?: number;
+    finalCredit?: number;
+  }): Promise<void> {
+    if (typeof fetch !== 'function') return;
+    try {
+      const res = await fetch('/api/chat/messages/transaction-status', {
+        method: 'PATCH',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          requestId: params.requestId,
+          customerId: params.customerId,
+          status: params.status,
+          ...(params.notes ? { notes: params.notes } : {}),
+          ...(params.amount !== undefined ? { amount: params.amount } : {}),
+          ...(params.bonusAmount !== undefined ? { bonusAmount: params.bonusAmount } : {}),
+          ...(params.finalCredit !== undefined ? { finalCredit: params.finalCredit } : {}),
+        }),
+      });
+      if (res.ok) {
+        const json = await res.json().catch(() => ({}));
+        if (json?.success && Array.isArray(json.messages) && json.messages.length > 0) {
+          this.applyMessageRows(json.messages, false);
         }
       }
-    }
-
-    // Fallback: if this browser didn't have the chat thread cached yet (e.g. approved from AdminRequests), fetch customer messages
-    if (matchedMessages.length === 0 && customerId) {
-      const canonicalConvId = this.resolveCanonicalConvId(`conv_${customerId}`);
-      try {
-        const { data } = await supabase
-          .from('messages')
-          .select('id, conversation_id, transaction_data')
-          .in('conversation_id', Array.from(new Set([canonicalConvId, `conv_${customerId}`, customerId])))
-          .order('created_at', { ascending: false })
-          .limit(50);
-
-        if (Array.isArray(data)) {
-          const withdrawalReq = findRequestById(
-            this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS),
-            requestId
-          );
-          const topUpReq = findRequestById(
-            this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS),
-            requestId
-          );
-          const derivedStatus: 'completed' | 'rejected' =
-            withdrawalReq?.status === 'completed' || topUpReq?.status === 'completed'
-              ? 'completed'
-              : 'rejected';
-          const reviewerName = withdrawalReq?.reviewerName || topUpReq?.reviewerName || 'Customer Support';
-          const reviewNotes = withdrawalReq?.reviewNotes || topUpReq?.reviewNotes;
-
-          for (const row of data) {
-            const rawTx =
-              typeof row.transaction_data === 'string'
-                ? (() => {
-                    try {
-                      return JSON.parse(row.transaction_data);
-                    } catch {
-                      return null;
-                    }
-                  })()
-                : row.transaction_data;
-            if (rawTx && rawTx.requestId === requestId) {
-              const updatedTx = {
-                ...rawTx,
-                status: derivedStatus,
-                approvedBy: reviewerName,
-                approvedAt: new Date().toISOString(),
-                ...(reviewNotes ? { notes: reviewNotes } : {}),
-              };
-              await supabase
-                .from('messages')
-                .update({ transaction_data: updatedTx })
-                .eq('id', row.id);
-            }
-          }
-        }
-      } catch (e) {
-        console.warn('Fallback chat transaction card DB sync error:', e);
-      }
-      return;
-    }
-
-    for (const msg of matchedMessages) {
-      try {
-        await supabase
-          .from('messages')
-          .update({ transaction_data: msg.transactionData })
-          .eq('id', msg.id);
-      } catch (e) {
-        console.warn('Supabase message transaction_data update error:', e);
-      }
+    } catch (e) {
+      console.warn('[DataService] Chat transaction card DB sync error:', e);
     }
   }
 
@@ -7459,7 +7099,6 @@ class DataService {
     let updated = false;
     let targetConvId: string | null = null;
     let txData: ChatTransactionData | null = null;
-    const updatedMessages: ChatMessage[] = [];
 
     for (const convId in all) {
       for (const msg of all[convId]) {
@@ -7476,32 +7115,23 @@ class DataService {
           updated = true;
           targetConvId = convId;
           txData = msg.transactionData;
-          updatedMessages.push(msg);
         }
       }
     }
 
     if (updated) {
-      this.save(STORAGE_KEYS.MESSAGES, all);
-      if (supabase && isSupabaseConfigured()) {
-        for (const m of updatedMessages) {
-          supabase
-            .from('messages')
-            .update({ transaction_data: m.transactionData })
-            .eq('id', m.id)
-            .then(
-              () => {},
-              (err) => console.warn('Supabase chat transaction card update error:', err)
-            );
-        }
-      }
+      this.save(STORAGE_KEYS.MESSAGES, all, true);
       if (targetConvId && txData) {
         const isCompleted = status === 'completed';
+        const actor = this.getCurrentUser();
+        const actorRole =
+          actor?.role === 'admin' || actor?.role === 'agent' ? actor.role : 'agent';
         this.sendChatMessage({
           conversationId: targetConvId,
-          senderId: 'usr_agent_system',
+          senderId: actor?.id || 'usr_agent_system',
           senderName: 'Customer Support Desk',
-          senderRole: 'agent',
+          senderRole: actorRole,
+          deskLabel: 'Customer Support Desk',
           text: formatTransactionStatusChatMessage({
             transactionType: txData.transactionType === 'topup' ? 'topup' : 'withdrawal',
             status: isCompleted ? 'completed' : 'rejected',
@@ -7545,58 +7175,43 @@ class DataService {
     const normalizedStatus = normalizeTicketStatus(status);
     let persisted = false;
     let errorMessage = '';
+    let serverConv: any = null;
 
     try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'x-user-id': actingUser.id,
-        'x-user-role': actingUser.role,
-      };
-      const tokenRes = await supabaseTokenManager.getAccessToken();
-      if (tokenRes.token) {
-        headers['Authorization'] = `Bearer ${tokenRes.token}`;
-        headers['x-supabase-token'] = tokenRes.token;
-      }
       const res = await fetch('/api/chat/conversation-status', {
         method: 'PATCH',
+        credentials: 'include',
         cache: 'no-store',
-        headers,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
         body: JSON.stringify({
           conversationId: targetConvId,
           status: normalizedStatus,
-          actingUserId: actingUser.id,
         }),
       });
       const json = await res.json().catch(() => ({}));
       if (res.ok && json?.success) {
         persisted = true;
+        serverConv = json.conversation;
       } else {
-        errorMessage = json?.error || `Failed to update status (${res.status})`;
+        errorMessage =
+          typeof json?.error === 'string'
+            ? json.error
+            : json?.error?.message || `Failed to update status (${res.status})`;
       }
     } catch (err: any) {
       errorMessage = err?.message || 'Network error updating ticket status';
     }
 
-    if (!persisted && supabase && isSupabaseConfigured()) {
-      try {
-        const { error } = await supabase
-          .from('conversations')
-          .update({ status: normalizedStatus })
-          .eq('id', targetConvId);
-        if (!error) {
-          persisted = true;
-        } else {
-          errorMessage = error.message || errorMessage;
-        }
-      } catch (fbErr: any) {
-        errorMessage = fbErr?.message || errorMessage;
-      }
-    }
-
-    if (!persisted && isSupabaseConfigured()) {
+    if (!persisted) {
       return { success: false, message: errorMessage || 'Unable to persist ticket status change.' };
     }
 
+    if (serverConv) {
+      this.applyConversationRows([serverConv], false);
+    }
     const conversations = this.getConversations();
     const conv = conversations.find((c) => c.id === targetConvId || c.id === conversationId);
     if (conv) {
@@ -8816,11 +8431,6 @@ class DataService {
         staffMessage = mappedMsg;
         this.appendIncomingMessage(mappedMsg);
 
-        if (supabase && isSupabaseConfigured()) {
-          void realtimeChatHub.broadcastMessage(`chat_${mappedMsg.conversationId}`, mappedMsg);
-          void realtimeChatHub.broadcastMessage('room_admin_support', mappedMsg);
-        }
-
         if (typeof window !== 'undefined') {
           try {
             webPushClient
@@ -8926,24 +8536,104 @@ class DataService {
       }
     }
     if (dirty) {
-      this.save(STORAGE_KEYS.CONFIG, cfg);
+      this.cache[STORAGE_KEYS.CONFIG] = cfg;
+      this.saveToLocalStorage(STORAGE_KEYS.CONFIG, cfg);
     }
     return cfg;
   }
 
-  public updateAppConfig(newConfig: AppConfig, actorId?: string, actorName?: string): void {
-    this.save(STORAGE_KEYS.CONFIG, newConfig);
-    if (actorId && actorName) {
-      this.logAudit({
-        actorId,
-        actorName,
-        actorRole: 'admin',
-        action: 'APP_CONFIG_UPDATED',
-        entityType: 'settings',
-        entityId: 'global_config',
-        details: 'Updated payment methods, bonus rules, or terms.',
+  public async fetchAppConfigFromServer(options?: {
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    config: AppConfig;
+    error?: string;
+  }> {
+    try {
+      const res = await fetch('/api/app-config', {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
       });
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          config: this.getAppConfig(),
+          error: `Failed to fetch app config (${res.status})`,
+        };
+      }
+      const payload = rawText ? JSON.parse(rawText) : {};
+      if (payload?.config && typeof payload.config === 'object') {
+        this.applyAppConfig(payload.config, Boolean(options?.silentEvent));
+      }
+      return {
+        success: true,
+        config: this.getAppConfig(),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        config: this.getAppConfig(),
+        error: err?.message || 'Unable to fetch app config.',
+      };
     }
+  }
+
+  public async updateAppConfigAsync(
+    newConfig: AppConfig,
+  ): Promise<{ success: boolean; config?: AppConfig; error?: string }> {
+    try {
+      const payload = {
+        currency: newConfig.currency || 'USD',
+        paymentMethods: Array.isArray(newConfig.paymentMethods)
+          ? newConfig.paymentMethods
+          : [],
+        withdrawalMethods: Array.isArray(newConfig.withdrawalMethods)
+          ? newConfig.withdrawalMethods
+          : [],
+        gatewaySimulator: newConfig.gatewaySimulator,
+        cashoutFeed: newConfig.cashoutFeed,
+        platformRules: newConfig.platformRules,
+        ...(newConfig.policies ? { policies: newConfig.policies } : {}),
+      };
+
+      const attempt = await this.fetchWithAuthTokenRetry('/api/admin/app-config', (headers) => ({
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(payload),
+      }));
+
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success) {
+        return {
+          success: false,
+          error: extractServerApiError(
+            json,
+            `Failed to save application configuration (${attempt.response?.status || 401}).`,
+          ),
+        };
+      }
+
+      this.applyAppConfig(json.config || newConfig, false);
+      return {
+        success: true,
+        config: this.getAppConfig(),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Failed to save application configuration.',
+      };
+    }
+  }
+
+  public updateAppConfig(newConfig: AppConfig, _actorId?: string, _actorName?: string): void {
+    this.save(STORAGE_KEYS.CONFIG, newConfig, true);
+    void this.updateAppConfigAsync(newConfig);
   }
 
   // Audit Logs (Admin-Only Read, Server-Side Vercel API Writes, Zero LocalStorage)
@@ -9408,6 +9098,160 @@ class DataService {
   }
 
   // Real-Time Mixed Cashouts Feed (Real + Admin-Configured Fake Pool)
+  public async fetchFakedCashoutsFromServer(options?: {
+    limit?: number;
+    offset?: number;
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    items: CashoutFeedItem[];
+    total: number;
+    error?: string;
+  }> {
+    try {
+      const limit = Math.min(50, Math.max(1, Math.trunc(options?.limit ?? 25)));
+      const offset = Math.max(0, Math.trunc(options?.offset ?? 0));
+      const res = await fetch(`/api/faked-cashouts?limit=${limit}&offset=${offset}`, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          items: this.getFakedCashouts(),
+          total: this.getFakedCashouts().length,
+          error: `Failed to fetch cashout feed (${res.status}).`,
+        };
+      }
+      const json = rawText ? JSON.parse(rawText) : {};
+      const rows = Array.isArray(json.items) ? json.items : [];
+      this.applyCashoutRows(rows, true, Boolean(options?.silentEvent));
+      return {
+        success: true,
+        items: this.getFakedCashouts(),
+        total: Number(json.total ?? rows.length),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        items: this.getFakedCashouts(),
+        total: this.getFakedCashouts().length,
+        error: err?.message || 'Unable to load cashout feed.',
+      };
+    }
+  }
+
+  public async reseedFakedCashoutsOnServer(cfg: AppConfig): Promise<{
+    success: boolean;
+    items?: CashoutFeedItem[];
+    error?: string;
+  }> {
+    try {
+      const generated = this.generateInitialFakeCashouts(cfg);
+      const attempt = await this.fetchWithAuthTokenRetry('/api/admin/faked-cashouts/reseed', (headers) => ({
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          items: generated.map((item) => ({
+            customerName: item.customerName || item.playerHandle || 'Player',
+            amount: item.amount,
+            currency: item.currency || cfg.currency || 'USD',
+            methodName: item.methodName || 'Verified CashApp',
+            gameName: item.gameName || 'Orion Stars Elite',
+            isFake: true,
+            timestamp: item.timestamp,
+          })),
+        }),
+      }));
+
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success) {
+        return {
+          success: false,
+          error: extractServerApiError(
+            json,
+            `Failed to reseed live cashout feed (${attempt.response?.status || 401}).`,
+          ),
+        };
+      }
+
+      const items = Array.isArray(json.items) ? json.items : generated;
+      this.applyCashoutRows(items, true, false);
+      return { success: true, items: this.getFakedCashouts() };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Unable to reseed live cashout feed.',
+      };
+    }
+  }
+
+  public async createFakedCashoutOnServer(cfg?: AppConfig): Promise<{
+    success: boolean;
+    item?: CashoutFeedItem;
+    error?: string;
+  }> {
+    try {
+      const activeCfg = cfg || this.getAppConfig();
+      const pool = activeCfg.cashoutFeed?.namesPool?.length
+        ? activeCfg.cashoutFeed.namesPool
+        : ['Marcus_V', 'Elena_R', 'Tyler_K', 'LuckyHunter', 'ApexPro', 'Chloe_B'];
+      const randomName = pool[Math.floor(Math.random() * pool.length)];
+      const min = activeCfg.cashoutFeed?.minAmount || 50;
+      const max = activeCfg.cashoutFeed?.maxAmount || 250;
+      const probableAmounts = activeCfg.cashoutFeed?.probableAmounts?.length
+        ? activeCfg.cashoutFeed.probableAmounts
+        : [50, 75, 100, 120, 140, 150, 180, 200, 220, 250];
+      const pickedAmt = probableAmounts[Math.floor(Math.random() * probableAmounts.length)];
+      const amount = Math.min(max, Math.max(min, pickedAmt));
+      const methods = ['Verified CashApp', 'Chime Direct', 'Crypto USDT', 'Payment via Link', 'Crypto BTC'];
+      const games = ['Orion Stars Elite', 'Fire Kirin Ultra', 'Game Vault 999', 'Panda Master Pro', 'Apex Championship Arena'];
+
+      const attempt = await this.fetchWithAuthTokenRetry('/api/admin/faked-cashouts', (headers) => ({
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          customerName: randomName,
+          amount,
+          currency: activeCfg.currency || 'USD',
+          methodName: methods[Math.floor(Math.random() * methods.length)],
+          gameName: games[Math.floor(Math.random() * games.length)],
+          isFake: true,
+          timestamp: new Date().toISOString(),
+        }),
+      }));
+
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success || !json?.item) {
+        return {
+          success: false,
+          error: extractServerApiError(
+            json,
+            `Failed to create live cashout entry (${attempt.response?.status || 401}).`,
+          ),
+        };
+      }
+
+      const created = json.item as CashoutFeedItem;
+      const currentFakes = this.getFakedCashouts();
+      this.saveFakedCashouts([created, ...currentFakes].slice(0, 40));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'cashout_feed_updated' } }));
+      }
+      return { success: true, item: created };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Unable to create live cashout entry.',
+      };
+    }
+  }
+
   public getFakedCashouts(): CashoutFeedItem[] {
     return this.load<CashoutFeedItem[]>(STORAGE_KEYS.FAKED_CASHOUTS, []);
   }

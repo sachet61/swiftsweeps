@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { UserProfile, AppConfig, PaymentMethodType } from '../../types';
 import { dataService } from '../../services/dataService';
 import { getSupabaseConfig, testSupabaseConnection } from '../../services/supabaseClient';
@@ -289,12 +289,31 @@ interface AdminConfigProps {
 
 export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
   const [settingsTab, setSettingsTab] = useState<'general' | 'official_partners'>('general');
-  const [config, setConfig] = useState<AppConfig>(dataService.getAppConfig());
+  const hasEditedRef = useRef(false);
+  const [config, setConfigState] = useState<AppConfig>(dataService.getAppConfig());
+  const setConfig: React.Dispatch<React.SetStateAction<AppConfig>> = (next) => {
+    hasEditedRef.current = true;
+    setConfigState(next);
+  };
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [isUpdatingFeed, setIsUpdatingFeed] = useState(false);
   const [successNote, setSuccessNote] = useState<string | null>(null);
-  const [feedNotice, setFeedNotice] = useState<string | null>(null);
+  const [errorNote, setErrorNote] = useState<string | null>(null);
+  const [feedNotice, setFeedNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [simulatorNotice, setSimulatorNotice] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [isResettingDatabase, setIsResettingDatabase] = useState(false);
   const [databaseNotice, setDatabaseNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onStateChanged = (e: Event) => {
+      const key = (e as CustomEvent)?.detail?.key;
+      if ((key === 'initial_compact_load' || key === 'aetherpay_config') && !hasEditedRef.current) {
+        setConfigState(dataService.getAppConfig());
+      }
+    };
+    window.addEventListener('aetherpay_state_changed', onStateChanged);
+    return () => window.removeEventListener('aetherpay_state_changed', onStateChanged);
+  }, []);
 
   // Supabase Integration & Migration state
   const [isMigratingSupabase, setIsMigratingSupabase] = useState(false);
@@ -416,8 +435,24 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
 
   const handleSaveConfig = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    dataService.updateAppConfig(config, currentUser.id, currentUser.displayName);
+    setIsSavingConfig(true);
+    setSuccessNote(null);
+    setErrorNote(null);
+
+    const cfgSave = await dataService.updateAppConfigAsync(config);
+    if (!cfgSave.success) {
+      setIsSavingConfig(false);
+      setErrorNote(cfgSave.error || 'Failed to save platform configuration.');
+      return;
+    }
+
+    hasEditedRef.current = false;
+    if (cfgSave.config) {
+      setConfigState(cfgSave.config);
+    }
+
     const refSave = await dataService.saveReferralProgramSettings(referralCfg);
+    setIsSavingConfig(false);
     if (!refSave.success && refSave.error) {
       setReferralNotice({ type: 'error', text: refSave.error });
     }
@@ -460,11 +495,12 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
 
         {settingsTab === 'general' && (
           <button
-            onClick={() => handleSaveConfig()}
-            className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-indigo-600/20"
+            disabled={isSavingConfig}
+            onClick={() => void handleSaveConfig()}
+            className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-indigo-600/20"
           >
-            <Save className="w-4 h-4" />
-            <span>Save All Changes</span>
+            {isSavingConfig ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            <span>{isSavingConfig ? 'Saving...' : 'Save All Changes'}</span>
           </button>
         )}
       </div>
@@ -515,6 +551,22 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
         <div className="p-3 rounded-lg bg-emerald-950/60 border border-emerald-800 text-emerald-300 text-xs flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
           <span>{successNote}</span>
+        </div>
+      )}
+
+      {errorNote && (
+        <div className="p-3 rounded-lg bg-rose-950/70 border border-rose-800 text-rose-300 text-xs flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span>{errorNote}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorNote(null)}
+            className="text-rose-400 hover:text-rose-200 text-xs font-bold"
+          >
+            ✕
+          </button>
         </div>
       )}
 
@@ -727,13 +779,16 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
                 placeholder="Leave empty for link-only, or upload CashApp QR from PC/mobile"
                 filePrefix="cashapp_qr"
                 helpText="Upload a CashApp QR code image from your PC or mobile phone."
-                onChange={(newUrl) => {
+                onChange={async (newUrl) => {
                   const updatedMethods = config.paymentMethods.map((pm) =>
                     pm.id === cashAppMethod.id ? { ...pm, qrCodeUrl: newUrl } : pm
                   );
                   const updatedConfig = { ...config, paymentMethods: updatedMethods };
                   setConfig(updatedConfig);
-                  dataService.updateAppConfig(updatedConfig, currentUser.id, currentUser.displayName);
+                  const res = await dataService.updateAppConfigAsync(updatedConfig);
+                  if (!res.success) {
+                    setErrorNote(res.error || 'Failed to save CashApp QR configuration.');
+                  }
                 }}
               />
 
@@ -830,13 +885,16 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
                 placeholder="Leave empty for auto-generated chime:// QR code, or upload from PC/mobile"
                 filePrefix="chime_qr"
                 helpText="Upload a Chime QR code image from your PC or take a photo/choose from gallery on mobile."
-                onChange={(newUrl) => {
+                onChange={async (newUrl) => {
                   const updatedMethods = config.paymentMethods.map((pm) =>
                     pm.id === chimeMethod.id ? { ...pm, chimeQrCodeUrl: newUrl } : pm
                   );
                   const updatedConfig = { ...config, paymentMethods: updatedMethods };
                   setConfig(updatedConfig);
-                  dataService.updateAppConfig(updatedConfig, currentUser.id, currentUser.displayName);
+                  const res = await dataService.updateAppConfigAsync(updatedConfig);
+                  if (!res.success) {
+                    setErrorNote(res.error || 'Failed to save Chime QR configuration.');
+                  }
                 }}
               />
             </div>
@@ -998,9 +1056,19 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
         </div>
 
         {feedNotice && (
-          <div className="p-3 rounded-lg bg-emerald-950/70 border border-emerald-800 text-emerald-300 text-xs flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-            <span>{feedNotice}</span>
+          <div
+            className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
+              feedNotice.type === 'success'
+                ? 'bg-emerald-950/70 border-emerald-800 text-emerald-300'
+                : 'bg-rose-950/70 border-rose-800 text-rose-300'
+            }`}
+          >
+            {feedNotice.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+            ) : (
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            )}
+            <span>{feedNotice.text}</span>
           </div>
         )}
 
@@ -1230,28 +1298,53 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => {
-                const refreshed = dataService.generateInitialFakeCashouts(config);
-                dataService.saveFakedCashouts(refreshed);
-                setFeedNotice('Re-generated 2-hour back-dated live player cashout history with current pool and ranges.');
-                setTimeout(() => setFeedNotice(null), 3500);
+              disabled={isUpdatingFeed}
+              onClick={async () => {
+                setIsUpdatingFeed(true);
+                setFeedNotice(null);
+                const res = await dataService.reseedFakedCashoutsOnServer(config);
+                setIsUpdatingFeed(false);
+                if (res.success) {
+                  setFeedNotice({
+                    type: 'success',
+                    text: 'Re-generated 2-hour back-dated live player cashout history with current pool and ranges.',
+                  });
+                  setTimeout(() => setFeedNotice(null), 3500);
+                } else {
+                  setFeedNotice({
+                    type: 'error',
+                    text: res.error || 'Failed to re-seed live player cashout history.',
+                  });
+                }
               }}
-              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 border border-slate-700 transition-colors"
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold flex items-center gap-1.5 border border-slate-700 transition-colors"
             >
-              <RotateCcw className="w-3.5 h-3.5 text-indigo-400" />
+              <RotateCcw className={`w-3.5 h-3.5 text-indigo-400 ${isUpdatingFeed ? 'animate-spin' : ''}`} />
               <span>Reset &amp; Re-seed 2hr Feed</span>
             </button>
 
             <button
               type="button"
-              onClick={() => {
-                const injected = dataService.injectNewFakeCashout();
-                if (injected) {
-                  setFeedNotice(`Injected instant real-time cashout: ${injected.customerName} cashed out $${injected.amount.toFixed(2)} on ${injected.gameName || 'Game'}!`);
+              disabled={isUpdatingFeed}
+              onClick={async () => {
+                setIsUpdatingFeed(true);
+                setFeedNotice(null);
+                const res = await dataService.createFakedCashoutOnServer(config);
+                setIsUpdatingFeed(false);
+                if (res.success && res.item) {
+                  setFeedNotice({
+                    type: 'success',
+                    text: `Injected instant real-time cashout: ${res.item.customerName} cashed out $${res.item.amount.toFixed(2)} on ${res.item.gameName || 'Game'}!`,
+                  });
                   setTimeout(() => setFeedNotice(null), 3500);
+                } else {
+                  setFeedNotice({
+                    type: 'error',
+                    text: res.error || 'Failed to inject live cashout entry.',
+                  });
                 }
               }}
-              className="px-3.5 py-2 rounded-xl bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-700 text-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+              className="px-3.5 py-2 rounded-xl bg-emerald-950/80 hover:bg-emerald-900 disabled:opacity-50 border border-emerald-700 text-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition-colors"
             >
               <Flame className="w-3.5 h-3.5 text-emerald-400" />
               <span>Simulate Real-time Cashout Now</span>
@@ -1260,11 +1353,12 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
 
           <button
             type="button"
-            onClick={() => handleSaveConfig()}
-            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-indigo-600/20"
+            disabled={isSavingConfig}
+            onClick={() => void handleSaveConfig()}
+            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-indigo-600/20"
           >
-            <Save className="w-4 h-4" />
-            <span>Save Live Cashout Configuration</span>
+            {isSavingConfig ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            <span>{isSavingConfig ? 'Saving...' : 'Save Live Cashout Configuration'}</span>
           </button>
         </div>
       </div>
@@ -1570,11 +1664,12 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
       {/* Bottom Save Action */}
       <div className="flex justify-end pt-2">
         <button
-          onClick={() => handleSaveConfig()}
-          className="px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/20"
+          disabled={isSavingConfig}
+          onClick={() => void handleSaveConfig()}
+          className="px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold text-xs flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/20"
         >
-          <Save className="w-4 h-4" />
-          <span>Save Configuration</span>
+          {isSavingConfig ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          <span>{isSavingConfig ? 'Saving Configuration...' : 'Save Configuration'}</span>
         </button>
       </div>
         </>

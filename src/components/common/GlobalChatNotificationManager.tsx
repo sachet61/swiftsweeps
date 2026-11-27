@@ -2,8 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { UserProfile, ChatMessage } from '../../types';
 import { dataService } from '../../services/dataService';
 import { notificationSoundService } from '../../services/notificationSoundService';
-import { isSupabaseConfigured } from '../../services/supabaseClient';
-import { realtimeChatHub } from '../../services/chatRealtime';
+import { chatStreamClient } from '../../services/chatStreamClient';
 import { mapDbMessageRowToChatMessage } from '../../services/chatOrderUtils';
 import { isMessageInternalNote } from '../../utils/chatPresentationUtils';
 import {
@@ -121,7 +120,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
     }
   };
 
-  // Global Realtime Listeners (Shared Ref-Counted Hub + local event dispatch)
+  // Global SSE + local event notification listeners
   useEffect(() => {
     if (!currentUser) return;
 
@@ -135,91 +134,24 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
 
     window.addEventListener('aetherpay_state_changed', handleLocalState);
 
-    if (!isSupabaseConfigured()) {
-      return () => {
-        window.removeEventListener('aetherpay_state_changed', handleLocalState);
-        if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-      };
-    }
-
-    const unsubs: Array<() => void> = [];
-
-    if (isCustomer && currentUser.role === 'customer') {
-      const canonicalConvId = `conv_${currentUser.id}`;
-      unsubs.push(
-        realtimeChatHub.subscribeChatRoom(
-          `chat_${canonicalConvId}`,
-          {
-            postgresFilter: {
-              event: 'INSERT',
-              schema: 'public',
-              table: 'messages',
-              filter: `conversation_id=eq.${canonicalConvId}`,
-            },
-          },
-          {
-            onBroadcast: (payload) => {
-              if (payload && payload.id) {
-                if (isMessageInternalNote(payload)) return;
-                dataService.appendIncomingMessage(payload);
-                handleIncomingMessage(payload);
-              }
-            },
-            onPostgresChange: (payload) => {
-              const raw = payload?.new;
-              if (raw && raw.id && raw.sender_id !== currentUser.id) {
-                const formattedMsg = mapDbMessageRowToChatMessage(raw, canonicalConvId);
-                if (isMessageInternalNote(formattedMsg)) return;
-                dataService.appendIncomingMessage(formattedMsg);
-                handleIncomingMessage(formattedMsg);
-              }
-            },
-          }
-        )
-      );
-    } else {
-      unsubs.push(
-        realtimeChatHub.subscribeChatRoom(
-          'room_admin_support',
-          {},
-          {
-            onBroadcast: (payload) => {
-              if (payload && payload.id) {
-                dataService.appendIncomingMessage(payload);
-                handleIncomingMessage(payload);
-              }
-            },
-          }
-        )
-      );
-
-      unsubs.push(
-        realtimeChatHub.subscribeChatRoom(
-          'db_admin_live_messages',
-          {
-            postgresFilter: {
-              event: 'INSERT',
-              schema: 'public',
-              table: 'messages',
-            },
-          },
-          {
-            onPostgresChange: (payload) => {
-              const raw = payload?.new;
-              if (raw && raw.id && raw.sender_role === 'customer' && raw.sender_id !== currentUser.id) {
-                const formattedMsg = mapDbMessageRowToChatMessage(raw);
-                dataService.appendIncomingMessage(formattedMsg);
-                handleIncomingMessage(formattedMsg);
-              }
-            },
-          }
-        )
-      );
-    }
+    const unsubStream = chatStreamClient.subscribe({
+      onChatMessage: (event) => {
+        if (!event?.message?.id) return;
+        const incoming = mapDbMessageRowToChatMessage(event.message, event.conversationId);
+        if (isCustomer && currentUser.role === 'customer' && isMessageInternalNote(incoming)) {
+          return;
+        }
+        if (incoming.senderId === currentUser.id) {
+          return;
+        }
+        dataService.appendIncomingMessage(incoming);
+        handleIncomingMessage(incoming);
+      },
+    });
 
     return () => {
       window.removeEventListener('aetherpay_state_changed', handleLocalState);
-      for (const unsub of unsubs) unsub();
+      unsubStream();
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
       setActiveToast(null);
     };

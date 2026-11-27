@@ -36,10 +36,22 @@ function isSelfHostedAuthPath(url: string | undefined): boolean {
     pathname.startsWith('/api/push/') ||
     pathname === '/api/notifications' ||
     pathname.startsWith('/api/notifications/') ||
+    pathname === '/api/chat' ||
+    pathname.startsWith('/api/chat/') ||
     pathname === '/api/admin/users' ||
     pathname.startsWith('/api/admin/users/') ||
     pathname === '/api/admin/official-partners' ||
     pathname.startsWith('/api/admin/official-partners/') ||
+    pathname === '/api/app-config' ||
+    pathname.startsWith('/api/app-config/') ||
+    pathname === '/api/admin/app-config' ||
+    pathname.startsWith('/api/admin/app-config/') ||
+    pathname === '/api/faked-cashouts' ||
+    pathname.startsWith('/api/faked-cashouts/') ||
+    pathname === '/api/admin/faked-cashouts' ||
+    pathname.startsWith('/api/admin/faked-cashouts/') ||
+    pathname === '/api/telegram' ||
+    pathname.startsWith('/api/telegram/') ||
     pathname === '/api/healthz' ||
     pathname === '/api/readyz'
   );
@@ -77,6 +89,7 @@ function attachSelfHostedProxyMiddleware(
     const headers: http.OutgoingHttpHeaders = { ...req.headers };
     headers.host = targetUrl.host;
 
+    const isSseStream = targetUrl.pathname === '/api/chat/stream';
     const proxyReq = client.request(
       {
         protocol: targetUrl.protocol,
@@ -85,7 +98,7 @@ function attachSelfHostedProxyMiddleware(
         path: `${targetUrl.pathname}${targetUrl.search}`,
         method: req.method,
         headers,
-        timeout: 15000,
+        timeout: isSseStream ? 0 : 15000,
       },
       (proxyRes) => {
         res.statusCode = proxyRes.statusCode || 502;

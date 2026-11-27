@@ -26,7 +26,7 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   const migrationsDir = path.resolve(process.cwd(), 'db', 'migrations');
   const files = await loadAndValidateMigrationFiles(migrationsDir);
 
-  assert.equal(files.length, 9);
+  assert.equal(files.length, 11);
   assert.equal(files[0]!.version, '0001');
   assert.equal(files[1]!.version, '0002');
   assert.equal(files[2]!.version, '0003');
@@ -36,6 +36,8 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   assert.equal(files[6]!.version, '0007');
   assert.equal(files[7]!.version, '0008');
   assert.equal(files[8]!.version, '0009');
+  assert.equal(files[9]!.version, '0010');
+  assert.equal(files[10]!.version, '0011');
 
   const combinedSql = files.map((file) => file.sql).join('\n');
   // Preserve financial precision and primary key / FK semantics
@@ -56,6 +58,10 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.official_partner_icons/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.notifications/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.push_subscriptions/);
+  assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.conversations/);
+  assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.messages/);
+  assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.chat_attachments/);
+  assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.faked_cashouts/);
   assert.match(combinedSql, /ADD CONSTRAINT topups_amount_check CHECK \(amount >= 0\)/);
 });
 

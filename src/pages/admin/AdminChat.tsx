@@ -5,7 +5,7 @@ import {
   ChatMessage,
 } from '../../types';
 import { dataService } from '../../services/dataService';
-import { realtimeChatHub } from '../../services/chatRealtime';
+import { chatStreamClient } from '../../services/chatStreamClient';
 import { mapDbMessageRowToChatMessage, sortAndDeduplicateMessages } from '../../services/chatOrderUtils';
 import {
   CHAT_QUICK_EMOJIS,
@@ -552,52 +552,14 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     }
   };
 
-  // Active conversation Realtime subscription on aligned canonical topic via ref-counted hub
+  // Global staff SSE subscription + tab visibility catch-up
   useEffect(() => {
-    if (!selectedConvId) return;
-    const canonicalConvId = dataService.resolveCanonicalConvId(selectedConvId);
-    const unsubRoom = realtimeChatHub.subscribeChatRoom(
-      `chat_${canonicalConvId}`,
-      {
-        postgresFilter: {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-          filter: `conversation_id=eq.${canonicalConvId}`,
-        },
-      },
-      {
-        onStatus: (status) => setRealtimeStatus(status),
-        onBroadcast: (payload) => {
-          if (payload && payload.id) {
-            dataService.appendIncomingMessage(payload);
-            setMessages((prev) => sortAndDeduplicateMessages([...prev, payload], true));
-          }
-        },
-        onPostgresChange: (payload) => {
-          const row: any = payload?.new;
-          if (row && row.id) {
-            const incoming = mapDbMessageRowToChatMessage(row, canonicalConvId);
-            dataService.appendIncomingMessage(incoming);
-            setMessages((prev) => sortAndDeduplicateMessages([...prev, incoming], true));
-          }
-        },
-      }
-    );
-
-    return () => {
-      unsubRoom();
-    };
-  }, [selectedConvId]);
-
-  // Global staff Realtime subscriptions + tab visibility catch-up via ref-counted hub
-  useEffect(() => {
-    const handleGlobalIncoming = (incoming: ChatMessage) => {
+    const applyIncomingMessage = (incoming: ChatMessage, syncRequests = true) => {
       if (!incoming || !incoming.id) return;
       dataService.appendIncomingMessage(incoming);
       syncFromMemory();
 
-      if (incoming.transactionData?.requestId) {
+      if (syncRequests && incoming.transactionData?.requestId) {
         if (incoming.transactionData.transactionType === 'withdrawal') {
           dataService.ensureWithdrawalRequest(incoming.transactionData.requestId).catch(() => {});
         } else if (incoming.transactionData.transactionType === 'topup') {
@@ -616,37 +578,37 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       }
     };
 
-    const unsubStaff = realtimeChatHub.subscribeChatRoom(
-      'room_admin_support',
-      {},
-      {
-        onBroadcast: (payload) => {
-          if (payload && payload.id) {
-            handleGlobalIncoming(payload);
-          }
-        },
-      }
-    );
-
-    const unsubDbAll = realtimeChatHub.subscribeChatRoom(
-      'db_admin_live_messages',
-      {
-        postgresFilter: {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-        },
+    const unsubStream = chatStreamClient.subscribe({
+      onStatus: (status) => setRealtimeStatus(status),
+      onChatMessage: (event) => {
+        if (event?.message?.id) {
+          const incoming = mapDbMessageRowToChatMessage(event.message, event.conversationId);
+          applyIncomingMessage(incoming, true);
+        }
       },
-      {
-        onPostgresChange: (payload) => {
-          const row: any = payload?.new;
-          if (row && row.id) {
-            const incoming = mapDbMessageRowToChatMessage(row);
-            handleGlobalIncoming(incoming);
-          }
-        },
-      }
-    );
+      onMessageUpdated: (event) => {
+        if (event?.message?.id) {
+          const updated = mapDbMessageRowToChatMessage(event.message, event.conversationId);
+          applyIncomingMessage(updated, false);
+        }
+      },
+      onConversationStatus: (event) => {
+        if (event?.conversationId && event?.status) {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === event.conversationId ||
+              dataService.resolveCanonicalConvId(c.id) ===
+                dataService.resolveCanonicalConvId(event.conversationId)
+                ? { ...c, status: event.status as any }
+                : c
+            )
+          );
+          void dataService.fetchConversationsFromServer({ limit: 25, replaceAll: false, silentEvent: true }).then(() => {
+            syncFromMemory();
+          });
+        }
+      },
+    });
 
     let lastAdminCatchUpAt = 0;
     const performAdminCatchUp = () => {
@@ -681,8 +643,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     window.addEventListener('focus', handleFocus);
 
     return () => {
-      unsubStaff();
-      unsubDbAll();
+      unsubStream();
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', handleFocus);
     };

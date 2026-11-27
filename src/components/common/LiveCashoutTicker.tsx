@@ -73,6 +73,7 @@ export const LiveCashoutTicker: React.FC = () => {
           >
             {displayItems.map((item, idx) => {
               const name = item.customerName || item.playerHandle || 'Verified Player';
+              const methodLabel = item.methodName || item.method;
               return (
                 <div
                   key={`${item.id}-${idx}`}
@@ -92,9 +93,9 @@ export const LiveCashoutTicker: React.FC = () => {
                     +${Number(item.amount).toFixed(2)}
                     <ArrowUpRight className="w-3 h-3 ml-0.5 text-emerald-400 opacity-70" />
                   </span>
-                  {item.method && (
+                  {methodLabel && (
                     <span className="text-[10px] text-slate-400 bg-slate-800 px-1.5 py-0.2 rounded font-mono">
-                      {item.method}
+                      {methodLabel}
                     </span>
                   )}
                 </div>

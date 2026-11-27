@@ -1,16 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { dataService } from '../../services/dataService';
 import {
   FileText,
   CheckCircle2,
+  AlertCircle,
   Save,
   Eye,
   Edit3,
+  Loader2,
 } from 'lucide-react';
 import { htmlToPlainEditorText, plainEditorTextToHtml } from '../../utils/uiCopyUtils';
 
 export const PolicyAndPartnerCmsCard: React.FC = () => {
   const initial = dataService.getCmsPolicies();
+  const hasEditedRef = useRef(false);
 
   const [activeTab, setActiveTab] = useState<'cashout' | 'privacy' | 'terms'>('cashout');
   const [cashoutPolicyText, setCashoutPolicyText] = useState(() =>
@@ -23,16 +26,39 @@ export const PolicyAndPartnerCmsCard: React.FC = () => {
     htmlToPlainEditorText(initial.termsPolicyHtml)
   );
   const [previewMode, setPreviewMode] = useState(false);
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const handleSaveAll = () => {
-    const res = dataService.updateCmsPolicies({
+  useEffect(() => {
+    const onStateChanged = (e: Event) => {
+      const key = (e as CustomEvent)?.detail?.key;
+      if ((key === 'initial_compact_load' || key === 'aetherpay_config') && !hasEditedRef.current) {
+        const hydrated = dataService.getCmsPolicies();
+        setCashoutPolicyText(htmlToPlainEditorText(hydrated.cashoutPolicyHtml));
+        setPrivacyPolicyText(htmlToPlainEditorText(hydrated.privacyPolicyHtml));
+        setTermsPolicyText(htmlToPlainEditorText(hydrated.termsPolicyHtml));
+      }
+    };
+    window.addEventListener('aetherpay_state_changed', onStateChanged);
+    return () => window.removeEventListener('aetherpay_state_changed', onStateChanged);
+  }, []);
+
+  const handleSaveAll = async () => {
+    setIsSaving(true);
+    setFeedback(null);
+    const res = await dataService.updateCmsPoliciesAsync({
       cashoutPolicyHtml: plainEditorTextToHtml(cashoutPolicyText),
       privacyPolicyHtml: plainEditorTextToHtml(privacyPolicyText),
       termsPolicyHtml: plainEditorTextToHtml(termsPolicyText),
     });
-    setFeedback(res.message);
-    setTimeout(() => setFeedback(null), 4000);
+    setIsSaving(false);
+    if (res.success) {
+      hasEditedRef.current = false;
+      setFeedback({ type: 'success', text: res.message });
+      setTimeout(() => setFeedback(null), 4000);
+    } else {
+      setFeedback({ type: 'error', text: res.message || 'Failed to save policy settings.' });
+    }
   };
 
   return (
@@ -53,18 +79,29 @@ export const PolicyAndPartnerCmsCard: React.FC = () => {
 
         <button
           type="button"
-          onClick={handleSaveAll}
-          className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-all shadow-md shadow-amber-500/20 self-start sm:self-auto"
+          disabled={isSaving}
+          onClick={() => void handleSaveAll()}
+          className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-all shadow-md shadow-amber-500/20 self-start sm:self-auto"
         >
-          <Save className="w-4 h-4" />
-          <span>Save Policies CMS</span>
+          {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          <span>{isSaving ? 'Saving Policies...' : 'Save Policies CMS'}</span>
         </button>
       </div>
 
       {feedback && (
-        <div className="p-3 rounded-xl bg-emerald-950/80 border border-emerald-700 text-emerald-200 text-xs flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{feedback}</span>
+        <div
+          className={`p-3 rounded-xl text-xs flex items-center gap-2 border ${
+            feedback.type === 'success'
+              ? 'bg-emerald-950/80 border-emerald-700 text-emerald-200'
+              : 'bg-rose-950/80 border-rose-700 text-rose-200'
+          }`}
+        >
+          {feedback.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+          )}
+          <span>{feedback.text}</span>
         </div>
       )}
 
@@ -127,7 +164,10 @@ export const PolicyAndPartnerCmsCard: React.FC = () => {
             <textarea
               rows={8}
               value={cashoutPolicyText}
-              onChange={(e) => setCashoutPolicyText(e.target.value)}
+              onChange={(e) => {
+                hasEditedRef.current = true;
+                setCashoutPolicyText(e.target.value);
+              }}
               className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-xs text-slate-200 leading-relaxed focus:outline-none focus:border-amber-500"
               placeholder="Enter cashout policy details..."
             />
@@ -152,7 +192,10 @@ export const PolicyAndPartnerCmsCard: React.FC = () => {
             <textarea
               rows={8}
               value={privacyPolicyText}
-              onChange={(e) => setPrivacyPolicyText(e.target.value)}
+              onChange={(e) => {
+                hasEditedRef.current = true;
+                setPrivacyPolicyText(e.target.value);
+              }}
               className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-xs text-slate-200 leading-relaxed focus:outline-none focus:border-amber-500"
               placeholder="Enter privacy policy details..."
             />
@@ -177,7 +220,10 @@ export const PolicyAndPartnerCmsCard: React.FC = () => {
             <textarea
               rows={8}
               value={termsPolicyText}
-              onChange={(e) => setTermsPolicyText(e.target.value)}
+              onChange={(e) => {
+                hasEditedRef.current = true;
+                setTermsPolicyText(e.target.value);
+              }}
               className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-xs text-slate-200 leading-relaxed focus:outline-none focus:border-amber-500"
               placeholder="Enter terms and rules details..."
             />

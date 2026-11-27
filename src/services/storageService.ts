@@ -127,9 +127,8 @@ class StorageService {
   }
 
   /**
-   * Uploads an image attachment for Customer or Admin chat.
-   * Auto-compresses to WebP with automated server-side fallback and returns a
-   * proxy-backed URL (/api/storage/file) that works consistently across all browsers and environments.
+   * Uploads an image attachment for Customer or Admin chat via self-hosted /api/chat/attachments.
+   * Auto-compresses to WebP (bounded <= 1.8 MB raw binary) and returns /api/chat/attachments/:id.
    */
   public async uploadChatAttachment(file: File, conversationId: string): Promise<StorageUploadResult> {
     try {
@@ -138,14 +137,21 @@ class StorageService {
         return { success: false, error: validation.error };
       }
 
-      // Pre-compress to WebP (max 1200px)
+      if (file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)) {
+        return {
+          success: false,
+          error: 'SVG files are not allowed in support chat. Please upload a PNG, JPG, WebP, or GIF image.',
+        };
+      }
+
+      // Pre-compress to WebP (max 1200px), keeping raw bytes within 2 MB server attachment cap
       let compressed = await compressImageToWebP(file, {
         maxWidth: 1200,
         maxHeight: 1200,
         quality: 0.85,
       });
 
-      if (compressed.file.size > MAX_SERVER_FALLBACK_BYTES) {
+      if (compressed.file.size > 1_400_000) {
         compressed = await compressImageToWebP(compressed.file, {
           maxWidth: 960,
           maxHeight: 960,
@@ -153,53 +159,73 @@ class StorageService {
         });
       }
 
-      const cleanFolder = conversationId.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      const fileName = `${cleanFolder}/${uniqueSuffix}.webp`;
-
-      await this.ensureBucket('chat_attachments', true);
-
-      // Attempt 1: Direct Client Upload
-      const { data, error } = await supabase.storage
-        .from('chat_attachments')
-        .upload(fileName, compressed.file, {
-          cacheControl: '3600',
-          upsert: true,
-          contentType: 'image/webp',
+      if (compressed.file.size > 1_850_000) {
+        compressed = await compressImageToWebP(compressed.file, {
+          maxWidth: 800,
+          maxHeight: 800,
+          quality: 0.62,
         });
+      }
 
-      if (!error && data?.path) {
+      if (compressed.file.size > 2_000_000) {
         return {
-          success: true,
-          url: buildProxyStorageUrl('chat_attachments', data.path),
-          name: file.name,
-          originalSize: compressed.originalSize,
-          compressedSize: compressed.compressedSize,
+          success: false,
+          error: 'Compressed attachment exceeds 2 MB. Please choose a smaller image.',
         };
       }
 
-      // Attempt 2: Server-side Fallback with Service Role auto-bucket creation
-      console.warn('[StorageService] Client chat upload failed, activating server fallback:', error?.message);
-      const fallbackResult = await this.uploadViaServerFallback(
-        compressed.file,
-        'chat_attachments',
-        fileName,
-        'image/webp'
-      );
-
-      if (fallbackResult.success && fallbackResult.url) {
+      const rawMime = (compressed.file.type || file.type || 'image/webp').toLowerCase();
+      const normalizedMime = rawMime === 'image/jpg' ? 'image/jpeg' : rawMime;
+      if (
+        normalizedMime !== 'image/webp' &&
+        normalizedMime !== 'image/png' &&
+        normalizedMime !== 'image/jpeg' &&
+        normalizedMime !== 'image/gif'
+      ) {
         return {
-          success: true,
-          url: toProxyStorageUrl(fallbackResult.url) || fallbackResult.url,
-          name: file.name,
-          originalSize: compressed.originalSize,
-          compressedSize: compressed.compressedSize,
+          success: false,
+          error: 'Only PNG, JPEG, WebP, and GIF images are allowed in support chat.',
+        };
+      }
+
+      const fileBase64 = await fileToBase64(compressed.file);
+      const res = await fetch('/api/chat/attachments', {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          conversationId,
+          fileName: file.name,
+          contentType: normalizedMime,
+          fileBase64,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      const errorMessage =
+        typeof data?.error === 'string'
+          ? data.error
+          : typeof data?.error?.message === 'string'
+            ? data.error.message
+            : undefined;
+
+      if (!res.ok || !data?.success || !data?.url) {
+        return {
+          success: false,
+          error: errorMessage || `Failed to upload chat attachment (${res.status}).`,
         };
       }
 
       return {
-        success: false,
-        error: fallbackResult.error || error?.message || 'Failed to upload chat attachment',
+        success: true,
+        url: data.url,
+        name: file.name,
+        originalSize: compressed.originalSize,
+        compressedSize: compressed.compressedSize,
       };
     } catch (err: any) {
       console.warn('[StorageService] Chat attachment error:', err);
