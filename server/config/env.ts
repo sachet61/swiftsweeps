@@ -10,6 +10,7 @@ export interface ServerConfig {
   port: number;
   appOrigin: string;
   trustedOrigins?: string[];
+  allowSameHostOrigin?: boolean;
   /**
    * Express `trust proxy` configuration for reverse-proxied deployments behind Nginx.
    * Defaults to `'loopback'` (trusts only 127.0.0.1 / ::1) so arbitrary client

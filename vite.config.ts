@@ -52,8 +52,16 @@ function isSelfHostedAuthPath(url: string | undefined): boolean {
     pathname.startsWith('/api/admin/faked-cashouts/') ||
     pathname === '/api/telegram' ||
     pathname.startsWith('/api/telegram/') ||
+    pathname === '/api/storage' ||
+    pathname.startsWith('/api/storage/') ||
     pathname === '/api/healthz' ||
     pathname === '/api/readyz'
+  );
+}
+
+function hasExternalBackendConfigured(): boolean {
+  return Boolean(
+    (process.env.SELF_HOSTED_API_TARGET || process.env.DATABASE_URL || '').trim(),
   );
 }
 
@@ -61,7 +69,7 @@ function attachSelfHostedProxyMiddleware(
   middlewares: { use: (fn: (req: http.IncomingMessage, res: http.ServerResponse, next: (err?: unknown) => void) => void) => void },
 ): void {
   middlewares.use((req, res, next) => {
-    if (!isSelfHostedAuthPath(req.url)) {
+    if (!hasExternalBackendConfigured() || !isSelfHostedAuthPath(req.url)) {
       return next();
     }
 
@@ -146,12 +154,74 @@ function selfHostedApiProxyPlugin(): Plugin {
   };
 }
 
+function devMockApiPlugin(): Plugin {
+  const isApiPath = (url: string | undefined): boolean =>
+    Boolean(url && (url === '/api' || url.startsWith('/api/') || url.startsWith('/api?')));
+
+  return {
+    name: 'in-memory-dev-api',
+    configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        if (hasExternalBackendConfigured() || !isApiPath(req.url)) {
+          return next();
+        }
+        try {
+          const mod = await server.ssrLoadModule('/server/devMockApp.ts');
+          const app = await mod.getDevMockApp();
+          app(req, res, next);
+        } catch (err: any) {
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(
+              JSON.stringify({
+                error: err?.message || 'In-memory dev API handler error',
+              }),
+            );
+          } else {
+            next(err);
+          }
+        }
+      });
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        if (hasExternalBackendConfigured() || !isApiPath(req.url)) {
+          return next();
+        }
+        try {
+          const distEntry = path.resolve(process.cwd(), 'dist-server/devMockApp.js');
+          const mod = await import(distEntry);
+          const app = await mod.getDevMockApp();
+          app(req, res, next);
+        } catch (err: any) {
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(
+              JSON.stringify({
+                error: err?.message || 'In-memory preview API handler error',
+              }),
+            );
+          } else {
+            next(err);
+          }
+        }
+      });
+    },
+  };
+}
+
 function vercelApiDevPlugin(): Plugin {
   return {
     name: 'vercel-api-dev',
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
-        if (!req.url || (req.url !== '/api' && !req.url.startsWith('/api/') && !req.url.startsWith('/api?'))) {
+        if (
+          !hasExternalBackendConfigured() ||
+          !req.url ||
+          (req.url !== '/api' && !req.url.startsWith('/api/') && !req.url.startsWith('/api?'))
+        ) {
           return next();
         }
         try {
@@ -229,7 +299,13 @@ export default defineConfig(({mode}) => {
   }
 
   return {
-    plugins: [react(), tailwindcss(), selfHostedApiProxyPlugin(), vercelApiDevPlugin()],
+    plugins: [
+      react(),
+      tailwindcss(),
+      devMockApiPlugin(),
+      selfHostedApiProxyPlugin(),
+      vercelApiDevPlugin(),
+    ],
     resolve: {
       alias: {
         '@': path.resolve(process.cwd(), '.'),

@@ -161,7 +161,7 @@ export class SelfHostedAuthService {
   private async requestJson(
     url: string,
     init: RequestInit = {}
-  ): Promise<{ parsed?: ParsedAuthHttpPayload; networkError?: boolean }> {
+  ): Promise<{ parsed?: ParsedAuthHttpPayload; headers?: Headers; networkError?: boolean }> {
     const controller = new AbortController();
     const externalSignal = init.signal;
     let timedOut = false;
@@ -205,7 +205,7 @@ export class SelfHostedAuthService {
         rawText,
         retryAfterHeader: response.headers.get('retry-after'),
       });
-      return { parsed };
+      return { parsed, headers: response.headers };
     } catch (err: any) {
       if (err?.name === 'AbortError' && externalSignal?.aborted && !timedOut) {
         throw err;
@@ -422,12 +422,22 @@ export class SelfHostedAuthService {
       };
     }
 
+    const verificationHeader = signUpResult.headers?.get(
+      'x-email-verification-required',
+    );
+    const dataRecord = (parsed.data ?? null) as Record<string, any> | null;
+    const requiresEmailVerification =
+      verificationHeader === 'false'
+        ? false
+        : !Boolean(dataRecord?.user?.emailVerified);
+
     return {
       success: true,
-      requiresEmailVerification: true,
+      requiresEmailVerification,
       email: cleanEmail,
-      message:
-        'Account created! Enter the 6-digit verification code sent to your email to verify your address.',
+      message: requiresEmailVerification
+        ? 'Account created! Enter the 6-digit verification code sent to your email to verify your address.'
+        : 'Account created! Signing you in...',
     };
   }
 

@@ -53,6 +53,33 @@ export function createSecurityMiddleware(
 ): RequestHandler {
   const allowedOrigins = buildAllowedOrigins(config);
 
+  const isAllowedOrigin = (
+    origin: string | undefined,
+    req: Request,
+  ): boolean => {
+    if (!origin) {
+      return false;
+    }
+    if (allowedOrigins.has(origin)) {
+      return true;
+    }
+    if (!config.allowSameHostOrigin) {
+      return false;
+    }
+    const rawHost =
+      req.header('x-forwarded-host')?.split(',')[0]?.trim() ||
+      req.header('host')?.trim() ||
+      '';
+    if (!rawHost) {
+      return false;
+    }
+    try {
+      return new URL(origin).host.toLowerCase() === rawHost.toLowerCase();
+    } catch {
+      return false;
+    }
+  };
+
   return (req: Request, res: Response, next: NextFunction): void => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
@@ -72,7 +99,7 @@ export function createSecurityMiddleware(
     const hasCookieHeader = Boolean(req.header('cookie')?.trim());
 
     if (normalizedOrigin) {
-      if (allowedOrigins.has(normalizedOrigin)) {
+      if (isAllowedOrigin(normalizedOrigin, req)) {
         res.setHeader('Vary', 'Origin');
         res.setHeader('Access-Control-Allow-Origin', normalizedOrigin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -126,7 +153,7 @@ export function createSecurityMiddleware(
         return;
       }
 
-      if (refererOrigin && !allowedOrigins.has(refererOrigin)) {
+      if (refererOrigin && !isAllowedOrigin(refererOrigin, req)) {
         logger?.warn('origin_forbidden', {
           requestId: req.requestId,
           method: req.method,
@@ -145,12 +172,8 @@ export function createSecurityMiddleware(
       }
 
       if (hasCookieHeader) {
-        const originMatches = Boolean(
-          normalizedOrigin && allowedOrigins.has(normalizedOrigin),
-        );
-        const refererMatches = Boolean(
-          refererOrigin && allowedOrigins.has(refererOrigin),
-        );
+        const originMatches = isAllowedOrigin(normalizedOrigin, req);
+        const refererMatches = isAllowedOrigin(refererOrigin ?? undefined, req);
         const fetchSiteMatches = secFetchSite === 'same-origin';
 
         if (!originMatches && !refererMatches && !fetchSiteMatches) {

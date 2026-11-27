@@ -1,6 +1,6 @@
 import type { BetterAuthOptions } from 'better-auth';
 import { toNodeHandler } from 'better-auth/node';
-import express, { type Express } from 'express';
+import express, { type Express, type RequestHandler } from 'express';
 import { createAuthInstance } from './auth/authInstance.js';
 import {
   createEmailDeliveryAdapter,
@@ -54,6 +54,8 @@ import {
 } from './notifications/webPushSender.js';
 import { OfficialPartnerRepo } from './officialPartners/officialPartnerRepo.js';
 import { ReferralRepo } from './referrals/referralRepo.js';
+import { createStorageRouter } from './routes/storage.js';
+import { StorageRepo } from './storage/storageRepo.js';
 import { WalletRepo } from './wallet/walletRepo.js';
 import { WheelRepo } from './wheel/wheelRepo.js';
 import { WithdrawalRepo } from './withdrawals/withdrawalRepo.js';
@@ -73,6 +75,15 @@ export interface ApiAppDependencies {
   telegramFetchOverride?: TelegramFetchFn;
   wheelNowFnOverride?: () => number;
   wheelRandomUnitOverride?: () => number;
+  extraRoutes?: (
+    app: Express,
+    deps: {
+      userRepo: UserDirectoryRepo;
+      pool: Pick<DatabasePool, 'query'>;
+      requireAuth: RequestHandler;
+      optionalAuth: RequestHandler;
+    },
+  ) => void;
 }
 
 export function createApiApp({
@@ -86,6 +97,7 @@ export function createApiApp({
   telegramFetchOverride,
   wheelNowFnOverride,
   wheelRandomUnitOverride,
+  extraRoutes,
 }: ApiAppDependencies): Express {
   const app = express();
 
@@ -106,6 +118,7 @@ export function createApiApp({
   const notificationRepo = new NotificationRepo(pool);
   const officialPartnerRepo = new OfficialPartnerRepo(pool);
   const referralRepo = new ReferralRepo(pool);
+  const storageRepo = new StorageRepo(pool);
   const walletRepo = new WalletRepo(pool);
   const wheelRepo = new WheelRepo(pool);
   const withdrawalRepo = new WithdrawalRepo(pool);
@@ -136,12 +149,17 @@ export function createApiApp({
     '/api/auth/*splat',
     createRequestSizeGuard(config.requestBodyLimitBytes),
     (req, res, next) => {
+      res.setHeader(
+        'X-Email-Verification-Required',
+        String(config.authRequireEmailVerification),
+      );
       void authNodeHandler(req, res).catch(next);
     },
   );
 
-  // Allow bounded 3 MB base64 JSON payloads strictly for authenticated chat image attachments.
+  // Allow bounded 3 MB / 4 MB base64 JSON payloads strictly for authenticated attachment/media uploads.
   app.post('/api/chat/attachments', express.json({ limit: '3mb' }));
+  app.post('/api/storage/upload', express.json({ limit: '4mb' }));
   app.use(express.json({ limit: config.requestBodyLimit }));
 
   app.use(
@@ -260,6 +278,23 @@ export function createApiApp({
       telegramFetch: telegramFetchOverride,
     }),
   );
+  app.use(
+    '/api',
+    createStorageRouter({
+      config,
+      storageRepo,
+      userRepo,
+      requireAuth,
+      optionalAuth,
+    }),
+  );
+
+  extraRoutes?.(app, {
+    userRepo,
+    pool,
+    requireAuth,
+    optionalAuth,
+  });
 
   app.use(notFoundHandler);
   app.use(createErrorHandler(logger));

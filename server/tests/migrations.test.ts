@@ -26,7 +26,7 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   const migrationsDir = path.resolve(process.cwd(), 'db', 'migrations');
   const files = await loadAndValidateMigrationFiles(migrationsDir);
 
-  assert.equal(files.length, 11);
+  assert.equal(files.length, 12);
   assert.equal(files[0]!.version, '0001');
   assert.equal(files[1]!.version, '0002');
   assert.equal(files[2]!.version, '0003');
@@ -38,6 +38,7 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   assert.equal(files[8]!.version, '0009');
   assert.equal(files[9]!.version, '0010');
   assert.equal(files[10]!.version, '0011');
+  assert.equal(files[11]!.version, '0012');
 
   const combinedSql = files.map((file) => file.sql).join('\n');
   // Preserve financial precision and primary key / FK semantics
@@ -62,6 +63,7 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.messages/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.chat_attachments/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.faked_cashouts/);
+  assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.storage_objects/);
   assert.match(combinedSql, /ADD CONSTRAINT topups_amount_check CHECK \(amount >= 0\)/);
 });
 

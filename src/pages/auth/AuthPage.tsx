@@ -268,6 +268,20 @@ export const AuthPage: React.FC<AuthPageProps> = ({
       });
 
       if (res.success) {
+        if (res.requiresEmailVerification === false) {
+          const loginRes = await selfHostedAuthService.loginWithEmail(
+            cleanEmail,
+            signupPassword,
+          );
+          if (loginRes.success && loginRes.user) {
+            await finalizeAuthenticatedUser(loginRes.user);
+            return;
+          }
+          setEmail(cleanEmail);
+          setAuthMode('signin');
+          setInfoMessage('Account created! Please sign in to continue.');
+          return;
+        }
         setOtpEmail(cleanEmail);
         setAuthMode('verify-otp');
         setInfoMessage(

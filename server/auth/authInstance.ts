@@ -84,11 +84,35 @@ export function createAuthInstance({
   const trustedProxies =
     config.trustProxy === 'loopback' ? ['127.0.0.1', '::1'] : undefined;
 
-  const trustedOrigins = Array.from(
+  const staticTrustedOrigins = Array.from(
     new Set(
       [config.appOrigin, ...(config.trustedOrigins ?? [])].filter(Boolean),
     ),
   );
+
+  const trustedOrigins: BetterAuthOptions['trustedOrigins'] = config.allowSameHostOrigin
+    ? (request) => {
+        const origins = [...staticTrustedOrigins];
+        const host =
+          request?.headers.get('x-forwarded-host')?.split(',')[0]?.trim() ||
+          request?.headers.get('host')?.trim();
+        const originHeader = request?.headers.get('origin')?.trim();
+        if (originHeader) {
+          try {
+            const parsedOrigin = new URL(originHeader);
+            if (!host || parsedOrigin.host.toLowerCase() === host.toLowerCase()) {
+              origins.push(parsedOrigin.origin);
+            }
+          } catch {
+            // Ignore invalid origin header
+          }
+        }
+        if (host) {
+          origins.push(`http://${host}`, `https://${host}`);
+        }
+        return Array.from(new Set(origins));
+      }
+    : staticTrustedOrigins;
 
   const authOptions: BetterAuthOptions = {
     appName: 'SwiftSweeps',

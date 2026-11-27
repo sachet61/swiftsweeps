@@ -1,4 +1,5 @@
-import { supabase } from './supabaseClient';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { selfHostedAuthService } from './selfHostedAuthService';
 import { compressImageToWebP } from '../utils/imageCompressor';
 import { validateImageFile } from '../utils/uploadUtils';
 import { validatePartnerIconFile } from '../utils/officialPartnersUtils';
@@ -38,6 +39,7 @@ class StorageService {
    * Verifies/creates storage bucket via client if permissions allow
    */
   private async ensureBucket(bucketName: string, isPublic: boolean = true): Promise<boolean> {
+    if (!supabase) return false;
     if (this.checkedBuckets.has(bucketName)) return true;
     try {
       const { data: buckets } = await supabase.storage.listBuckets();
@@ -81,6 +83,7 @@ class StorageService {
       const base64Data = await fileToBase64(uploadCandidate);
       const res = await fetch('/api/storage/upload', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
         },
@@ -95,9 +98,15 @@ class StorageService {
 
       if (!res.ok) {
         const errorJson = await res.json().catch(() => ({}));
+        const errorMessage =
+          typeof errorJson?.error === 'string'
+            ? errorJson.error
+            : typeof errorJson?.error?.message === 'string'
+              ? errorJson.error.message
+              : undefined;
         return {
           success: false,
-          error: errorJson.error || `Server storage upload failed with status ${res.status}`,
+          error: errorMessage || `Server storage upload failed with status ${res.status}`,
         };
       }
 
@@ -263,29 +272,40 @@ class StorageService {
       const cleanUserId = customerId.replace(/[^a-zA-Z0-9_-]/g, '_');
       const fileName = `receipts/${cleanUserId}_${Date.now()}.webp`;
 
-      await this.ensureBucket('chat_attachments', true);
+      let data: { path?: string } | null = null;
+      let error: { message?: string } | null = null;
 
-      // Attempt 1: Direct Client Upload
-      const { data, error } = await supabase.storage
-        .from('chat_attachments')
-        .upload(fileName, compressed.file, {
-          cacheControl: '3600',
-          upsert: true,
-          contentType: 'image/webp',
-        });
+      const useLegacySupabaseStorage =
+        Boolean(supabase && isSupabaseConfigured()) &&
+        !selfHostedAuthService.getCurrentUser()?.id;
 
-      if (!error && data?.path) {
-        return {
-          success: true,
-          url: buildProxyStorageUrl('chat_attachments', data.path),
-          name: file.name,
-          originalSize: compressed.originalSize,
-          compressedSize: compressed.compressedSize,
-        };
+      if (useLegacySupabaseStorage && supabase) {
+        await this.ensureBucket('chat_attachments', true);
+
+        // Attempt 1: Direct Client Upload
+        const res = await supabase.storage
+          .from('chat_attachments')
+          .upload(fileName, compressed.file, {
+            cacheControl: '3600',
+            upsert: true,
+            contentType: 'image/webp',
+          });
+        data = res.data;
+        error = res.error;
+
+        if (!error && data?.path) {
+          return {
+            success: true,
+            url: buildProxyStorageUrl('chat_attachments', data.path),
+            name: file.name,
+            originalSize: compressed.originalSize,
+            compressedSize: compressed.compressedSize,
+          };
+        }
+
+        // Attempt 2: Server-side Fallback
+        console.warn('[StorageService] Client receipt upload failed, activating server fallback:', error?.message);
       }
-
-      // Attempt 2: Server-side Fallback
-      console.warn('[StorageService] Client receipt upload failed, activating server fallback:', error?.message);
       const fallbackResult = await this.uploadViaServerFallback(
         compressed.file,
         'chat_attachments',
@@ -391,6 +411,13 @@ class StorageService {
         return { success: false, error: validation.error };
       }
 
+      if (file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)) {
+        return {
+          success: false,
+          error: 'SVG files are not allowed. Please upload a PNG, JPG, or WebP image.',
+        };
+      }
+
       let compressed = await compressImageToWebP(file, {
         maxWidth: 1200,
         maxHeight: 1200,
@@ -406,31 +433,49 @@ class StorageService {
       }
 
       const cleanPrefix = prefix.replace(/[^a-zA-Z0-9_-]/g, '_') || 'asset';
-      const ext = compressed.file.type === 'image/svg+xml' ? 'svg' : 'webp';
       const contentType = compressed.file.type || 'image/webp';
+      const ext =
+        contentType === 'image/png'
+          ? 'png'
+          : contentType === 'image/jpeg' || contentType === 'image/jpg'
+            ? 'jpg'
+            : contentType === 'image/gif'
+              ? 'gif'
+              : 'webp';
       const fileName = `qr/${cleanPrefix}_${Date.now()}.${ext}`;
 
-      await this.ensureBucket('chat_attachments', true);
+      let data: { path?: string } | null = null;
+      let error: { message?: string } | null = null;
 
-      const { data, error } = await supabase.storage
-        .from('chat_attachments')
-        .upload(fileName, compressed.file, {
-          cacheControl: '604800',
-          upsert: true,
-          contentType,
-        });
+      const useLegacySupabaseStorage =
+        Boolean(supabase && isSupabaseConfigured()) &&
+        !selfHostedAuthService.getCurrentUser()?.id;
 
-      if (!error && data?.path) {
-        const { data: urlData } = supabase.storage
+      if (useLegacySupabaseStorage && supabase) {
+        await this.ensureBucket('chat_attachments', true);
+
+        const res = await supabase.storage
           .from('chat_attachments')
-          .getPublicUrl(data.path);
-        return {
-          success: true,
-          url: urlData.publicUrl || buildProxyStorageUrl('chat_attachments', data.path),
-          name: file.name,
-          originalSize: compressed.originalSize,
-          compressedSize: compressed.compressedSize,
-        };
+          .upload(fileName, compressed.file, {
+            cacheControl: '604800',
+            upsert: true,
+            contentType,
+          });
+        data = res.data;
+        error = res.error;
+
+        if (!error && data?.path) {
+          const { data: urlData } = supabase.storage
+            .from('chat_attachments')
+            .getPublicUrl(data.path);
+          return {
+            success: true,
+            url: urlData.publicUrl || buildProxyStorageUrl('chat_attachments', data.path),
+            name: file.name,
+            originalSize: compressed.originalSize,
+            compressedSize: compressed.compressedSize,
+          };
+        }
       }
 
       const fallbackResult = await this.uploadViaServerFallback(
