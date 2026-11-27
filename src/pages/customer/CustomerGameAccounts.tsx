@@ -155,56 +155,62 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const handleConfirmRequestGameId = () => {
-    if (!showRequestConfirmModal) return;
+  const handleConfirmRequestGameId = async () => {
+    if (!showRequestConfirmModal || isSubmitting) return;
+    const requestedGame = showRequestConfirmModal;
     setIsSubmitting(true);
 
-    setTimeout(() => {
-      const res = dataService.requestGameCredentials({
+    try {
+      const res = await dataService.requestGameCredentials({
         customerId: currentUser.id,
         customerName: currentUser.displayName,
-        gameCatalogId: showRequestConfirmModal.id,
+        gameCatalogId: requestedGame.id,
       });
 
-      setIsSubmitting(false);
       setShowRequestConfirmModal(null);
 
       if (res.success) {
         setNotificationMsg({
-          text: `Request for "${showRequestConfirmModal.title}" dispatched to Customer Support! A specialist will assign your login ID & password shortly.`,
+          text: `Request for "${requestedGame.title}" dispatched to Customer Support! A specialist will assign your login ID & password shortly.`,
           type: 'success',
         });
         setTimeout(() => setNotificationMsg(null), 5000);
       } else {
-        setNotificationMsg({ text: res.message, type: 'info' });
-        setTimeout(() => setNotificationMsg(null), 4000);
+        setNotificationMsg({ text: res.message, type: 'error' });
+        setTimeout(() => setNotificationMsg(null), 5000);
       }
-    }, 400);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleConfirmResetPassword = () => {
-    if (!showResetConfirmModal) return;
+  const handleConfirmResetPassword = async () => {
+    if (!showResetConfirmModal || isSubmitting) return;
+    const targetAccount = showResetConfirmModal;
     setIsSubmitting(true);
 
-    setTimeout(() => {
-      const res = dataService.requestGamePasswordReset({
-        accountId: showResetConfirmModal.id,
+    try {
+      const res = await dataService.requestGamePasswordReset({
+        accountId: targetAccount.id,
         customerId: currentUser.id,
         customerName: currentUser.displayName,
       });
 
-      setIsSubmitting(false);
-      const gameTitle = showResetConfirmModal.gameName;
       setShowResetConfirmModal(null);
 
       if (res.success) {
         setNotificationMsg({
-          text: `Password update request for "${gameTitle}" forwarded to Customer Support. An operator is updating your credentials.`,
+          text: `Password update request for "${targetAccount.gameName}" forwarded to Customer Support. An operator is updating your credentials.`,
           type: 'success',
         });
         setTimeout(() => setNotificationMsg(null), 5000);
+      } else {
+        setNotificationMsg({ text: res.message, type: 'error' });
+        setTimeout(() => setNotificationMsg(null), 5000);
       }
-    }, 400);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (

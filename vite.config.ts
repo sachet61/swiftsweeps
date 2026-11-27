@@ -15,6 +15,14 @@ function isSelfHostedAuthPath(url: string | undefined): boolean {
     pathname.startsWith('/api/profile/') ||
     pathname === '/api/game-catalog' ||
     pathname.startsWith('/api/game-catalog/') ||
+    pathname === '/api/game-accounts' ||
+    pathname.startsWith('/api/game-accounts/') ||
+    pathname === '/api/referrals' ||
+    pathname.startsWith('/api/referrals/') ||
+    pathname === '/api/admin/referral-config' ||
+    pathname === '/api/wheel' ||
+    pathname.startsWith('/api/wheel/') ||
+    pathname === '/api/admin/wheel-config' ||
     pathname === '/api/wallet' ||
     pathname.startsWith('/api/wallet/') ||
     pathname === '/api/wallets' ||

@@ -341,7 +341,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
     setShowAddGameModal(true);
   };
 
-  const handleSaveGameAccount = (e: React.FormEvent) => {
+  const handleSaveGameAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedUser) return;
     if (!assignedUsername.trim()) {
@@ -351,7 +351,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
 
     if (editingGameAcc) {
       // Update existing single account
-      const res = dataService.assignOrUpdateGameCredentials({
+      const res = await dataService.assignOrUpdateGameCredentials({
         accountId: editingGameAcc.id,
         username: assignedUsername.trim(),
         password: assignedPassword.trim(),
@@ -362,12 +362,13 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
       if (res.success) {
         setModalFeedback({ type: 'success', text: `Credentials updated for ${editingGameAcc.gameName}. Single ID enforced.` });
         setEditingGameAcc(null);
+        await loadUsersLive(false);
       } else {
         setModalFeedback({ type: 'error', text: res.message });
       }
     } else {
       // Provision or update account
-      const res = dataService.provisionGameAccount({
+      const res = await dataService.provisionGameAccount({
         customerId: selectedUser.id,
         customerName: selectedUser.displayName,
         gameCatalogId: selectedGameCatalogId,
@@ -380,19 +381,21 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
       if (res.success) {
         setModalFeedback({ type: 'success', text: res.message });
         setShowAddGameModal(false);
+        await loadUsersLive(false);
       } else {
         setModalFeedback({ type: 'error', text: res.message });
       }
     }
   };
 
-  const handleDeleteGameAccount = (acc: GameAccount) => {
+  const handleDeleteGameAccount = async (acc: GameAccount) => {
     if (!confirm(`Are you sure you want to remove the game account ID "${acc.username}" for "${acc.gameName}"?`)) {
       return;
     }
-    const res = dataService.deleteGameAccount(acc.id, currentUser.id, currentUser.displayName);
+    const res = await dataService.deleteGameAccount(acc.id, currentUser.id, currentUser.displayName);
     if (res.success) {
       setModalFeedback({ type: 'success', text: `Deleted game ID for ${acc.gameName}.` });
+      await loadUsersLive(false);
     } else {
       setModalFeedback({ type: 'error', text: res.message });
     }

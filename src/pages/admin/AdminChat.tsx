@@ -1070,7 +1070,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     setAssignedPassword(`${prefix}#${num}`);
   };
 
-  const handleConfirmProvisionGameId = (e: React.FormEvent) => {
+  const handleConfirmProvisionGameId = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeConv || !selectedGameId || !assignedUsername.trim() || !assignedPassword.trim()) {
       setGameIdFormError('Please fill out all required fields.');
@@ -1080,7 +1080,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     const game = gameCatalog.find((g) => g.id === selectedGameId);
     if (!game) return;
 
-    const res = dataService.provisionGameAccount({
+    const res = await dataService.provisionGameAccount({
       customerId: activeConv.customerId,
       customerName: activeConv.customerName,
       gameCatalogId: game.id,

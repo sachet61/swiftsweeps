@@ -316,7 +316,7 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
     setAssignedPassword(`${res}!`);
   };
 
-  const handleSaveGameCredentials = (e: React.FormEvent) => {
+  const handleSaveGameCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!actionGameAccount) return;
     if (!assignedUsername.trim() || !assignedPassword.trim()) {
@@ -324,7 +324,7 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
       return;
     }
 
-    const res = dataService.assignOrUpdateGameCredentials({
+    const res = await dataService.assignOrUpdateGameCredentials({
       accountId: actionGameAccount.id,
       username: assignedUsername.trim(),
       password: assignedPassword.trim(),

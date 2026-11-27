@@ -26,11 +26,14 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   const migrationsDir = path.resolve(process.cwd(), 'db', 'migrations');
   const files = await loadAndValidateMigrationFiles(migrationsDir);
 
-  assert.equal(files.length, 4);
+  assert.equal(files.length, 7);
   assert.equal(files[0]!.version, '0001');
   assert.equal(files[1]!.version, '0002');
   assert.equal(files[2]!.version, '0003');
   assert.equal(files[3]!.version, '0004');
+  assert.equal(files[4]!.version, '0005');
+  assert.equal(files[5]!.version, '0006');
+  assert.equal(files[6]!.version, '0007');
 
   const combinedSql = files.map((file) => file.sql).join('\n');
   // Preserve financial precision and primary key / FK semantics
@@ -44,6 +47,9 @@ test('repository db/migrations files pass ordering, precision, and separation ch
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.topups/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.withdrawals/);
   assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.game_catalog/);
+  assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.game_accounts/);
+  assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.referral_awards/);
+  assert.match(combinedSql, /CREATE TABLE IF NOT EXISTS public\.wheel_spins/);
   assert.match(combinedSql, /ADD CONSTRAINT topups_amount_check CHECK \(amount >= 0\)/);
 });
 

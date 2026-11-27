@@ -550,19 +550,23 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     }
   };
 
-  const handleConfirmGameRequest = (e: React.FormEvent) => {
+  const handleConfirmGameRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedGameId || !conversation) return;
     const game = gameCatalog.find((g) => g.id === selectedGameId);
     if (!game) return;
 
-    dataService.requestGameCredentials({
+    const res = await dataService.requestGameCredentials({
       customerId: currentUser.id,
       customerName: currentUser.displayName,
       gameCatalogId: game.id,
     });
 
     setShowGameRequestModal(false);
+    if (!res.success) {
+      setUploadError(res.message);
+      setTimeout(() => setUploadError(null), 5000);
+    }
   };
 
   const visibleMessages = useMemo(

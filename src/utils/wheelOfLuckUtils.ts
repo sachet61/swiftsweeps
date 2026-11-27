@@ -678,9 +678,12 @@ export function formatWheelHttpError(params: {
   rawText?: string | null;
 }): string {
   const statusCode = Number(params.status || 0);
+  const rawError = params.json && typeof params.json === 'object' ? params.json.error : null;
   const backendError =
-    params.json && typeof params.json === 'object' && typeof params.json.error === 'string'
-      ? params.json.error.trim()
+    typeof rawError === 'string'
+      ? rawError.trim()
+      : rawError && typeof rawError === 'object' && typeof rawError.message === 'string'
+      ? rawError.message.trim()
       : '';
 
   if (backendError) {

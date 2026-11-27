@@ -130,6 +130,47 @@ import {
   mergeCatalogFromServerRows,
   parseGameCatalogApiError,
 } from './gameCatalogUtils';
+import {
+  buildGameAccountsQueryUrl,
+  deduplicateGameAccountsList,
+  mergeGameAccounts,
+  parseGameAccountApiError,
+} from './gameAccountUtils';
+
+function extractServerApiError(json: any, fallback: string): string {
+  if (json && typeof json === 'object') {
+    if (typeof json.error === 'string' && json.error.trim()) {
+      return json.error.trim();
+    }
+    if (
+      json.error &&
+      typeof json.error === 'object' &&
+      typeof json.error.message === 'string' &&
+      json.error.message.trim()
+    ) {
+      return json.error.message.trim();
+    }
+    if (typeof json.message === 'string' && json.message.trim()) {
+      return json.message.trim();
+    }
+  }
+  return fallback;
+}
+
+function extractServerApiCode(json: any): string | undefined {
+  if (json && typeof json === 'object') {
+    if (typeof json.code === 'string' && json.code) return json.code;
+    if (
+      json.error &&
+      typeof json.error === 'object' &&
+      typeof json.error.code === 'string' &&
+      json.error.code
+    ) {
+      return json.error.code;
+    }
+  }
+  return undefined;
+}
 
 export type RealtimeSyncStatus = 'connected' | 'syncing' | 'sleeping' | 'disconnected' | 'reconnecting';
 
@@ -465,9 +506,6 @@ class DataService {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, (p) => {
         this.queueRealtimeMutation('conversations', p.eventType, p.new, p.old);
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'game_accounts' }, (p) => {
-        this.queueRealtimeMutation('game_accounts', p.eventType, p.new, p.old);
-      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, (p) => {
         this.queueRealtimeMutation('users', p.eventType, p.new, p.old);
       })
@@ -479,12 +517,6 @@ class DataService {
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'audit_logs' }, (p) => {
         this.queueRealtimeMutation('audit_logs', p.eventType, p.new, p.old);
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'referral_awards' }, (p) => {
-        this.queueRealtimeMutation('referral_awards', p.eventType, p.new, p.old);
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'wheel_spins' }, (p) => {
-        this.queueRealtimeMutation('wheel_spins', p.eventType, p.new, p.old);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'official_partners' }, (p) => {
         this.queueRealtimeMutation('official_partners', p.eventType, p.new, p.old);
@@ -531,13 +563,10 @@ class DataService {
 
     const messageRows = filterRealtimeRowsForUser('messages', rowsByTable['messages'], activeUser);
     const conversationRows = filterRealtimeRowsForUser('conversations', rowsByTable['conversations'], activeUser);
-    const gameAccountRows = filterRealtimeRowsForUser('game_accounts', rowsByTable['game_accounts'], activeUser);
     const userRows = filterRealtimeRowsForUser('users', rowsByTable['users'], activeUser);
     const cashoutRows = filterRealtimeRowsForUser('faked_cashouts', rowsByTable['faked_cashouts'], activeUser);
     const appConfigRows = filterRealtimeRowsForUser('app_config', rowsByTable['app_config'], activeUser);
     const auditLogRows = filterRealtimeRowsForUser('audit_logs', rowsByTable['audit_logs'], activeUser);
-    const referralAwardRows = filterRealtimeRowsForUser('referral_awards', rowsByTable['referral_awards'], activeUser);
-    const wheelSpinRows = filterRealtimeRowsForUser('wheel_spins', rowsByTable['wheel_spins'], activeUser);
 
     if (messageRows.length) {
       this.applyMessageRows(messageRows, true);
@@ -546,10 +575,6 @@ class DataService {
     if (conversationRows.length) {
       this.applyConversationRows(conversationRows, false);
       tablesModified.add('conversations');
-    }
-    if (gameAccountRows.length) {
-      this.applyGameAccountRows(gameAccountRows, false);
-      tablesModified.add('game_accounts');
     }
     if (userRows.length) {
       this.applyUserRows(userRows);
@@ -577,12 +602,6 @@ class DataService {
         this.cache[STORAGE_KEYS.AUDIT_LOGS] = mergeAuditLogs(existing, normalizedLogs, { maxItems: 100 });
         tablesModified.add('audit_logs');
       }
-    }
-    if (referralAwardRows.length) {
-      tablesModified.add('referral_awards');
-    }
-    if (wheelSpinRows.length) {
-      tablesModified.add('wheel_spins');
     }
     const hasPartnerEvent = queued.some((item) => item.table === 'official_partners');
     if (hasPartnerEvent && activeUser) {
@@ -614,6 +633,7 @@ class DataService {
             this.fetchWalletsFromServer({ limit: 50, silentEvent: true }),
             this.fetchDepositsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
             this.fetchWithdrawalsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
+            this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
           );
         } else {
           selfHostedTasks.push(
@@ -633,6 +653,12 @@ class DataService {
             this.fetchWithdrawalsFromServer({
               customerId: user.id,
               limit: 30,
+              replaceAll: true,
+              silentEvent: true,
+            }),
+            this.fetchGameAccountsFromServer({
+              customerId: user.id,
+              limit: 50,
               replaceAll: true,
               silentEvent: true,
             }),
@@ -665,7 +691,7 @@ class DataService {
 
       if (isAdmin) {
         // Staff/Admin session: bounded administrative queue queries (Users fetched on-demand on tab open)
-        const [appConfigRes, cashoutsRes, _catRes, depositsApiRes, withdrawalsApiRes, walletsApiRes, convsRes, gameAccsRes] =
+        const [appConfigRes, cashoutsRes, _catRes, depositsApiRes, withdrawalsApiRes, walletsApiRes, convsRes, _gameAccsApiRes] =
           await Promise.all([
             appConfigPromise,
             cashoutsPromise,
@@ -674,7 +700,7 @@ class DataService {
             this.fetchWithdrawalsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
             this.fetchWalletsFromServer({ limit: 50, silentEvent: true }),
             supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
-            supabase.from('game_accounts').select('*').order('created_at', { ascending: false }).limit(100),
+            this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
           ]);
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
@@ -686,7 +712,6 @@ class DataService {
             this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, {});
           }
         }
-        if (gameAccsRes?.data) this.applyGameAccountRows(gameAccsRes.data, false);
         if (!depositsApiRes.success && !withdrawalsApiRes.success && !walletsApiRes.success) {
           this.lastHydrationError = depositsApiRes.error || withdrawalsApiRes.error || walletsApiRes.error || 'Unable to load staff operations data.';
         }
@@ -732,7 +757,12 @@ class DataService {
             replaceAll: true,
             silentEvent: true,
           }),
-          supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(30),
+          this.fetchGameAccountsFromServer({
+            customerId: currentUserId,
+            limit: 50,
+            replaceAll: true,
+            silentEvent: true,
+          }),
           supabase
             .from('conversations')
             .select('*')
@@ -762,28 +792,6 @@ class DataService {
         this.reconcileCustomerWallet(currentUserId);
         if (!walletApiRes.success && !txApiRes.success && !depositsApiRes.success && !withdrawalsApiRes.success) {
           this.lastHydrationError = walletApiRes.error || depositsApiRes.error || withdrawalsApiRes.error || 'Unable to load wallet and transaction history.';
-        }
-
-        // Game Accounts hydration with authenticated server fallback
-        if (!gameAccsRes.error && Array.isArray(gameAccsRes.data) && gameAccsRes.data.length > 0) {
-          this.applyGameAccountRows(gameAccsRes.data, true);
-        } else {
-          try {
-            const url = `/api/game-accounts?customerId=${encodeURIComponent(currentUserId)}`;
-            const res = await fetch(url, { cache: 'no-store' });
-            if (res.ok) {
-              const json = await res.json();
-              if (Array.isArray(json.accounts)) {
-                this.applyGameAccountRows(json.accounts, true);
-              }
-            } else if (!gameAccsRes.error && Array.isArray(gameAccsRes.data)) {
-              this.applyGameAccountRows(gameAccsRes.data, true);
-            }
-          } catch {
-            if (!gameAccsRes.error && Array.isArray(gameAccsRes.data)) {
-              this.applyGameAccountRows(gameAccsRes.data, true);
-            }
-          }
         }
 
         if (!convRes?.error && Array.isArray(convRes?.data)) {
@@ -850,6 +858,7 @@ class DataService {
           selfHostedTasks.push(
             this.fetchDepositsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
             this.fetchWithdrawalsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
+            this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
           );
         } else {
           selfHostedTasks.push(
@@ -865,6 +874,12 @@ class DataService {
               customerId: user.id,
               limit: 15,
               replaceAll: false,
+              silentEvent: true,
+            }),
+            this.fetchGameAccountsFromServer({
+              customerId: user.id,
+              limit: 50,
+              replaceAll: true,
               silentEvent: true,
             }),
           );
@@ -911,7 +926,7 @@ class DataService {
           this.fetchDepositsFromServer({ customerId: currentUserId, limit: 15, replaceAll: false, silentEvent: true }),
           this.fetchWithdrawalsFromServer({ customerId: currentUserId, limit: 15, replaceAll: false, silentEvent: true }),
           this.fetchWalletTransactionsFromServer({ customerId: currentUserId, limit: 25, replaceAll: false, silentEvent: true }),
-          supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(30),
+          this.fetchGameAccountsFromServer({ customerId: currentUserId, limit: 50, replaceAll: true, silentEvent: true }),
           this.fetchGameCatalogFromServer({ silentEvent: true }),
           msgQuery,
         ]);
@@ -929,8 +944,7 @@ class DataService {
         if (txApiRes.success && txApiRes.transactions.length > 0) {
           changed = true;
         }
-        if (!gameAccsRes.error && gameAccsRes.data && gameAccsRes.data.length > 0) {
-          this.applyGameAccountRows(gameAccsRes.data, false);
+        if (gameAccsRes.success && gameAccsRes.accounts.length > 0) {
           changed = true;
         }
         if (walletApiRes.success) {
@@ -961,9 +975,10 @@ class DataService {
               .order('created_at', { ascending: false })
               .limit(50);
 
-        const [depositsApiRes, withdrawalsApiRes, convsRes, catRes, msgsRes] = await Promise.all([
+        const [depositsApiRes, withdrawalsApiRes, gameAccsApiRes, convsRes, catRes, msgsRes] = await Promise.all([
           this.fetchDepositsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
           this.fetchWithdrawalsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
+          this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
           supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
           this.fetchGameCatalogFromServer({ silentEvent: true }),
           adminMsgQuery,
@@ -976,6 +991,9 @@ class DataService {
           changed = true;
         }
         if (withdrawalsApiRes.success && withdrawalsApiRes.withdrawals.length > 0) {
+          changed = true;
+        }
+        if (gameAccsApiRes.success && gameAccsApiRes.accounts.length > 0) {
           changed = true;
         }
         if (!convsRes.error && Array.isArray(convsRes.data)) {
@@ -1521,49 +1539,27 @@ class DataService {
         silentEvent: true,
       });
 
-      if (!supabase || !isSupabaseConfigured()) {
-        const [walletApiRes, txApiRes, depApiRes, wdrApiRes] = await Promise.all([
-          walletPromise,
-          txPromise,
-          depositsPromise,
-          withdrawalsPromise,
-        ]);
-        if (
-          walletApiRes.success ||
-          (txApiRes.success && txApiRes.transactions.length > 0) ||
-          (depApiRes.success && depApiRes.deposits.length > 0) ||
-          (wdrApiRes.success && wdrApiRes.withdrawals.length > 0)
-        ) {
-          window.dispatchEvent(
-            new CustomEvent('aetherpay_state_changed', {
-              detail: { key: 'customer_requests_synced', customerId: cleanCustomerId },
-            })
-          );
-        }
-        return;
-      }
+      const gameAccountsPromise = this.fetchGameAccountsFromServer({
+        customerId: cleanCustomerId,
+        limit: 50,
+        replaceAll: false,
+        silentEvent: true,
+      });
 
-      const [walletApiRes, txApiRes, depApiRes, wdrApiRes, accountsRes] = await Promise.all([
+      const [walletApiRes, txApiRes, depApiRes, wdrApiRes, gameAccsApiRes] = await Promise.all([
         walletPromise,
         txPromise,
         depositsPromise,
         withdrawalsPromise,
-        supabase
-          .from('game_accounts')
-          .select('*')
-          .eq('customer_id', cleanCustomerId)
-          .limit(25),
+        gameAccountsPromise,
       ]);
 
-      let changed =
+      const changed =
         walletApiRes.success ||
         (txApiRes.success && txApiRes.transactions.length > 0) ||
         (depApiRes.success && depApiRes.deposits.length > 0) ||
-        (wdrApiRes.success && wdrApiRes.withdrawals.length > 0);
-      if (!accountsRes.error && Array.isArray(accountsRes.data) && accountsRes.data.length > 0) {
-        this.applyGameAccountRows(accountsRes.data, false);
-        changed = true;
-      }
+        (wdrApiRes.success && wdrApiRes.withdrawals.length > 0) ||
+        (gameAccsApiRes.success && gameAccsApiRes.accounts.length > 0);
 
       if (changed) {
         window.dispatchEvent(
@@ -1691,68 +1687,106 @@ class DataService {
     this.saveToLocalStorage(STORAGE_KEYS.WALLETS, walletMap);
   }
 
-  private applyGameAccountRows(rows: any[], replaceAll: boolean = false): void {
-    const current = replaceAll ? [] : (this.cache[STORAGE_KEYS.GAME_ACCOUNTS] as GameAccount[]) || [];
-    const accMap = new Map<string, GameAccount>();
-    for (const a of current) {
-      accMap.set(a.id, a);
-    }
-    for (const ga of rows) {
-      if (ga.deleted_at) {
-        accMap.delete(ga.id);
-        continue;
-      }
-      accMap.set(ga.id, {
-        id: ga.id,
-        gameCatalogId: ga.game_id,
-        customerId: ga.customer_id,
-        gameName: ga.game_title,
-        platformName: 'Sweepstakes',
-        username: ga.username,
-        password: ga.password,
-        balance: Number(ga.balance ?? 0),
-        freePlayBalance: Number(ga.free_play_balance ?? ga.freePlayBalance ?? 0),
-        status: ga.status || 'active',
-        notes: ga.pin || '',
-        createdAt: ga.created_at || new Date().toISOString(),
-        updatedAt: ga.updated_at || ga.created_at || new Date().toISOString(),
-      });
-    }
-    const updated = this.deduplicateGameAccounts(Array.from(accMap.values()));
+  private applyGameAccountRows(
+    rows: any[],
+    replaceAll: boolean = false,
+    removeIds: string[] = [],
+    silentEvent: boolean = false,
+  ): void {
+    const current = (this.cache[STORAGE_KEYS.GAME_ACCOUNTS] as GameAccount[]) || [];
+    const updated = mergeGameAccounts(current, rows, replaceAll, removeIds);
     this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = updated;
     this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, updated);
-    window.dispatchEvent(
-      new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.GAME_ACCOUNTS } })
-    );
+    if (!silentEvent && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.GAME_ACCOUNTS } })
+      );
+    }
   }
 
-  // Fetch Game Accounts directly from Supabase / server proxy on demand
-  public async fetchGameAccountsFromDb(customerId?: string): Promise<GameAccount[]> {
+  public async fetchGameAccountsFromServer(options?: {
+    customerId?: string;
+    customerIds?: string[];
+    status?: string;
+    gameCatalogId?: string;
+    q?: string;
+    sortBy?: string;
+    sortOrder?: string;
+    limit?: number;
+    offset?: number;
+    replaceAll?: boolean;
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    accounts: GameAccount[];
+    total: number;
+    hasMore: boolean;
+    error?: string;
+  }> {
     try {
-      if (supabase && isSupabaseConfigured()) {
-        let query = supabase.from('game_accounts').select('*').order('created_at', { ascending: false });
-        if (customerId) {
-          query = query.eq('customer_id', customerId);
-        }
-        const { data, error } = await query.limit(100);
-        if (!error && data && Array.isArray(data) && data.length > 0) {
-          this.applyGameAccountRows(data, false);
-          return this.getGameAccounts(customerId);
-        }
+      const url = buildGameAccountsQueryUrl(options);
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          accounts: [],
+          total: 0,
+          hasMore: false,
+          error: parseGameAccountApiError(
+            res.status,
+            rawText,
+            'Failed to load game accounts from server.',
+          ),
+        };
       }
 
-      // Resilient fallback to Server Route (Service Role)
-      const url = customerId ? `/api/game-accounts?customerId=${encodeURIComponent(customerId)}` : '/api/game-accounts';
-      const res = await fetch(url);
-      if (res.ok) {
-        const json = await res.json();
-        if (json.accounts && Array.isArray(json.accounts)) {
-          this.applyGameAccountRows(json.accounts, false);
-          return this.getGameAccounts(customerId);
-        }
-      }
-    } catch (err) {
-      console.warn('[dataService] fetchGameAccountsFromDb notice:', err);
+      const json = rawText ? JSON.parse(rawText) : {};
+      const rows = Array.isArray(json.accounts) ? json.accounts : [];
+      this.applyGameAccountRows(
+        rows,
+        Boolean(options?.replaceAll),
+        [],
+        Boolean(options?.silentEvent),
+      );
+      const scoped = options?.customerId
+        ? this.getGameAccounts(options.customerId)
+        : this.getGameAccounts();
+
+      return {
+        success: true,
+        accounts: scoped,
+        total: Number(json.total ?? rows.length),
+        hasMore: Boolean(json.hasMore),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        accounts: [],
+        total: 0,
+        hasMore: false,
+        error: err?.message || 'Unable to load game accounts from server.',
+      };
+    }
+  }
+
+  // Fetch Game Accounts from authoritative self-hosted API on demand
+  public async fetchGameAccountsFromDb(customerId?: string): Promise<GameAccount[]> {
+    const res = await this.fetchGameAccountsFromServer({
+      customerId,
+      limit: 100,
+      replaceAll: !customerId,
+      silentEvent: false,
+    });
+    if (res.success) {
+      return res.accounts;
     }
     return this.getGameAccounts(customerId);
   }
@@ -1769,56 +1803,44 @@ class DataService {
     reviewerName: string;
   }): Promise<{ success: boolean; message: string; account?: GameAccount }> {
     try {
-      // 1. Call authoritative server endpoint
       const res = await fetch('/api/game-accounts/provision', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
-      });
-      const data = await res.json();
-
-      if (res.ok && data.account) {
-        this.applyGameAccountRows([data.account], false);
-      } else {
-        // Direct local/client fallback
-        const accountId = `ga_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        const localAcc: GameAccount = {
-          id: accountId,
+        body: JSON.stringify({
           customerId: params.customerId,
           gameCatalogId: params.gameId,
-          gameName: params.gameTitle,
-          platformName: 'Sweepstakes',
+          gameTitle: params.gameTitle,
           username: params.username.trim(),
           password: params.password.trim(),
-          notes: params.pin || undefined,
-          status: 'active',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
+          notes: params.pin?.trim() || undefined,
+        }),
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseGameAccountApiError(
+            res.status,
+            rawText,
+            'Failed to provision game account.',
+          ),
         };
-        const allAccs = this.getGameAccounts();
-        allAccs.push(localAcc);
-        const deduplicated = this.deduplicateGameAccounts(allAccs);
-        this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = deduplicated;
-        this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, deduplicated);
-        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.GAME_ACCOUNTS } }));
-
-        if (supabase && isSupabaseConfigured()) {
-          supabase.from('game_accounts').upsert({
-            id: localAcc.id,
-            customer_id: localAcc.customerId,
-            game_id: localAcc.gameCatalogId,
-            game_title: localAcc.gameName,
-            username: localAcc.username,
-            password: localAcc.password,
-            pin: localAcc.notes || null,
-            status: 'active',
-            created_at: localAcc.createdAt,
-            updated_at: localAcc.updatedAt,
-          }).then(() => {}, () => {});
-        }
       }
 
-      // 2. Dispatch Push Alert to Customer Phone / PWA
+      const data = rawText ? JSON.parse(rawText) : {};
+      if (!data.account) {
+        return {
+          success: false,
+          message: 'Server returned an invalid game account response.',
+        };
+      }
+
+      this.applyGameAccountRows([data.account], false);
+      const savedAccount = this.getGameAccounts(params.customerId).find(
+        (a) => a.id === data.account.id || a.gameCatalogId === params.gameId,
+      );
+
       if (typeof window !== 'undefined') {
         webPushClient.dispatchPushAlert({
           recipientId: params.customerId,
@@ -1831,7 +1853,6 @@ class DataService {
         }).catch(() => {});
       }
 
-      // 3. Post to player's support conversation
       try {
         const player = this.getUserById(params.customerId);
         if (player) {
@@ -1849,9 +1870,13 @@ class DataService {
             isInternalNote: false,
           });
         }
-      } catch (err) {}
+      } catch {}
 
-      return { success: true, message: `Successfully provisioned credentials for ${params.gameTitle}!` };
+      return {
+        success: true,
+        message: data.message || `Successfully provisioned credentials for ${params.gameTitle}!`,
+        account: savedAccount,
+      };
     } catch (err: any) {
       return { success: false, message: err?.message || 'Failed to provision game account' };
     }
@@ -2107,20 +2132,8 @@ class DataService {
         // Deposits migrated to self-hosted /api/deposits endpoints
       } else if (key === STORAGE_KEYS.WITHDRAWALS) {
         // Withdrawals migrated to self-hosted /api/withdrawals endpoints
-      } else if (key === STORAGE_KEYS.GAME_ACCOUNTS && Array.isArray(value) && value.length > 0) {
-        const accountsToUpsert = (value as GameAccount[]).slice(0, 15).map((a) => ({
-          id: a.id,
-          customer_id: a.customerId,
-          game_id: a.gameCatalogId,
-          game_title: a.gameName,
-          username: a.username,
-          password: a.password || '',
-          pin: a.notes || null,
-          status: a.status,
-          created_at: a.createdAt,
-          updated_at: a.updatedAt,
-        }));
-        await supabase.from('game_accounts').upsert(accountsToUpsert);
+      } else if (key === STORAGE_KEYS.GAME_ACCOUNTS) {
+        // Game accounts migrated to self-hosted /api/game-accounts endpoints
       } else if (key === STORAGE_KEYS.CONVERSATIONS && Array.isArray(value) && value.length > 0) {
         const currentUserId = this.getCurrentUser()?.id;
         const c = currentUserId
@@ -2914,31 +2927,23 @@ class DataService {
 
             if (!dbErr && dbUsers && dbUsers.length > 0) {
               const userIds = dbUsers.map((u: any) => u.id);
-              const [walletsApiRes, gameAccsQuery] = await Promise.all([
+              const [walletsApiRes, gameAccountsApiRes] = await Promise.all([
                 this.fetchWalletsFromServer({ customerIds: userIds, limit: 100, silentEvent: true }),
-                supabase.from('game_accounts').select('*').in('customer_id', userIds),
+                this.fetchGameAccountsFromServer({ customerIds: userIds, limit: 100, silentEvent: true }),
               ]);
-              const dbGameAccs = gameAccsQuery.data;
 
               const walletsMap: Record<string, any> = {};
               (walletsApiRes.wallets || []).forEach((w) => {
                 walletsMap[w.customerId] = w;
               });
 
-              const gameAccountsMap: Record<string, any[]> = {};
-              (dbGameAccs || []).forEach((g: any) => {
-                if (!gameAccountsMap[g.customer_id]) gameAccountsMap[g.customer_id] = [];
-                gameAccountsMap[g.customer_id].push({
-                  id: g.id,
-                  customerId: g.customer_id,
-                  gameCatalogId: g.game_id || g.game_catalog_id,
-                  gameName: g.game_title || g.game_name,
-                  username: g.username || g.game_username,
-                  password: g.password || g.game_password,
-                  status: g.status || 'active',
-                  notes: g.pin || g.notes || '',
-                  createdAt: g.created_at,
-                });
+              const gameAccountsMap: Record<string, GameAccount[]> = {};
+              const loadedAccounts = gameAccountsApiRes.success
+                ? gameAccountsApiRes.accounts
+                : this.getGameAccounts();
+              loadedAccounts.forEach((g) => {
+                if (!gameAccountsMap[g.customerId]) gameAccountsMap[g.customerId] = [];
+                gameAccountsMap[g.customerId].push(g);
               });
 
               const aggregated = dbUsers.map((u: any) => ({
@@ -5848,77 +5853,7 @@ class DataService {
    * - Replaces duplicate rows with the single canonical account.
    */
   public deduplicateGameAccounts(accounts: GameAccount[]): GameAccount[] {
-    if (!Array.isArray(accounts)) return [];
-
-    // Group accounts per customerId
-    const customerMap = new Map<string, GameAccount[]>();
-    for (const a of accounts) {
-      if (!a || !a.customerId) continue;
-      const list = customerMap.get(a.customerId) || [];
-      list.push(a);
-      customerMap.set(a.customerId, list);
-    }
-
-    const cleanedAccounts: GameAccount[] = [];
-
-    for (const [, userAccList] of customerMap.entries()) {
-      // Buckets of distinct games for this customer
-      const gameBuckets: GameAccount[] = [];
-
-      for (const candidate of userAccList) {
-        const candCatalog = candidate.gameCatalogId?.trim().toLowerCase() || '';
-        const candTitle = candidate.gameName?.trim().toLowerCase() || '';
-
-        // Match if catalog ID matches or game name matches
-        const existingIdx = gameBuckets.findIndex((b) => {
-          const bCatalog = b.gameCatalogId?.trim().toLowerCase() || '';
-          const bTitle = b.gameName?.trim().toLowerCase() || '';
-          if (candCatalog && bCatalog && candCatalog === bCatalog) return true;
-          if (candTitle && bTitle && candTitle === bTitle) return true;
-          return false;
-        });
-
-        if (existingIdx === -1) {
-          gameBuckets.push({ ...candidate });
-        } else {
-          // Merge duplicates into the single bucket
-          const existing = gameBuckets[existingIdx];
-          const candIsActive = candidate.status === 'active' && Boolean(candidate.username) && candidate.username !== 'Pending Assignment';
-          const existIsActive = existing.status === 'active' && Boolean(existing.username) && existing.username !== 'Pending Assignment';
-
-          const primary = (candIsActive && !existIsActive) ? candidate : existing;
-          const secondary = (primary === candidate) ? existing : candidate;
-
-          const mergedBalance = Number(((existing.balance || 0) + (candidate.balance || 0)).toFixed(2));
-          const bestUsername = (primary.username && primary.username !== 'Pending Assignment')
-            ? primary.username
-            : (secondary.username && secondary.username !== 'Pending Assignment')
-            ? secondary.username
-            : primary.username;
-
-          const bestPassword = primary.password || secondary.password || '';
-          const bestStatus: GameAccountStatus = (primary.status === 'active' || secondary.status === 'active') ? 'active' : primary.status;
-
-          gameBuckets[existingIdx] = {
-            ...primary,
-            id: existing.id, // Preserve stable ID
-            balance: mergedBalance,
-            username: bestUsername,
-            password: bestPassword,
-            status: bestStatus,
-            gameCatalogId: primary.gameCatalogId || secondary.gameCatalogId,
-            gameName: primary.gameName || secondary.gameName,
-            platformName: primary.platformName || secondary.platformName,
-            notes: primary.notes || secondary.notes,
-            updatedAt: new Date().toISOString(),
-          };
-        }
-      }
-
-      cleanedAccounts.push(...gameBuckets);
-    }
-
-    return cleanedAccounts;
+    return deduplicateGameAccountsList(accounts);
   }
 
   // Player Game IDs & Credentials (Fixed games, handled by Customer Support)
@@ -5939,145 +5874,163 @@ class DataService {
     return list.filter((g) => g.status === 'pending_assignment' || g.status === 'pending_reset');
   }
 
-  public requestGameCredentials(params: {
+  public async requestGameCredentials(params: {
     customerId: string;
     customerName: string;
     gameCatalogId: string;
-  }): { success: boolean; message: string; account?: GameAccount } {
+  }): Promise<{ success: boolean; message: string; account?: GameAccount }> {
     const catalog = this.getGameCatalog();
     const game = catalog.find((g) => g.id === params.gameCatalogId);
     if (!game) return { success: false, message: 'Game title not found in active catalog.' };
 
-    const accounts = this.getGameAccounts();
-    const existing = accounts.find(
-      (a) =>
-        a.customerId === params.customerId &&
-        (a.gameCatalogId === params.gameCatalogId || a.gameName.toLowerCase().trim() === game.title.toLowerCase().trim())
-    );
+    try {
+      const res = await fetch('/api/game-accounts/requests', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gameCatalogId: game.id,
+          gameTitle: game.title,
+          platformName: game.platform,
+        }),
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseGameAccountApiError(
+            res.status,
+            rawText,
+            'Unable to submit Game ID request.',
+          ),
+        };
+      }
 
-    if (existing && existing.status === 'active') {
+      const data = rawText ? JSON.parse(rawText) : {};
+      if (!data.account) {
+        return {
+          success: false,
+          message: 'Server returned an invalid response for Game ID request.',
+        };
+      }
+
+      this.applyGameAccountRows([data.account], false);
+      const savedAccount = this.getGameAccounts(params.customerId).find(
+        (a) => a.id === data.account.id || a.gameCatalogId === game.id,
+      );
+
+      // Auto dispatch into support chat channel after authoritative server confirmation
+      const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
+      this.sendChatMessage({
+        conversationId: conv.id,
+        senderId: params.customerId,
+        senderName: params.customerName,
+        senderRole: 'customer',
+        text: formatGameIdRequestChatMessage({
+          gameTitle: savedAccount?.gameName || game.title,
+          platform: savedAccount?.platformName || game.platform,
+        }),
+        isInternalNote: false,
+      });
+
+      this.createNotification({
+        userId: params.customerId,
+        title: 'Game ID Request Forwarded',
+        message: `Your request for ${savedAccount?.gameName || game.title} has been forwarded to customer support specialists.`,
+        type: 'game_account',
+        linkTab: 'game_accounts',
+      });
+
+      return {
+        success: true,
+        message: data.message || 'Request forwarded to Customer Support specialists.',
+        account: savedAccount,
+      };
+    } catch (err: any) {
       return {
         success: false,
-        message: `You already have active credentials for ${game.title} (Username: ${existing.username}). Only 1 ID per game is permitted.`,
+        message: err?.message || 'Unable to submit Game ID request.',
       };
     }
-
-    if (existing && (existing.status === 'pending_assignment' || existing.status === 'pending_reset')) {
-      return { success: false, message: `A request for ${game.title} is already queued for Customer Support.` };
-    }
-
-    const now = new Date().toISOString();
-    const newReq: GameAccount = {
-      id: existing ? existing.id : `ga_${Date.now()}`,
-      gameCatalogId: game.id,
-      customerId: params.customerId,
-      gameName: game.title,
-      platformName: game.platform,
-      username: 'Pending Assignment',
-      gameUrl: game.gameUrl,
-      status: 'pending_assignment',
-      balance: existing ? existing.balance || 0 : 0,
-      requestType: 'new_id_request',
-      notes: `Player ${params.customerName} requested new credentials.`,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    if (existing) {
-      const idx = accounts.findIndex((a) => a.id === existing.id);
-      accounts[idx] = newReq;
-    } else {
-      accounts.unshift(newReq);
-    }
-    this.save(STORAGE_KEYS.GAME_ACCOUNTS, accounts);
-
-    // Auto dispatch into support chat channel
-    const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
-    this.sendChatMessage({
-      conversationId: conv.id,
-      senderId: params.customerId,
-      senderName: params.customerName,
-      senderRole: 'customer',
-      text: formatGameIdRequestChatMessage({
-        gameTitle: game.title,
-        platform: game.platform,
-      }),
-      isInternalNote: false,
-    });
-
-    this.createNotification({
-      userId: params.customerId,
-      title: 'Game ID Request Forwarded',
-      message: `Your request for ${game.title} has been forwarded to customer support specialists.`,
-      type: 'game_account',
-      linkTab: 'game_accounts',
-    });
-
-    this.logAudit({
-      actorId: params.customerId,
-      actorName: params.customerName,
-      actorRole: 'customer',
-      action: 'GAME_ID_REQUESTED',
-      entityType: 'game_account',
-      entityId: newReq.id,
-      details: `Player requested Game ID and password for ${game.title}. Forwarded to Customer Support.`,
-    });
-
-    return { success: true, message: 'Request forwarded to Customer Support specialists.', account: newReq };
   }
 
-  public requestGamePasswordReset(params: {
+  public async requestGamePasswordReset(params: {
     accountId: string;
     customerId: string;
     customerName: string;
-  }): { success: boolean; message: string } {
-    const accounts = this.getGameAccounts();
-    const acc = accounts.find((a) => a.id === params.accountId);
-    if (!acc) return { success: false, message: 'Game account not found' };
+  }): Promise<{ success: boolean; message: string; account?: GameAccount }> {
+    try {
+      const res = await fetch(
+        `/api/game-accounts/${encodeURIComponent(params.accountId)}/reset-request`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        },
+      );
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseGameAccountApiError(
+            res.status,
+            rawText,
+            'Unable to submit password reset request.',
+          ),
+        };
+      }
 
-    acc.status = 'pending_reset';
-    acc.requestType = 'password_reset_request';
-    acc.updatedAt = new Date().toISOString();
-    this.save(STORAGE_KEYS.GAME_ACCOUNTS, accounts);
+      const data = rawText ? JSON.parse(rawText) : {};
+      if (!data.account) {
+        return {
+          success: false,
+          message: 'Server returned an invalid response for password reset.',
+        };
+      }
 
-    // Create a support conversation or add message automatically
-    const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
-    this.sendChatMessage({
-      conversationId: conv.id,
-      senderId: params.customerId,
-      senderName: params.customerName,
-      senderRole: 'customer',
-      text: formatGamePasswordResetChatMessage({
-        gameTitle: acc.gameName,
-        username: acc.username,
-      }),
-      isInternalNote: false,
-    });
+      this.applyGameAccountRows([data.account], false);
+      const updated = this.getGameAccounts(params.customerId).find(
+        (a) => a.id === params.accountId,
+      );
 
-    this.createNotification({
-      userId: params.customerId,
-      title: 'Credential Reset Request Forwarded',
-      message: `Your password reset request for ${acc.gameName} is dispatched to customer care specialists.`,
-      type: 'game_account',
-      linkTab: 'chat',
-    });
+      const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
+      this.sendChatMessage({
+        conversationId: conv.id,
+        senderId: params.customerId,
+        senderName: params.customerName,
+        senderRole: 'customer',
+        text: formatGamePasswordResetChatMessage({
+          gameTitle: updated?.gameName || data.account.gameName || 'Game',
+          username: updated?.username || data.account.username || '',
+        }),
+        isInternalNote: false,
+      });
 
-    this.logAudit({
-      actorId: params.customerId,
-      actorName: params.customerName,
-      actorRole: 'customer',
-      action: 'GAME_PASSWORD_RESET_REQUESTED',
-      entityType: 'game_account',
-      entityId: acc.id,
-      details: `Player requested credential reset for ${acc.gameName}. Forwarded to Customer Support.`,
-    });
+      this.createNotification({
+        userId: params.customerId,
+        title: 'Credential Reset Request Forwarded',
+        message: `Your password reset request for ${updated?.gameName || data.account.gameName} is dispatched to customer care specialists.`,
+        type: 'game_account',
+        linkTab: 'chat',
+      });
 
-    return { success: true, message: 'Password reset request dispatched to customer care.' };
+      return {
+        success: true,
+        message: data.message || 'Password reset request dispatched to customer care.',
+        account: updated,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to submit password reset request.',
+      };
+    }
   }
 
   // Authoritative Provisioning / Updating of a Player's Game Credentials
   // Guarantees: Strictly 1 Game ID per game per user
-  public provisionGameAccount(params: {
+  public async provisionGameAccount(params: {
     customerId: string;
     customerName?: string;
     gameCatalogId: string;
@@ -6090,231 +6043,242 @@ class DataService {
     reviewerId: string;
     reviewerName: string;
     status?: GameAccountStatus;
-  }): { success: boolean; message: string; account: GameAccount } {
+  }): Promise<{ success: boolean; message: string; account?: GameAccount }> {
     const catalog = this.getGameCatalog();
     const game = catalog.find((g) => g.id === params.gameCatalogId);
     const gameTitle = game?.title || params.gameName || 'Game';
     const platform = game?.platform || params.platformName || 'Sweepstakes';
-    const gameUrl = game?.gameUrl || params.gameUrl || '';
 
-    const allAccounts = this.getGameAccounts();
-    const existing = allAccounts.find(
-      (a) =>
-        a.customerId === params.customerId &&
-        ((params.gameCatalogId && a.gameCatalogId === params.gameCatalogId) ||
-          a.gameName.toLowerCase().trim() === gameTitle.toLowerCase().trim())
-    );
+    try {
+      const res = await fetch('/api/game-accounts/provision', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customerId: params.customerId,
+          gameCatalogId: params.gameCatalogId,
+          gameName: gameTitle,
+          platformName: platform,
+          username: params.username.trim(),
+          password: params.password ? params.password.trim() : undefined,
+          notes: params.notes?.trim() || undefined,
+          status: params.status === 'suspended' ? 'suspended' : 'active',
+        }),
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseGameAccountApiError(
+            res.status,
+            rawText,
+            'Failed to provision game account.',
+          ),
+        };
+      }
 
-    const now = new Date().toISOString();
-    let targetAccount: GameAccount;
+      const data = rawText ? JSON.parse(rawText) : {};
+      if (!data.account) {
+        return {
+          success: false,
+          message: 'Server returned an invalid game account response.',
+        };
+      }
 
-    if (existing) {
-      // Update existing single account
-      existing.username = params.username.trim();
-      if (params.password) existing.password = params.password.trim();
-      existing.status = params.status || 'active';
-      existing.requestType = undefined;
-      existing.assignedByAgentId = params.reviewerId;
-      existing.assignedByAgentName = params.reviewerName;
-      if (params.notes) existing.notes = params.notes;
-      existing.updatedAt = now;
-      targetAccount = existing;
-    } else {
-      // Create new single account
-      targetAccount = {
-        id: `ga_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        gameCatalogId: params.gameCatalogId,
-        customerId: params.customerId,
-        gameName: gameTitle,
-        platformName: platform,
-        username: params.username.trim(),
-        password: params.password ? params.password.trim() : undefined,
-        gameUrl,
-        status: params.status || 'active',
-        balance: 0,
-        notes: params.notes,
-        assignedByAgentId: params.reviewerId,
-        assignedByAgentName: params.reviewerName,
-        createdAt: now,
-        updatedAt: now,
+      this.applyGameAccountRows([data.account], false);
+      const targetAccount = this.getGameAccounts(params.customerId).find(
+        (a) => a.id === data.account.id || a.gameCatalogId === params.gameCatalogId,
+      );
+
+      const conv = this.getOrCreateConversationForCustomer(
+        params.customerId,
+        params.customerName || this.getUserById(params.customerId)?.displayName || 'Player'
+      );
+      this.sendChatMessage({
+        conversationId: conv.id,
+        senderId: params.reviewerId,
+        senderName: params.reviewerName,
+        senderRole: 'agent',
+        text: formatCredentialsReadyChatMessage({
+          gameTitle: targetAccount?.gameName || gameTitle,
+          username: targetAccount?.username || params.username.trim(),
+          password: params.password ? params.password.trim() : undefined,
+        }),
+        isInternalNote: false,
+      });
+
+      this.createNotification({
+        userId: params.customerId,
+        title: 'Game Credentials Configured',
+        message: `Login credentials configured for ${targetAccount?.gameName || gameTitle}. Username: ${targetAccount?.username || params.username.trim()}`,
+        type: 'game_account',
+        linkTab: 'game_accounts',
+      });
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'game_account_provisioned', accountId: data.account.id } }));
+      }
+
+      return {
+        success: true,
+        message:
+          data.message ||
+          `Successfully provisioned credentials for ${targetAccount?.gameName || gameTitle}. Player notified.`,
+        account: targetAccount,
       };
-      allAccounts.unshift(targetAccount);
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Failed to provision game account.',
+      };
     }
-
-    const deduplicated = this.deduplicateGameAccounts(allAccounts);
-    this.save(STORAGE_KEYS.GAME_ACCOUNTS, deduplicated);
-
-    // Notify player in chat & notification
-    const conv = this.getOrCreateConversationForCustomer(
-      params.customerId,
-      params.customerName || this.getUserById(params.customerId)?.displayName || 'Player'
-    );
-    this.sendChatMessage({
-      conversationId: conv.id,
-      senderId: params.reviewerId,
-      senderName: params.reviewerName,
-      senderRole: 'agent',
-      text: formatCredentialsReadyChatMessage({
-        gameTitle,
-        username: params.username.trim(),
-        password: params.password ? params.password.trim() : undefined,
-      }),
-      isInternalNote: false,
-    });
-
-    this.createNotification({
-      userId: params.customerId,
-      title: 'Game Credentials Configured',
-      message: `Login credentials configured for ${gameTitle}. Username: ${params.username.trim()}`,
-      type: 'game_account',
-      linkTab: 'game_accounts',
-    });
-
-    this.logAudit({
-      actorId: params.reviewerId,
-      actorName: params.reviewerName,
-      actorRole: 'agent',
-      action: 'GAME_CREDENTIALS_ASSIGNED',
-      entityType: 'game_account',
-      entityId: targetAccount.id,
-      details: `${existing ? 'Updated' : 'Assigned'} credentials for ${gameTitle} (User: ${params.username.trim()}) for player ${params.customerId}. Enforced 1 ID per game rule.`,
-    });
-
-    if (supabase && isSupabaseConfigured()) {
-      supabase.from('game_accounts').upsert({
-        id: targetAccount.id,
-        customer_id: targetAccount.customerId,
-        game_id: targetAccount.gameCatalogId,
-        game_title: targetAccount.gameName,
-        username: targetAccount.username,
-        password: targetAccount.password || '',
-        pin: targetAccount.notes || null,
-        status: targetAccount.status,
-        created_at: targetAccount.createdAt,
-        updated_at: targetAccount.updatedAt,
-      }).then(() => {}, (err) => console.warn('Supabase game account upsert sync error:', err));
-    }
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'game_account_provisioned', accountId: targetAccount.id } }));
-
-    return {
-      success: true,
-      message: existing
-        ? `Updated credentials for ${gameTitle}. Player's single ID maintained.`
-        : `Successfully provisioned credentials for ${gameTitle}. Player notified.`,
-      account: targetAccount,
-    };
   }
 
   // Customer Support handles assigning / updating credentials
-  public assignOrUpdateGameCredentials(params: {
+  public async assignOrUpdateGameCredentials(params: {
     accountId: string;
     username: string;
     password: string;
     notes?: string;
     reviewerId: string;
     reviewerName: string;
-  }): { success: boolean; message: string } {
-    const accounts = this.getGameAccounts();
-    const acc = accounts.find((a) => a.id === params.accountId);
-    if (!acc) return { success: false, message: 'Game account not found.' };
+  }): Promise<{ success: boolean; message: string; account?: GameAccount }> {
+    try {
+      const res = await fetch(
+        `/api/game-accounts/${encodeURIComponent(params.accountId)}/credentials`,
+        {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: params.username.trim(),
+            password: params.password ? params.password.trim() : undefined,
+            notes: params.notes?.trim() || undefined,
+            status: 'active',
+          }),
+        },
+      );
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseGameAccountApiError(
+            res.status,
+            rawText,
+            'Failed to update game credentials.',
+          ),
+        };
+      }
 
-    acc.username = params.username.trim();
-    acc.password = params.password.trim();
-    acc.status = 'active';
-    acc.requestType = undefined;
-    acc.assignedByAgentId = params.reviewerId;
-    acc.assignedByAgentName = params.reviewerName;
-    if (params.notes) acc.notes = params.notes;
-    acc.updatedAt = new Date().toISOString();
+      const data = rawText ? JSON.parse(rawText) : {};
+      if (!data.account) {
+        return {
+          success: false,
+          message: 'Server returned an invalid game credentials response.',
+        };
+      }
 
-    const deduplicated = this.deduplicateGameAccounts(accounts);
-    this.save(STORAGE_KEYS.GAME_ACCOUNTS, deduplicated);
+      this.applyGameAccountRows([data.account], false);
+      const acc = this.getGameAccounts().find((a) => a.id === params.accountId);
+      const customerId = acc?.customerId || data.account.customerId;
+      const gameName = acc?.gameName || data.account.gameName || 'Game';
+      const username = acc?.username || params.username.trim();
+      const password = acc?.password || params.password.trim();
 
-    // Notify player and dispatch confirmation in support chat
-    const conv = this.getOrCreateConversationForCustomer(acc.customerId, this.getUserById(acc.customerId)?.displayName || 'Player');
-    this.sendChatMessage({
-      conversationId: conv.id,
-      senderId: params.reviewerId,
-      senderName: params.reviewerName,
-      senderRole: 'agent',
-      text: formatCredentialsReadyChatMessage({
-        gameTitle: acc.gameName,
-        username: acc.username,
-        password: acc.password,
-      }),
-      isInternalNote: false,
-    });
+      const conv = this.getOrCreateConversationForCustomer(
+        customerId,
+        this.getUserById(customerId)?.displayName || 'Player',
+      );
+      this.sendChatMessage({
+        conversationId: conv.id,
+        senderId: params.reviewerId,
+        senderName: params.reviewerName,
+        senderRole: 'agent',
+        text: formatCredentialsReadyChatMessage({
+          gameTitle: gameName,
+          username,
+          password,
+        }),
+        isInternalNote: false,
+      });
 
-    this.createNotification({
-      userId: acc.customerId,
-      title: 'Game Credentials Configured',
-      message: `Customer support assigned your login credentials for ${acc.gameName}. Username: ${acc.username}`,
-      type: 'game_account',
-      linkTab: 'game_accounts',
-    });
+      this.createNotification({
+        userId: customerId,
+        title: 'Game Credentials Configured',
+        message: `Customer support assigned your login credentials for ${gameName}. Username: ${username}`,
+        type: 'game_account',
+        linkTab: 'game_accounts',
+      });
 
-    if (typeof window !== 'undefined') {
-      webPushClient
-        .dispatchPushAlert({
-          recipientId: acc.customerId,
-          recipientRole: 'customer',
-          title: '🔑 Game Credentials Assigned!',
-          body: `Your login for ${acc.gameName} is ready (Username: ${acc.username}). Tap to view and start playing!`,
-          url: '/#games',
-          tag: `game_acc_${acc.id}`,
-          actionType: 'game',
-        })
-        .catch(() => {});
+      if (typeof window !== 'undefined') {
+        webPushClient
+          .dispatchPushAlert({
+            recipientId: customerId,
+            recipientRole: 'customer',
+            title: '🔑 Game Credentials Assigned!',
+            body: `Your login for ${gameName} is ready (Username: ${username}). Tap to view and start playing!`,
+            url: '/#games',
+            tag: `game_acc_${params.accountId}`,
+            actionType: 'game',
+          })
+          .catch(() => {});
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'game_credentials_assigned', accountId: params.accountId } }));
+      }
+
+      return {
+        success: true,
+        message:
+          data.message ||
+          `Successfully assigned credentials for ${gameName}. Player notified.`,
+        account: acc,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Failed to update game credentials.',
+      };
     }
-
-    this.logAudit({
-      actorId: params.reviewerId,
-      actorName: params.reviewerName,
-      actorRole: 'agent',
-      action: 'GAME_CREDENTIALS_ASSIGNED',
-      entityType: 'game_account',
-      entityId: acc.id,
-      details: `Support specialist ${params.reviewerName} configured credentials for ${acc.gameName} (User: ${acc.username}). Single ID per game enforced.`,
-    });
-
-    if (supabase && isSupabaseConfigured()) {
-      supabase.from('game_accounts').update({
-        username: acc.username,
-        password: acc.password,
-        status: acc.status,
-        pin: acc.notes || null,
-        updated_at: acc.updatedAt,
-      }).eq('id', acc.id).then(() => {}, (err) => console.warn('Supabase game account assign sync error:', err));
-    }
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'game_credentials_assigned', accountId: acc.id } }));
-
-    return { success: true, message: `Successfully assigned credentials for ${acc.gameName}. Player notified.` };
   }
 
   // Delete a game account
-  public deleteGameAccount(
+  public async deleteGameAccount(
     accountId: string,
-    actorId?: string,
-    actorName?: string
-  ): { success: boolean; message: string } {
-    const all = this.getGameAccounts();
-    const target = all.find((a) => a.id === accountId);
-    if (!target) return { success: false, message: 'Game account not found.' };
+    _actorId?: string,
+    _actorName?: string
+  ): Promise<{ success: boolean; message: string }> {
+    try {
+      const res = await fetch(`/api/game-accounts/${encodeURIComponent(accountId)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseGameAccountApiError(
+            res.status,
+            rawText,
+            'Failed to delete game account.',
+          ),
+        };
+      }
 
-    const remaining = all.filter((a) => a.id !== accountId);
-    this.save(STORAGE_KEYS.GAME_ACCOUNTS, remaining);
+      const data = rawText ? JSON.parse(rawText) : {};
+      this.applyGameAccountRows([], false, [accountId]);
 
-    this.logAudit({
-      actorId: actorId || 'system',
-      actorName: actorName || 'System',
-      actorRole: 'admin',
-      action: 'GAME_ACCOUNT_DELETED',
-      entityType: 'game_account',
-      entityId: accountId,
-      details: `Deleted game account ID "${target.username}" for game "${target.gameName}" (Customer: ${target.customerId}).`,
-    });
-
-    return { success: true, message: `Successfully deleted game account for ${target.gameName}.` };
+      return {
+        success: true,
+        message: data.message || 'Successfully deleted game account.',
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Failed to delete game account.',
+      };
+    }
   }
 
   // Data Migration for user account ID reconciliation (e.g. Supabase recreation / session matching)
@@ -7910,6 +7874,7 @@ class DataService {
 
       const res = await fetch('/api/referrals/attribute', {
         method: 'POST',
+        credentials: 'include',
         headers,
         body: JSON.stringify({
           refereeId: params.refereeId,
@@ -7919,7 +7884,10 @@ class DataService {
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { success: false, error: json.error || `Attribution failed (${res.status})` };
+        return {
+          success: false,
+          error: extractServerApiError(json, `Attribution failed (${res.status})`),
+        };
       }
       return { success: true };
     } catch (err: any) {
@@ -7987,8 +7955,11 @@ class DataService {
       if (!attempt.response?.ok) {
         return {
           success: false,
-          error: json?.error || `Reconciliation failed (${attempt.response?.status || 401})`,
-          code: json?.code,
+          error: extractServerApiError(
+            json,
+            `Reconciliation failed (${attempt.response?.status || 401})`,
+          ),
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8028,8 +7999,11 @@ class DataService {
       if (!attempt.response?.ok || !json?.summary) {
         return {
           success: false,
-          error: json?.error || `Failed to load referral summary (${attempt.response?.status || 401})`,
-          code: json?.code,
+          error: extractServerApiError(
+            json,
+            `Failed to load referral summary (${attempt.response?.status || 401})`,
+          ),
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8120,8 +8094,11 @@ class DataService {
           success: false,
           awards: [],
           topReferrers: [],
-          error: json?.error || `Failed to load referral ledger (${attempt.response?.status || 401})`,
-          code: json?.code,
+          error: extractServerApiError(
+            json,
+            `Failed to load referral ledger (${attempt.response?.status || 401})`,
+          ),
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8169,8 +8146,11 @@ class DataService {
       if (!attempt.response?.ok) {
         return {
           success: false,
-          error: json?.error || `Manual assignment failed (${attempt.response?.status || 401})`,
-          code: json?.code,
+          error: extractServerApiError(
+            json,
+            `Manual assignment failed (${attempt.response?.status || 401})`,
+          ),
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8212,8 +8192,11 @@ class DataService {
       if (!attempt.response?.ok) {
         return {
           success: false,
-          error: json?.error || `Failed to save vanity code (${attempt.response?.status || 401})`,
-          code: json?.code,
+          error: extractServerApiError(
+            json,
+            `Failed to save vanity code (${attempt.response?.status || 401})`,
+          ),
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8254,8 +8237,11 @@ class DataService {
       if (!attempt.response?.ok) {
         return {
           success: false,
-          error: json?.error || `Review failed (${attempt.response?.status || 401})`,
-          code: json?.code,
+          error: extractServerApiError(
+            json,
+            `Review failed (${attempt.response?.status || 401})`,
+          ),
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8294,8 +8280,11 @@ class DataService {
       if (!attempt.response?.ok) {
         return {
           success: false,
-          error: json?.error || `Failed to save referral settings (${attempt.response?.status || 401})`,
-          code: json?.code,
+          error: extractServerApiError(
+            json,
+            `Failed to save referral settings (${attempt.response?.status || 401})`,
+          ),
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8330,31 +8319,10 @@ class DataService {
       const queryStr = params.toString();
       const primaryUrl = `/api/wheel/status${queryStr ? `?${queryStr}` : ''}`;
 
-      let attempt = await this.fetchWithAuthTokenRetry(primaryUrl, (headers) => ({
+      const attempt = await this.fetchWithAuthTokenRetry(primaryUrl, (headers) => ({
         cache: 'no-store',
-        headers: {
-          ...headers,
-          'x-api-route': '/api/wheel/status',
-        },
+        headers,
       }));
-
-      // If an edge proxy served SPA HTML or collapsed to /api health root, retry once via /api/index?__api_path
-      if (
-        !attempt.requiresReauth &&
-        !attempt.isTransientError &&
-        (isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText }) ||
-          (attempt.json && attempt.json.online === true && !attempt.json.eligibility))
-      ) {
-        const indexParams = new URLSearchParams(params);
-        indexParams.set('__api_path', '/api/wheel/status');
-        attempt = await this.fetchWithAuthTokenRetry(`/api/index?${indexParams.toString()}`, (headers) => ({
-          cache: 'no-store',
-          headers: {
-            ...headers,
-            'x-api-route': '/api/wheel/status',
-          },
-        }));
-      }
 
       const json = attempt.json;
       if (!attempt.response?.ok) {
@@ -8367,7 +8335,7 @@ class DataService {
             contentType: attempt.contentType,
             rawText: attempt.rawText,
           }),
-          code: json?.code,
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8470,29 +8438,11 @@ class DataService {
         userId: activeUser?.id,
         idempotencyKey: idempotencyKey || `wspin_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
       });
-      let attempt = await this.fetchWithAuthTokenRetry('/api/wheel/spin', (headers) => ({
+      const attempt = await this.fetchWithAuthTokenRetry('/api/wheel/spin', (headers) => ({
         method: 'POST',
-        headers: {
-          ...headers,
-          'x-api-route': '/api/wheel/spin',
-        },
+        headers,
         body: spinBody,
       }));
-      if (
-        !attempt.requiresReauth &&
-        !attempt.isTransientError &&
-        (isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText }) ||
-          (attempt.json && attempt.json.online === true && !attempt.json.eligibility))
-      ) {
-        attempt = await this.fetchWithAuthTokenRetry('/api/index?__api_path=%2Fapi%2Fwheel%2Fspin', (headers) => ({
-          method: 'POST',
-          headers: {
-            ...headers,
-            'x-api-route': '/api/wheel/spin',
-          },
-          body: spinBody,
-        }));
-      }
       const json = attempt.json || {};
       if (!attempt.response?.ok || !json?.success) {
         return {
@@ -8504,7 +8454,7 @@ class DataService {
             contentType: attempt.contentType,
             rawText: attempt.rawText,
           }),
-          code: json?.code,
+          code: extractServerApiCode(json),
           eligibility: json?.eligibility,
           requiresReauth: attempt.requiresReauth,
         };
@@ -8564,8 +8514,11 @@ class DataService {
       if (!attempt.response?.ok || !json?.success) {
         return {
           success: false,
-          error: json?.error || `Failed to save Wheel of Luck settings (${attempt.response?.status || 401})`,
-          code: json?.code,
+          error: extractServerApiError(
+            json,
+            `Failed to save Wheel of Luck settings (${attempt.response?.status || 401})`,
+          ),
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8622,8 +8575,11 @@ class DataService {
       if (!attempt.response?.ok || !json?.success) {
         return {
           success: false,
-          message: json?.error || `Game credit transfer failed (${attempt.response?.status || 500})`,
-          code: json?.code,
+          message: extractServerApiError(
+            json,
+            `Game credit transfer failed (${attempt.response?.status || 500})`,
+          ),
+          code: extractServerApiCode(json),
           requiresReauth: attempt.requiresReauth,
         };
       }
@@ -8874,7 +8830,15 @@ class DataService {
       };
     }
 
-    let res = await fetch(url, buildInit(withAccept(initial.headers)));
+    const withCredentials = (headers: Record<string, string>): RequestInit => {
+      const built = buildInit(withAccept(headers));
+      return {
+        credentials: built.credentials ?? 'include',
+        ...built,
+      };
+    };
+
+    let res = await fetch(url, withCredentials(initial.headers));
     if (res.status === 401) {
       const refreshed = await this.buildAuditAuthHeadersWithMeta(true, initial.token);
       if (refreshed.requiresReauth) {
@@ -8905,7 +8869,7 @@ class DataService {
         };
       }
       if (refreshed.token) {
-        res = await fetch(url, buildInit(withAccept(refreshed.headers)));
+        res = await fetch(url, withCredentials(refreshed.headers));
       }
     }
 
@@ -9420,11 +9384,6 @@ class DataService {
       const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
       wallets[params.customerId] = wallet;
       this.save(STORAGE_KEYS.WALLETS, wallets, true);
-      void this.syncWalletFieldsToSupabase(
-        params.customerId,
-        { referral_bonus_balance: wallet.referralBonusBalance },
-        wallet
-      );
 
       // Credit directly into game account
       targetAccount.balance = (targetAccount.balance || 0) + params.amount;
@@ -9490,11 +9449,6 @@ class DataService {
       const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
       wallets[params.customerId] = wallet;
       this.save(STORAGE_KEYS.WALLETS, wallets, true);
-      void this.syncWalletFieldsToSupabase(
-        params.customerId,
-        { balance: wallet.availableBalance },
-        wallet
-      );
 
       targetAccount.balance = (targetAccount.balance || 0) + params.amount;
       targetAccount.updatedAt = new Date().toISOString();

@@ -199,7 +199,7 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
     }
   };
 
-  const handleSaveCredentials = (e: React.FormEvent) => {
+  const handleSaveCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingAccount) return;
 
@@ -208,7 +208,7 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
       return;
     }
 
-    const res = dataService.assignOrUpdateGameCredentials({
+    const res = await dataService.assignOrUpdateGameCredentials({
       accountId: editingAccount.id,
       username: assignedUsername.trim(),
       password: assignedPassword.trim(),
@@ -226,22 +226,24 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
       setAssignedUsername('');
       setAssignedPassword('');
       setSupportNote('');
+      setAllAccounts(dataService.getGameAccounts());
       setTimeout(() => setFeedbackMsg(null), 4000);
     } else {
       setFeedbackMsg({ text: res.message, type: 'error' });
     }
   };
 
-  const handleDeleteAccount = (account: GameAccount) => {
+  const handleDeleteAccount = async (account: GameAccount) => {
     if (!confirm(`Are you sure you want to delete the game credentials for "${account.gameName}" (User: ${account.username})?`)) {
       return;
     }
-    const res = dataService.deleteGameAccount(account.id, currentUser.id, currentUser.displayName);
+    const res = await dataService.deleteGameAccount(account.id, currentUser.id, currentUser.displayName);
     if (res.success) {
       setFeedbackMsg({
         text: `Deleted game credentials for ${account.gameName}.`,
         type: 'success',
       });
+      setAllAccounts(dataService.getGameAccounts());
       setTimeout(() => setFeedbackMsg(null), 3000);
     } else {
       setFeedbackMsg({ text: res.message, type: 'error' });

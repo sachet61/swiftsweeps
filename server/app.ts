@@ -9,6 +9,7 @@ import {
 import { UserDirectoryRepo } from './auth/userDirectoryRepo.js';
 import { GameCatalogRepo } from './catalog/gameCatalogRepo.js';
 import { DepositRepo } from './deposits/depositRepo.js';
+import { GameAccountRepo } from './gameAccounts/gameAccountRepo.js';
 import type { ServerConfig } from './config/env.js';
 import type { DatabasePool } from './db/pool.js';
 import type { Logger } from './logging/logger.js';
@@ -28,12 +29,17 @@ import {
 import { createAdminAuthRouter } from './routes/adminAuth.js';
 import { createAuthProfileRouter } from './routes/authProfile.js';
 import { createDepositRouter } from './routes/deposits.js';
+import { createGameAccountRouter } from './routes/gameAccounts.js';
 import { createGameCatalogRouter } from './routes/gameCatalog.js';
 import { createHealthRouter } from './routes/health.js';
 import { createProfileRouter } from './routes/profile.js';
+import { createReferralRouter } from './routes/referrals.js';
 import { createWalletRouter } from './routes/wallet.js';
+import { createWheelRouter } from './routes/wheel.js';
 import { createWithdrawalRouter } from './routes/withdrawals.js';
+import { ReferralRepo } from './referrals/referralRepo.js';
 import { WalletRepo } from './wallet/walletRepo.js';
+import { WheelRepo } from './wheel/wheelRepo.js';
 import { WithdrawalRepo } from './withdrawals/withdrawalRepo.js';
 
 export interface ApiAppDependencies {
@@ -47,6 +53,8 @@ export interface ApiAppDependencies {
    */
   authDatabaseOverride?: BetterAuthOptions['database'];
   emailDeliveryOverride?: EmailDeliveryAdapter;
+  wheelNowFnOverride?: () => number;
+  wheelRandomUnitOverride?: () => number;
 }
 
 export function createApiApp({
@@ -56,6 +64,8 @@ export function createApiApp({
   isShuttingDown = () => false,
   authDatabaseOverride,
   emailDeliveryOverride,
+  wheelNowFnOverride,
+  wheelRandomUnitOverride,
 }: ApiAppDependencies): Express {
   const app = express();
 
@@ -68,8 +78,11 @@ export function createApiApp({
 
   const userRepo = new UserDirectoryRepo(pool);
   const gameCatalogRepo = new GameCatalogRepo(pool);
+  const gameAccountRepo = new GameAccountRepo(pool);
   const depositRepo = new DepositRepo(pool);
+  const referralRepo = new ReferralRepo(pool);
   const walletRepo = new WalletRepo(pool);
+  const wheelRepo = new WheelRepo(pool);
   const withdrawalRepo = new WithdrawalRepo(pool);
   const emailDelivery =
     emailDeliveryOverride ?? createEmailDeliveryAdapter(config, logger);
@@ -136,6 +149,14 @@ export function createApiApp({
   );
   app.use(
     '/api',
+    createGameAccountRouter({
+      gameAccountRepo,
+      userRepo,
+      requireAuth,
+    }),
+  );
+  app.use(
+    '/api',
     createWalletRouter({
       walletRepo,
       userRepo,
@@ -156,6 +177,24 @@ export function createApiApp({
       depositRepo,
       userRepo,
       requireAuth,
+    }),
+  );
+  app.use(
+    '/api',
+    createReferralRouter({
+      referralRepo,
+      userRepo,
+      requireAuth,
+    }),
+  );
+  app.use(
+    '/api',
+    createWheelRouter({
+      wheelRepo,
+      userRepo,
+      requireAuth,
+      nowFn: wheelNowFnOverride,
+      randomUnitFn: wheelRandomUnitOverride,
     }),
   );
 
