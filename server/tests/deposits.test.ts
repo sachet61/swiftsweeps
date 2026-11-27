@@ -323,18 +323,43 @@ class InMemoryDepositDatabase
     }
 
     if (normalized.startsWith('INSERT INTO public.audit_logs')) {
-      const [id, actorId, actorName, actorRole, action, entityType, entityId, details, ts] =
-        values as [
-          string,
-          string,
-          string,
-          string,
-          string,
-          string,
-          string,
-          string | null,
-          string,
-        ];
+      let id: string;
+      let actorId: string;
+      let actorName: string;
+      let actorRole: string;
+      let action: string;
+      let entityType: string;
+      let entityId: string;
+      let details: string | null;
+      let ts: string;
+
+      if (normalized.includes("'topup'") && values.length === 8) {
+        [id, actorId, actorName, actorRole, action, entityId, details, ts] =
+          values as [
+            string,
+            string,
+            string,
+            string,
+            string,
+            string,
+            string | null,
+            string,
+          ];
+        entityType = 'topup';
+      } else {
+        [id, actorId, actorName, actorRole, action, entityType, entityId, details, ts] =
+          values as [
+            string,
+            string,
+            string,
+            string,
+            string,
+            string,
+            string,
+            string | null,
+            string,
+          ];
+      }
       this.auditLogs.push({
         id,
         actor_id: actorId,
@@ -439,18 +464,44 @@ class InMemoryDepositDatabase
     }
 
     if (normalized.startsWith('INSERT INTO public.transactions')) {
-      const [id, customerId, amount, type, status, description, referenceId, gameName, createdAt] =
-        values as [
-          string,
-          string,
-          string,
-          string,
-          string,
-          string,
-          string | null,
-          string | null,
-          string,
-        ];
+      const hasLiteralStatus = normalized.includes("'completed'");
+      let id: string;
+      let customerId: string;
+      let amount: string;
+      let type: string;
+      let status: string;
+      let description: string;
+      let referenceId: string | null;
+      let gameName: string | null;
+      let createdAt: string;
+
+      if (hasLiteralStatus && values.length === 7) {
+        [id, customerId, amount, description, referenceId, gameName, createdAt] =
+          values as [
+            string,
+            string,
+            string,
+            string,
+            string | null,
+            string | null,
+            string,
+          ];
+        type = normalized.includes("'bonus'") ? 'bonus' : 'deposit';
+        status = 'completed';
+      } else {
+        [id, customerId, amount, type, status, description, referenceId, gameName, createdAt] =
+          values as [
+            string,
+            string,
+            string,
+            string,
+            string,
+            string,
+            string | null,
+            string | null,
+            string,
+          ];
+      }
       if (!this.transactions.has(id)) {
         this.transactions.set(id, {
           id,
