@@ -1030,27 +1030,6 @@ class SupabaseAuthService {
         upsertData.email_verified = true;
       }
       await supabase.from('users').upsert(upsertData);
-
-      const wallet = dataService.getWallet(profile.id);
-      if (wallet && supabase && isSupabaseConfigured()) {
-        const { data: existingWallet } = await supabase
-          .from('wallets')
-          .select('customer_id')
-          .eq('customer_id', profile.id)
-          .maybeSingle();
-
-        if (!existingWallet) {
-          await supabase.from('wallets').insert({
-            customer_id: profile.id,
-            balance: wallet.availableBalance || 0,
-            pending_withdrawal: wallet.reservedBalance || 0,
-            pending_deposit: wallet.pendingDepositBalance || 0,
-            total_deposited: wallet.totalDeposited || 0,
-            total_withdrawn: wallet.totalWithdrawn || 0,
-            currency: wallet.currency || 'USD',
-          });
-        }
-      }
     } catch (err) {
       console.warn('Supabase profile sync notice:', err);
     }

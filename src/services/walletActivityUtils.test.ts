@@ -13,6 +13,7 @@ import {
   mapDbTransactionRowToWalletTransaction,
   mapDbWalletRowToWallet,
   mergeWalletTransactions,
+  parseWalletApiError,
   reconcileWalletWithTopups,
   resolveDashboardTopUpDisplay,
 } from './walletActivityUtils';
@@ -652,4 +653,73 @@ test('mapDbWalletRowToWallet maps free_play_balance and buildUnifiedWalletActivi
   assert.equal(unified[2].direction, 'credit');
 });
 
+test('mapDbWalletRowToWallet and mapDbTransactionRowToWalletTransaction accept camelCase /api/wallet* DTOs', () => {
+  const wallet = mapDbWalletRowToWallet(
+    {
+      customerId: 'usr_api_1',
+      currency: 'USD',
+      availableBalance: 145.75,
+      referralBonusBalance: 12.5,
+      freePlayBalance: 20,
+      reservedBalance: 35,
+      pendingDepositBalance: 50,
+      totalDeposited: 400,
+      totalWithdrawn: 100,
+      lastUpdatedAt: '2026-11-26T08:00:00.000Z',
+    },
+    undefined,
+    [],
+    { authoritativeTopupsLoaded: true }
+  );
 
+  assert.equal(wallet.customerId, 'usr_api_1');
+  assert.equal(wallet.availableBalance, 145.75);
+  assert.equal(wallet.referralBonusBalance, 12.5);
+  assert.equal(wallet.freePlayBalance, 20);
+  assert.equal(wallet.reservedBalance, 35);
+  assert.equal(wallet.pendingDepositBalance, 50);
+  assert.equal(wallet.totalDeposited, 400);
+  assert.equal(wallet.totalWithdrawn, 100);
+  assert.equal(wallet.lastUpdatedAt, '2026-11-26T08:00:00.000Z');
+
+  const tx = mapDbTransactionRowToWalletTransaction({
+    id: 'tx_api_1',
+    customerId: 'usr_api_1',
+    amount: 25,
+    fee: 0,
+    netAmount: 25,
+    currency: 'USD',
+    type: 'referral_reward',
+    status: 'completed',
+    description: 'Referral reward payout',
+    referenceId: 'ref_99',
+    gameName: 'Fire Kirin',
+    createdAt: '2026-11-26T07:55:00.000Z',
+  });
+
+  assert.equal(tx.id, 'tx_api_1');
+  assert.equal(tx.customerId, 'usr_api_1');
+  assert.equal(tx.relatedRequestId, 'ref_99');
+  assert.equal(tx.targetGameName, 'Fire Kirin');
+  assert.equal(tx.createdAt, '2026-11-26T07:55:00.000Z');
+});
+
+test('parseWalletApiError handles JSON errors, HTML proxy errors, and malformed bodies safely', () => {
+  assert.equal(
+    parseWalletApiError(
+      403,
+      JSON.stringify({ error: { code: 'FORBIDDEN', message: 'Access denied.' } }),
+      'Fallback'
+    ),
+    'Access denied.'
+  );
+  assert.equal(
+    parseWalletApiError(502, '<!doctype html><html><body>502 Bad Gateway</body></html>', 'Fallback'),
+    'Wallet service is temporarily unavailable.'
+  );
+  assert.equal(
+    parseWalletApiError(404, '<!DOCTYPE html><html><body>Not found</body></html>', 'Wallet missing'),
+    'Wallet missing'
+  );
+  assert.equal(parseWalletApiError(500, 'not-json', 'Request failed'), 'Request failed');
+});

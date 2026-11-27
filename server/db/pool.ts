@@ -4,8 +4,14 @@ import type { Logger } from '../logging/logger.js';
 
 const { Pool } = pg;
 
+export interface DatabaseClient {
+  query(text: string, values?: unknown[]): Promise<unknown>;
+  release(err?: Error | boolean): void;
+}
+
 export interface DatabasePool {
   query(text: string, values?: unknown[]): Promise<unknown>;
+  connect?(): Promise<DatabaseClient>;
   end(): Promise<void>;
   on?(event: 'error', listener: (err: Error) => void): unknown;
 }

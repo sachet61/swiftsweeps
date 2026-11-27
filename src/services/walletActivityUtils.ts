@@ -165,7 +165,7 @@ export function mapDbWalletRowToWallet(
   customerTopups: TopUpRequest[],
   options?: { authoritativeTopupsLoaded?: boolean }
 ): UserWallet {
-  const customerId = String(dbRow.customer_id);
+  const customerId = String(dbRow.customer_id ?? dbRow.customerId);
   const rawReferralBonus = dbRow.referral_bonus_balance ?? dbRow.referralBonusBalance;
   const referralBonusBalance =
     rawReferralBonus !== undefined && rawReferralBonus !== null
@@ -181,17 +181,23 @@ export function mapDbWalletRowToWallet(
   const baseWallet: UserWallet = {
     customerId,
     currency: dbRow.currency || existingWallet?.currency || 'USD',
-    availableBalance: toFiniteNumber(dbRow.balance, 0),
+    availableBalance: toFiniteNumber(dbRow.balance ?? dbRow.availableBalance, 0),
     referralBonusBalance,
     freePlayBalance,
-    reservedBalance: toFiniteNumber(dbRow.pending_withdrawal, 0),
-    pendingDepositBalance: toFiniteNumber(dbRow.pending_deposit, 0),
-    totalDeposited: toFiniteNumber(dbRow.total_deposited, existingWallet?.totalDeposited ?? 0),
-    totalWithdrawn: toFiniteNumber(dbRow.total_withdrawn, existingWallet?.totalWithdrawn ?? 0),
+    reservedBalance: toFiniteNumber(dbRow.pending_withdrawal ?? dbRow.reservedBalance, 0),
+    pendingDepositBalance: toFiniteNumber(dbRow.pending_deposit ?? dbRow.pendingDepositBalance, 0),
+    totalDeposited: toFiniteNumber(
+      dbRow.total_deposited ?? dbRow.totalDeposited,
+      existingWallet?.totalDeposited ?? 0
+    ),
+    totalWithdrawn: toFiniteNumber(
+      dbRow.total_withdrawn ?? dbRow.totalWithdrawn,
+      existingWallet?.totalWithdrawn ?? 0
+    ),
     lastTopUpAmount: options?.authoritativeTopupsLoaded ? 0 : toFiniteNumber(existingWallet?.lastTopUpAmount, 0),
     lastTopUpGame: options?.authoritativeTopupsLoaded ? undefined : existingWallet?.lastTopUpGame,
     lastTopUpAt: options?.authoritativeTopupsLoaded ? undefined : existingWallet?.lastTopUpAt,
-    lastUpdatedAt: dbRow.updated_at || new Date().toISOString(),
+    lastUpdatedAt: dbRow.updated_at || dbRow.lastUpdatedAt || new Date().toISOString(),
   };
 
   return reconcileWalletWithTopups(baseWallet, customerTopups, {
@@ -251,30 +257,84 @@ export function mapDbTransactionRowToWalletTransaction(
 ): WalletTransaction {
   const amount = toFiniteNumber(row.amount ?? existing?.amount, 0);
   const fee = toFiniteNumber(row.fee ?? existing?.fee, 0);
-  const netAmount = toFiniteNumber(row.net_amount ?? existing?.netAmount, amount);
-  const refId = row.reference_id ?? existing?.relatedRequestId ?? existing?.referenceId ?? undefined;
-  const gameName = row.game_name ?? existing?.targetGameName ?? existing?.gameName ?? undefined;
-  const createdAt = row.created_at || existing?.createdAt || new Date().toISOString();
+  const netAmount = toFiniteNumber(row.net_amount ?? row.netAmount ?? existing?.netAmount, amount);
+  const refId =
+    row.reference_id ??
+    row.referenceId ??
+    row.relatedRequestId ??
+    existing?.relatedRequestId ??
+    existing?.referenceId ??
+    undefined;
+  const gameName =
+    row.game_name ??
+    row.gameName ??
+    row.targetGameName ??
+    existing?.targetGameName ??
+    existing?.gameName ??
+    undefined;
+  const createdAt = row.created_at || row.createdAt || existing?.createdAt || new Date().toISOString();
 
   return {
     id: String(row.id),
-    customerId: String(row.customer_id ?? existing?.customerId ?? ''),
+    customerId: String(row.customer_id ?? row.customerId ?? existing?.customerId ?? ''),
     type: row.type || existing?.type || 'adjustment',
     amount,
     fee,
     netAmount,
-    currency: existing?.currency || 'USD',
-    balanceAfter: toFiniteNumber(row.balance_after ?? existing?.balanceAfter, 0),
+    currency: row.currency || existing?.currency || 'USD',
+    balanceAfter: toFiniteNumber(row.balance_after ?? row.balanceAfter ?? existing?.balanceAfter, 0),
     relatedRequestId: refId,
     referenceId: refId,
     targetGameName: gameName,
     gameName,
-    targetGameUsername: existing?.targetGameUsername,
+    targetGameUsername: row.targetGameUsername ?? existing?.targetGameUsername,
     description: String(row.description ?? existing?.description ?? ''),
-    idempotencyKey: existing?.idempotencyKey || String(row.id),
+    idempotencyKey: row.idempotencyKey || existing?.idempotencyKey || String(row.id),
     status: row.status || existing?.status || 'completed',
     createdAt,
   };
+}
+
+export function parseWalletApiError(
+  status: number,
+  rawText: string,
+  fallbackMessage: string
+): string {
+  const trimmed = rawText.trim();
+  if (
+    trimmed.startsWith('<!doctype') ||
+    trimmed.startsWith('<!DOCTYPE') ||
+    trimmed.startsWith('<html')
+  ) {
+    return status >= 500
+      ? 'Wallet service is temporarily unavailable.'
+      : fallbackMessage;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      error?: { message?: unknown } | unknown;
+      message?: unknown;
+    };
+    if (
+      parsed?.error &&
+      typeof parsed.error === 'object' &&
+      typeof (parsed.error as { message?: unknown }).message === 'string' &&
+      (parsed.error as { message: string }).message.trim()
+    ) {
+      return (parsed.error as { message: string }).message.trim();
+    }
+    if (typeof parsed?.message === 'string' && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+    if (typeof parsed?.error === 'string' && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+  } catch {
+    // Ignore non-JSON error body
+  }
+
+  return fallbackMessage;
 }
 
 export function mergeWalletTransactions(

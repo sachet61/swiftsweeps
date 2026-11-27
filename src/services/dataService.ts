@@ -116,6 +116,7 @@ import {
   getDefaultBonusPercentageForMethod,
   mapDbWalletRowToWallet,
   mergeWalletTransactions,
+  parseWalletApiError,
   reconcileWalletWithTopups,
 } from './walletActivityUtils';
 import { toProxyStorageUrl } from './storageUrlUtils';
@@ -466,12 +467,6 @@ class DataService {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'withdrawals' }, (p) => {
         this.queueRealtimeMutation('withdrawals', p.eventType, p.new, p.old);
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'wallets' }, (p) => {
-        this.queueRealtimeMutation('wallets', p.eventType, p.new, p.old);
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' }, (p) => {
-        this.queueRealtimeMutation('transactions', p.eventType, p.new, p.old);
-      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_accounts' }, (p) => {
         this.queueRealtimeMutation('game_accounts', p.eventType, p.new, p.old);
       })
@@ -540,8 +535,6 @@ class DataService {
     const conversationRows = filterRealtimeRowsForUser('conversations', rowsByTable['conversations'], activeUser);
     const topupRows = filterRealtimeRowsForUser('topups', rowsByTable['topups'], activeUser);
     const withdrawalRows = filterRealtimeRowsForUser('withdrawals', rowsByTable['withdrawals'], activeUser);
-    const transactionRows = filterRealtimeRowsForUser('transactions', rowsByTable['transactions'], activeUser);
-    const walletRows = filterRealtimeRowsForUser('wallets', rowsByTable['wallets'], activeUser);
     const gameAccountRows = filterRealtimeRowsForUser('game_accounts', rowsByTable['game_accounts'], activeUser);
     const userRows = filterRealtimeRowsForUser('users', rowsByTable['users'], activeUser);
     const cashoutRows = filterRealtimeRowsForUser('faked_cashouts', rowsByTable['faked_cashouts'], activeUser);
@@ -565,14 +558,6 @@ class DataService {
     if (withdrawalRows.length) {
       this.applyWithdrawalRows(withdrawalRows, false);
       tablesModified.add('withdrawals');
-    }
-    if (transactionRows.length) {
-      this.applyTransactionRows(transactionRows, false);
-      tablesModified.add('transactions');
-    }
-    if (walletRows.length) {
-      this.applyWalletRows(walletRows);
-      tablesModified.add('wallets');
     }
     if (gameAccountRows.length) {
       this.applyGameAccountRows(gameAccountRows, false);
@@ -630,7 +615,27 @@ class DataService {
 
   public async initialCompactLoad(): Promise<void> {
     if (!supabase || !isSupabaseConfigured()) {
-      await this.fetchGameCatalogFromServer({ silentEvent: true });
+      const user = this.getCurrentUser();
+      const isStaff = user?.role === 'admin' || user?.role === 'agent';
+      const selfHostedTasks: Promise<unknown>[] = [
+        this.fetchGameCatalogFromServer({ silentEvent: true }),
+      ];
+      if (user?.id) {
+        if (isStaff) {
+          selfHostedTasks.push(this.fetchWalletsFromServer({ limit: 50, silentEvent: true }));
+        } else {
+          selfHostedTasks.push(
+            this.fetchWalletFromServer({ customerId: user.id, silentEvent: true }),
+            this.fetchWalletTransactionsFromServer({
+              customerId: user.id,
+              limit: 50,
+              replaceAll: true,
+              silentEvent: true,
+            }),
+          );
+        }
+      }
+      await Promise.allSettled(selfHostedTasks);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'initial_compact_load' } }));
       }
@@ -656,14 +661,14 @@ class DataService {
 
       if (isAdmin) {
         // Staff/Admin session: bounded administrative queue queries (Users fetched on-demand on tab open)
-        const [appConfigRes, cashoutsRes, _catRes, topupsRes, withdrawalsRes, walletsRes, convsRes, gameAccsRes] =
+        const [appConfigRes, cashoutsRes, _catRes, topupsRes, withdrawalsRes, walletsApiRes, convsRes, gameAccsRes] =
           await Promise.all([
             appConfigPromise,
             cashoutsPromise,
             catPromise,
             supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(25),
             supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(25),
-            supabase.from('wallets').select('*').limit(50),
+            this.fetchWalletsFromServer({ limit: 50, silentEvent: true }),
             supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
             supabase.from('game_accounts').select('*').order('created_at', { ascending: false }).limit(100),
           ]);
@@ -672,7 +677,6 @@ class DataService {
         if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
         if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
-        if (walletsRes.data) this.applyWalletRows(walletsRes.data);
         if (!convsRes.error && Array.isArray(convsRes.data)) {
           this.applyConversationRows(convsRes.data, true);
           if (convsRes.data.length === 0) {
@@ -681,8 +685,8 @@ class DataService {
           }
         }
         if (gameAccsRes?.data) this.applyGameAccountRows(gameAccsRes.data, false);
-        if (topupsRes.error && withdrawalsRes.error && walletsRes.error) {
-          this.lastHydrationError = topupsRes.error.message || 'Unable to load staff operations data.';
+        if (topupsRes.error && withdrawalsRes.error && !walletsApiRes.success) {
+          this.lastHydrationError = topupsRes.error.message || walletsApiRes.error || 'Unable to load staff operations data.';
         }
         if (user?.role === 'admin') {
           await this.fetchAuditLogsFromServer({ limit: 100 });
@@ -696,11 +700,11 @@ class DataService {
           cashoutsRes,
           _catRes,
           profileRes,
-          walletRes,
+          walletApiRes,
           topupsRes,
           latestCompletedTopupRes,
           withdrawalsRes,
-          transactionsRes,
+          txApiRes,
           gameAccsRes,
           convRes,
         ] = await Promise.all([
@@ -708,7 +712,7 @@ class DataService {
           cashoutsPromise,
           catPromise,
           selfHostedAuthService.fetchProfile().catch(() => null),
-          supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
+          this.fetchWalletFromServer({ customerId: currentUserId, silentEvent: true }),
           supabase
             .from('topups')
             .select('*')
@@ -728,12 +732,12 @@ class DataService {
             .eq('customer_id', currentUserId)
             .order('created_at', { ascending: false })
             .limit(30),
-          supabase
-            .from('transactions')
-            .select('*')
-            .eq('customer_id', currentUserId)
-            .order('created_at', { ascending: false })
-            .limit(50),
+          this.fetchWalletTransactionsFromServer({
+            customerId: currentUserId,
+            limit: 50,
+            replaceAll: true,
+            silentEvent: true,
+          }),
           supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(30),
           supabase
             .from('conversations')
@@ -756,7 +760,7 @@ class DataService {
           }
         }
 
-        // Apply Order Invariant: apply topups, withdrawals, and transactions BEFORE wallet reconciliation
+        // Apply Order Invariant: apply topups and withdrawals, then reconcile customer wallet
         const combinedTopupRows: any[] = [];
         const seenTopupIds = new Set<string>();
         for (const row of [...(topupsRes.data || []), ...(latestCompletedTopupRes.data || [])]) {
@@ -776,17 +780,9 @@ class DataService {
           this.applyWithdrawalRows(withdrawalsRes.data, true);
         }
 
-        if (!transactionsRes.error && Array.isArray(transactionsRes.data)) {
-          this.applyTransactionRows(transactionsRes.data, true);
-        }
-
-        if (walletRes.data) {
-          this.applyWalletRows([walletRes.data]);
-        } else {
-          this.reconcileCustomerWallet(currentUserId);
-        }
-        if (walletRes.error && topupsRes.error && withdrawalsRes.error) {
-          this.lastHydrationError = walletRes.error.message || 'Unable to load wallet and transaction history.';
+        this.reconcileCustomerWallet(currentUserId);
+        if (!walletApiRes.success && !txApiRes.success && topupsRes.error && withdrawalsRes.error) {
+          this.lastHydrationError = walletApiRes.error || 'Unable to load wallet and transaction history.';
         }
 
         // Game Accounts hydration with authenticated server fallback
@@ -867,7 +863,16 @@ class DataService {
 
   public async syncDelta(): Promise<void> {
     if (!supabase || !isSupabaseConfigured()) {
-      await this.fetchGameCatalogFromServer();
+      const user = this.getCurrentUser();
+      const isStaff = user?.role === 'admin' || user?.role === 'agent';
+      const selfHostedTasks: Promise<unknown>[] = [this.fetchGameCatalogFromServer()];
+      if (!isStaff && user?.id) {
+        selfHostedTasks.push(
+          this.fetchWalletFromServer({ customerId: user.id }),
+          this.fetchWalletTransactionsFromServer({ customerId: user.id, limit: 25 }),
+        );
+      }
+      await Promise.allSettled(selfHostedTasks);
       return;
     }
     if (this.isSyncingDelta) return;
@@ -903,11 +908,11 @@ class DataService {
               .order('created_at', { ascending: false })
               .limit(50);
 
-        const [walletRes, topupsRes, withdrawalsRes, transactionsRes, gameAccsRes, catRes, msgsRes] = await Promise.all([
-          supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
+        const [walletApiRes, topupsRes, withdrawalsRes, txApiRes, gameAccsRes, catRes, msgsRes] = await Promise.all([
+          this.fetchWalletFromServer({ customerId: currentUserId, silentEvent: true }),
           supabase.from('topups').select('*').eq('customer_id', currentUserId).order('updated_at', { ascending: false }).limit(15),
           supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('updated_at', { ascending: false }).limit(15),
-          supabase.from('transactions').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(25),
+          this.fetchWalletTransactionsFromServer({ customerId: currentUserId, limit: 25, replaceAll: false, silentEvent: true }),
           supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(30),
           this.fetchGameCatalogFromServer({ silentEvent: true }),
           msgQuery,
@@ -925,16 +930,15 @@ class DataService {
           this.applyWithdrawalRows(withdrawalsRes.data, false);
           changed = true;
         }
-        if (!transactionsRes.error && transactionsRes.data && transactionsRes.data.length > 0) {
-          this.applyTransactionRows(transactionsRes.data, false);
+        if (txApiRes.success && txApiRes.transactions.length > 0) {
           changed = true;
         }
         if (!gameAccsRes.error && gameAccsRes.data && gameAccsRes.data.length > 0) {
           this.applyGameAccountRows(gameAccsRes.data, false);
           changed = true;
         }
-        if (walletRes.data) {
-          this.applyWalletRows([walletRes.data]);
+        if (walletApiRes.success) {
+          this.reconcileCustomerWallet(currentUserId);
           changed = true;
         } else if (topupsRes.data && topupsRes.data.length > 0) {
           this.reconcileCustomerWallet(currentUserId);
@@ -1517,10 +1521,35 @@ class DataService {
   // Bounded per-customer request hydration (keeps AdminChat customer sidebar & transaction cards fresh)
   public async syncCustomerRequests(customerId: string): Promise<void> {
     const cleanCustomerId = (customerId || '').trim();
-    if (!cleanCustomerId || !supabase || !isSupabaseConfigured()) return;
+    if (!cleanCustomerId) return;
 
     try {
-      const [topupsRes, latestCompletedTopupRes, withdrawalsRes, transactionsRes, accountsRes] = await Promise.all([
+      const walletPromise = this.fetchWalletFromServer({
+        customerId: cleanCustomerId,
+        silentEvent: true,
+      });
+      const txPromise = this.fetchWalletTransactionsFromServer({
+        customerId: cleanCustomerId,
+        limit: 30,
+        replaceAll: false,
+        silentEvent: true,
+      });
+
+      if (!supabase || !isSupabaseConfigured()) {
+        const [walletApiRes, txApiRes] = await Promise.all([walletPromise, txPromise]);
+        if (walletApiRes.success || (txApiRes.success && txApiRes.transactions.length > 0)) {
+          window.dispatchEvent(
+            new CustomEvent('aetherpay_state_changed', {
+              detail: { key: 'customer_requests_synced', customerId: cleanCustomerId },
+            })
+          );
+        }
+        return;
+      }
+
+      const [walletApiRes, txApiRes, topupsRes, latestCompletedTopupRes, withdrawalsRes, accountsRes] = await Promise.all([
+        walletPromise,
+        txPromise,
         supabase
           .from('topups')
           .select('*')
@@ -1541,19 +1570,13 @@ class DataService {
           .order('created_at', { ascending: false })
           .limit(20),
         supabase
-          .from('transactions')
-          .select('*')
-          .eq('customer_id', cleanCustomerId)
-          .order('created_at', { ascending: false })
-          .limit(30),
-        supabase
           .from('game_accounts')
           .select('*')
           .eq('customer_id', cleanCustomerId)
           .limit(25),
       ]);
 
-      let changed = false;
+      let changed = walletApiRes.success || (txApiRes.success && txApiRes.transactions.length > 0);
       const topupRows = [...(topupsRes.data || []), ...(latestCompletedTopupRes.data || [])];
       if (!topupsRes.error && topupRows.length > 0) {
         this.applyTopupRows(topupRows, false);
@@ -1561,10 +1584,6 @@ class DataService {
       }
       if (!withdrawalsRes.error && Array.isArray(withdrawalsRes.data) && withdrawalsRes.data.length > 0) {
         this.applyWithdrawalRows(withdrawalsRes.data, false);
-        changed = true;
-      }
-      if (!transactionsRes.error && Array.isArray(transactionsRes.data) && transactionsRes.data.length > 0) {
-        this.applyTransactionRows(transactionsRes.data, false);
         changed = true;
       }
       if (!accountsRes.error && Array.isArray(accountsRes.data) && accountsRes.data.length > 0) {
@@ -2268,43 +2287,8 @@ class DataService {
         if (!error) counts['users'] = rows.length;
       }
 
-      // 2. Wallets
-      const wallets = Object.values(this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS));
-      if (wallets.length > 0) {
-        const rows = wallets.map((w) => ({
-          customer_id: w.customerId,
-          balance: w.availableBalance || 0,
-          referral_bonus_balance: w.referralBonusBalance || 0,
-          pending_withdrawal: w.reservedBalance || 0,
-          pending_deposit: w.pendingDepositBalance || 0,
-          total_deposited:
-            w.totalDeposited !== undefined
-              ? w.totalDeposited
-              : computeCumulativeCompletedDeposits(this.getTopUpRequests(w.customerId), w.customerId),
-          total_withdrawn: w.totalWithdrawn || 0,
-          currency: w.currency || 'USD',
-        }));
-        const { error } = await supabase.from('wallets').upsert(rows);
-        if (!error) counts['wallets'] = rows.length;
-      }
+      // 2 & 3. Wallets & Transactions migrated to self-hosted /api/wallet and /api/wallet/transactions
 
-      // 3. Transactions
-      const txs = this.load<WalletTransaction[]>(STORAGE_KEYS.TRANSACTIONS, INITIAL_TRANSACTIONS);
-      if (txs.length > 0) {
-        const rows = txs.map((t) => ({
-          id: t.id,
-          customer_id: t.customerId,
-          amount: t.amount,
-          type: t.type,
-          status: t.status,
-          description: t.description,
-          reference_id: t.relatedRequestId || null,
-          game_name: t.targetGameName || null,
-          created_at: t.createdAt,
-        }));
-        const { error } = await supabase.from('transactions').upsert(rows);
-        if (!error) counts['transactions'] = rows.length;
-      }
 
       // 4. Topups
       const topups = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
@@ -3041,20 +3025,15 @@ class DataService {
 
             if (!dbErr && dbUsers && dbUsers.length > 0) {
               const userIds = dbUsers.map((u: any) => u.id);
-              const { data: dbWallets } = await supabase.from('wallets').select('*').in('customer_id', userIds);
-              const { data: dbGameAccs } = await supabase.from('game_accounts').select('*').in('customer_id', userIds);
+              const [walletsApiRes, gameAccsQuery] = await Promise.all([
+                this.fetchWalletsFromServer({ customerIds: userIds, limit: 100, silentEvent: true }),
+                supabase.from('game_accounts').select('*').in('customer_id', userIds),
+              ]);
+              const dbGameAccs = gameAccsQuery.data;
 
               const walletsMap: Record<string, any> = {};
-              (dbWallets || []).forEach((w: any) => {
-                walletsMap[w.customer_id] = {
-                  customerId: w.customer_id,
-                  currency: w.currency || 'USD',
-                  availableBalance: Number(w.balance ?? w.available_balance ?? 0),
-                  referralBonusBalance: Number(w.referral_bonus_balance ?? 0),
-                  reservedBalance: Number(w.pending_withdrawal ?? w.reserved_balance ?? 0),
-                  pendingDepositBalance: Number(w.pending_deposit ?? w.pending_deposit_balance ?? 0),
-                  lastUpdatedAt: w.updated_at || w.last_updated_at || new Date().toISOString(),
-                };
+              (walletsApiRes.wallets || []).forEach((w) => {
+                walletsMap[w.customerId] = w;
               });
 
               const gameAccountsMap: Record<string, any[]> = {};
@@ -3707,6 +3686,309 @@ class DataService {
       return txs.filter((t) => t.customerId === customerId).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     }
     return txs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  public async fetchWalletFromServer(options?: {
+    customerId?: string;
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    wallet?: UserWallet;
+    error?: string;
+  }> {
+    try {
+      const targetCustomerId = options?.customerId?.trim();
+      const url = targetCustomerId
+        ? `/api/wallet?customerId=${encodeURIComponent(targetCustomerId)}`
+        : '/api/wallet';
+
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          error: parseWalletApiError(res.status, rawText, 'Failed to load wallet from server.'),
+        };
+      }
+
+      let payload: { wallet?: Record<string, unknown> };
+      try {
+        payload = JSON.parse(rawText) as { wallet?: Record<string, unknown> };
+      } catch {
+        return {
+          success: false,
+          error: 'Received an unexpected response from wallet service.',
+        };
+      }
+
+      if (!payload?.wallet || !(payload.wallet.customerId ?? payload.wallet.customer_id)) {
+        return {
+          success: false,
+          error: 'Invalid wallet response payload.',
+        };
+      }
+
+      this.applyWalletRows([payload.wallet]);
+      const resolvedId = String(payload.wallet.customerId ?? payload.wallet.customer_id);
+      const updatedWallet = this.getWallet(resolvedId);
+
+      if (!options?.silentEvent && typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: STORAGE_KEYS.WALLETS, customerId: resolvedId },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        wallet: updatedWallet,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Unable to load wallet from server.',
+      };
+    }
+  }
+
+  public async fetchWalletsFromServer(options?: {
+    customerIds?: string[];
+    limit?: number;
+    offset?: number;
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    wallets: UserWallet[];
+    total: number;
+    hasMore: boolean;
+    error?: string;
+  }> {
+    try {
+      const params = new URLSearchParams();
+      if (options?.limit !== undefined) {
+        params.set('limit', String(options.limit));
+      }
+      if (options?.offset !== undefined) {
+        params.set('offset', String(options.offset));
+      }
+      if (options?.customerIds && options.customerIds.length > 0) {
+        params.set('customerIds', options.customerIds.slice(0, 100).join(','));
+      }
+      const query = params.toString();
+      const url = query ? `/api/wallets?${query}` : '/api/wallets';
+
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          wallets: [],
+          total: 0,
+          hasMore: false,
+          error: parseWalletApiError(res.status, rawText, 'Failed to load wallets from server.'),
+        };
+      }
+
+      let payload: { wallets?: unknown[]; total?: number; hasMore?: boolean };
+      try {
+        payload = JSON.parse(rawText) as {
+          wallets?: unknown[];
+          total?: number;
+          hasMore?: boolean;
+        };
+      } catch {
+        return {
+          success: false,
+          wallets: [],
+          total: 0,
+          hasMore: false,
+          error: 'Received an unexpected response from wallets service.',
+        };
+      }
+
+      const rawWallets = Array.isArray(payload?.wallets) ? payload.wallets : [];
+      if (rawWallets.length > 0) {
+        this.applyWalletRows(rawWallets);
+      }
+
+      const walletMap =
+        (this.cache[STORAGE_KEYS.WALLETS] as Record<string, UserWallet>) || {};
+      const resolvedWallets = rawWallets
+        .map((r: any) => String(r?.customerId ?? r?.customer_id ?? ''))
+        .filter(Boolean)
+        .map((id) => walletMap[id])
+        .filter((w): w is UserWallet => Boolean(w));
+
+      if (!options?.silentEvent && typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: STORAGE_KEYS.WALLETS },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        wallets: resolvedWallets,
+        total: Number(payload?.total ?? resolvedWallets.length),
+        hasMore: Boolean(payload?.hasMore),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        wallets: [],
+        total: 0,
+        hasMore: false,
+        error: err?.message || 'Unable to load wallets from server.',
+      };
+    }
+  }
+
+  public async fetchWalletTransactionsFromServer(options?: {
+    customerId?: string;
+    type?: string;
+    status?: string;
+    q?: string;
+    sortBy?: 'createdAt' | 'amount';
+    sortOrder?: 'asc' | 'desc';
+    limit?: number;
+    offset?: number;
+    replaceAll?: boolean;
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    transactions: WalletTransaction[];
+    total: number;
+    hasMore: boolean;
+    error?: string;
+  }> {
+    try {
+      const params = new URLSearchParams();
+      if (options?.customerId) {
+        params.set('customerId', options.customerId);
+      }
+      if (options?.type) {
+        params.set('type', options.type);
+      }
+      if (options?.status) {
+        params.set('status', options.status);
+      }
+      if (options?.q) {
+        params.set('q', options.q);
+      }
+      if (options?.sortBy) {
+        params.set('sortBy', options.sortBy);
+      }
+      if (options?.sortOrder) {
+        params.set('sortOrder', options.sortOrder);
+      }
+      if (options?.limit !== undefined) {
+        params.set('limit', String(options.limit));
+      }
+      if (options?.offset !== undefined) {
+        params.set('offset', String(options.offset));
+      }
+
+      const query = params.toString();
+      const url = query ? `/api/wallet/transactions?${query}` : '/api/wallet/transactions';
+
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          transactions: this.getTransactions(options?.customerId),
+          total: 0,
+          hasMore: false,
+          error: parseWalletApiError(
+            res.status,
+            rawText,
+            'Failed to load wallet transactions from server.',
+          ),
+        };
+      }
+
+      let payload: {
+        transactions?: unknown[];
+        total?: number;
+        hasMore?: boolean;
+      };
+      try {
+        payload = JSON.parse(rawText) as {
+          transactions?: unknown[];
+          total?: number;
+          hasMore?: boolean;
+        };
+      } catch {
+        return {
+          success: false,
+          transactions: this.getTransactions(options?.customerId),
+          total: 0,
+          hasMore: false,
+          error: 'Received an unexpected response from wallet transactions service.',
+        };
+      }
+
+      if (!Array.isArray(payload?.transactions)) {
+        return {
+          success: false,
+          transactions: this.getTransactions(options?.customerId),
+          total: 0,
+          hasMore: false,
+          error: 'Invalid wallet transactions response payload.',
+        };
+      }
+
+      this.applyTransactionRows(payload.transactions, Boolean(options?.replaceAll));
+
+      if (!options?.silentEvent && typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: STORAGE_KEYS.TRANSACTIONS, customerId: options?.customerId },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        transactions: this.getTransactions(options?.customerId),
+        total: Number(payload?.total ?? payload.transactions.length),
+        hasMore: Boolean(payload?.hasMore),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        transactions: this.getTransactions(options?.customerId),
+        total: 0,
+        hasMore: false,
+        error: err?.message || 'Unable to load wallet transactions from server.',
+      };
+    }
   }
 
   // Top-Up Workflow

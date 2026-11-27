@@ -44,10 +44,33 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedItem, setSelectedItem] = useState<UnifiedWalletActivityItem | null>(null);
   const [visibleCount, setVisibleCount] = useState(25);
+  const [serverHasMoreTx, setServerHasMoreTx] = useState(false);
+  const [nextServerOffset, setNextServerOffset] = useState(100);
+  const [isLoadingMoreServer, setIsLoadingMoreServer] = useState(false);
 
   useEffect(() => {
     setVisibleCount(25);
   }, [filterType, searchTerm]);
+
+  useEffect(() => {
+    let active = true;
+    void dataService.fetchWalletFromServer({ customerId: currentUser.id });
+    void dataService
+      .fetchWalletTransactionsFromServer({
+        customerId: currentUser.id,
+        limit: 100,
+        offset: 0,
+        replaceAll: true,
+      })
+      .then((res) => {
+        if (!active || !res.success) return;
+        setServerHasMoreTx(res.hasMore);
+        setNextServerOffset(100);
+      });
+    return () => {
+      active = false;
+    };
+  }, [currentUser.id]);
 
   useEffect(() => {
     if (!selectedItem) return;
@@ -57,6 +80,28 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [selectedItem]);
+
+  const handleLoadMoreActivity = async () => {
+    const nextVisible = visibleCount + 25;
+    setVisibleCount(nextVisible);
+    if (serverHasMoreTx && !isLoadingMoreServer && nextVisible >= filteredItems.length) {
+      setIsLoadingMoreServer(true);
+      try {
+        const res = await dataService.fetchWalletTransactionsFromServer({
+          customerId: currentUser.id,
+          limit: 100,
+          offset: nextServerOffset,
+          replaceAll: false,
+        });
+        if (res.success) {
+          setServerHasMoreTx(res.hasMore);
+          setNextServerOffset((prev) => prev + 100);
+        }
+      } finally {
+        setIsLoadingMoreServer(false);
+      }
+    }
+  };
 
   const isHydrating = dataService.getIsHydrating();
   const topups = dataService.getTopUpRequests(currentUser.id);
@@ -542,13 +587,15 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
           </>
         )}
 
-        {filteredItems.length > visibleCount && (
+        {(filteredItems.length > visibleCount || serverHasMoreTx) && (
           <div className="p-3 border-t border-slate-800 bg-slate-950/60 flex justify-center">
             <button
               type="button"
-              onClick={() => setVisibleCount((prev) => prev + 25)}
-              className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition-all flex items-center gap-2 shadow-sm"
+              disabled={isLoadingMoreServer}
+              onClick={() => void handleLoadMoreActivity()}
+              className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-60 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition-all flex items-center gap-2 shadow-sm"
             >
+              {isLoadingMoreServer && <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />}
               <span>Load More Activity (+25)</span>
             </button>
           </div>

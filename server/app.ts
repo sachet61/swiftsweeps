@@ -29,6 +29,8 @@ import { createAuthProfileRouter } from './routes/authProfile.js';
 import { createGameCatalogRouter } from './routes/gameCatalog.js';
 import { createHealthRouter } from './routes/health.js';
 import { createProfileRouter } from './routes/profile.js';
+import { createWalletRouter } from './routes/wallet.js';
+import { WalletRepo } from './wallet/walletRepo.js';
 
 export interface ApiAppDependencies {
   config: ServerConfig;
@@ -62,6 +64,7 @@ export function createApiApp({
 
   const userRepo = new UserDirectoryRepo(pool);
   const gameCatalogRepo = new GameCatalogRepo(pool);
+  const walletRepo = new WalletRepo(pool);
   const emailDelivery =
     emailDeliveryOverride ?? createEmailDeliveryAdapter(config, logger);
   const authRuntime = createAuthInstance({
@@ -123,6 +126,14 @@ export function createApiApp({
       userRepo,
       requireAuth,
       optionalAuth,
+    }),
+  );
+  app.use(
+    '/api',
+    createWalletRouter({
+      walletRepo,
+      userRepo,
+      requireAuth,
     }),
   );
 
