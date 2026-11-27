@@ -209,32 +209,18 @@ export const CustomerRules: React.FC<CustomerRulesProps> = ({ onNavigateTab }) =
         )}
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col justify-between gap-4">
-          <div>
-            <h3 className="font-bold text-white text-sm">Privacy Policy Statement</h3>
-            <p className="text-xs text-slate-400 mt-1">Review data collection, usage, and third-party security disclosures.</p>
-          </div>
-          <button
-            onClick={() => onNavigateTab('privacy')}
-            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs transition-colors self-start"
-          >
-            View Privacy Policy URL
-          </button>
+      <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h3 className="font-bold text-white text-sm">Privacy Policy</h3>
+          <p className="text-xs text-slate-400 mt-1">Review how SwiftSweeps collects, uses, and protects your account, wallet, and support data.</p>
         </div>
-
-        <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col justify-between gap-4">
-          <div>
-            <h3 className="font-bold text-white text-sm">User Data Deletion</h3>
-            <p className="text-xs text-slate-400 mt-1">Request erasure of account data and Facebook login tokens.</p>
-          </div>
-          <button
-            onClick={() => onNavigateTab('data_deletion')}
-            className="px-4 py-2 rounded-xl bg-rose-950/60 border border-rose-800/60 hover:bg-rose-900/60 text-rose-200 font-semibold text-xs transition-colors self-start"
-          >
-            Data Deletion Instructions
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => onNavigateTab('privacy')}
+          className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs whitespace-nowrap transition-colors self-start sm:self-auto"
+        >
+          View Privacy Policy
+        </button>
       </div>
 
       <div className="p-5 rounded-2xl bg-indigo-950/40 border border-indigo-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs">

@@ -67,7 +67,6 @@ export function isAgentAllowedReadOnlyTab(
   return (
     tab === AGENT_OFFICIAL_PARTNERS_ROUTE ||
     tab === AGENT_RULES_ROUTE ||
-    tab === 'privacy' ||
-    tab === 'data_deletion'
+    tab === 'privacy'
   );
 }

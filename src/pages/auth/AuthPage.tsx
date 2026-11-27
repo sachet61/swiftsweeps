@@ -101,7 +101,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [showSignupPassword, setShowSignupPassword] = useState(false);
   const [showSignupConfirmPassword, setShowSignupConfirmPassword] = useState(false);
-  const [activePolicyModal, setActivePolicyModal] = useState<'privacy' | 'terms' | 'deposit' | 'deletion' | null>(null);
+  const [activePolicyModal, setActivePolicyModal] = useState<'privacy' | 'terms' | 'deposit' | null>(null);
 
   const signupValidation = validateRegistrationForm({
     displayName: signupName,
@@ -916,8 +916,6 @@ export const AuthPage: React.FC<AuthPageProps> = ({
             <button type="button" onClick={() => setActivePolicyModal('terms')} className="hover:text-amber-400 transition underline underline-offset-2">Terms & Conditions</button>
             <span>·</span>
             <button type="button" onClick={() => setActivePolicyModal('deposit')} className="hover:text-amber-400 transition underline underline-offset-2">Deposit & Bonus Policy</button>
-            <span>·</span>
-            <button type="button" onClick={() => setActivePolicyModal('deletion')} className="hover:text-amber-400 transition underline underline-offset-2">Data Deletion</button>
           </div>
         </div>
       </footer>
@@ -933,12 +931,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   {activePolicyModal === 'privacy' && 'Privacy Policy'}
                   {activePolicyModal === 'terms' && 'Terms of Service & Fair Gaming'}
                   {activePolicyModal === 'deposit' && 'Deposit & Bonus Policy'}
-                  {activePolicyModal === 'deletion' && 'User Data Deletion Instructions'}
                 </h3>
               </div>
               <button
                 type="button"
                 onClick={() => setActivePolicyModal(null)}
+                aria-label="Close policy dialog"
                 className="p-1.5 rounded-lg bg-slate-900 text-slate-400 hover:text-white"
               >
                 <X className="w-5 h-5" />
@@ -948,10 +946,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
             <div className="text-xs sm:text-sm text-slate-300 space-y-3 leading-relaxed">
               {activePolicyModal === 'privacy' && (
                 <div className="space-y-3">
-                  <p>Welcome to SwiftSweeps Privacy Policy. We respect your privacy and protect your personal data when you visit our gaming platform.</p>
-                  <p><strong>Information Collection:</strong> We collect identity data (username/gamer tag), contact data (email/phone), and financial ledger/transaction records.</p>
-                  <p><strong>Use of Data:</strong> Your data is used exclusively to administer your gaming wallet, process deposits and withdrawals, and provide 24/7 customer support.</p>
-                  <p><strong>Security:</strong> All sensitive data is transmitted securely via SSL encryption and stored in secure databases with strict access controls.</p>
+                  <p>SwiftSweeps collects only the data required to operate your account, gaming wallet, promotional rewards, and 24/7 customer support.</p>
+                  <p><strong>Information Collected:</strong> Email address, display name, optional phone number, avatar uploads, wallet ledger records, deposit payment proofs, withdrawal payout details, game account requests, live chat attachments, optional push notification subscriptions, and IP/device metadata for security and referral fraud checks.</p>
+                  <p><strong>How We Protect &amp; Use Data:</strong> Sessions are secured via server-issued HTTP-only cookies and role-based access controls. We never sell personal data to third parties. For privacy inquiries, reach our team anytime via the 24/7 live support chat after signing in.</p>
                 </div>
               )}
               {activePolicyModal === 'terms' && (
@@ -965,12 +962,6 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <p><strong>Verified Deposits:</strong> Deposits must originate from accounts registered in the customer's legal name. Third-party deposits are strictly prohibited.</p>
                   <p><strong>Payment Method Bonuses:</strong> Bonuses are dynamically linked to the selected payment method (e.g. Verified CashApp 30%, Crypto 30%, Payment via Link 20%, Chime Direct 15%).</p>
                   <p><strong>Wagering:</strong> Deposit bonuses require 1x wagering in verified gaming matches prior to cashout qualification.</p>
-                </div>
-              )}
-              {activePolicyModal === 'deletion' && (
-                <div className="space-y-3">
-                  <p>In accordance with platform and GDPR data privacy regulations, you have the right to request complete deletion of your account and personal data.</p>
-                  <p>To request data erasure, contact our compliance desk at privacy@swiftsweeps.com or submit a ticket through our active 24/7 support chat.</p>
                 </div>
               )}
             </div>

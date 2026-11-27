@@ -164,11 +164,7 @@ export function resolvePopStateTransition(params: {
     return { kind: 'ignore_synthetic_overlay_back' };
   }
 
-  if (
-    currentHash === '#privacy' ||
-    currentHash === '#data-deletion' ||
-    currentHash === '#datadeletion'
-  ) {
+  if (currentHash === '#privacy') {
     return { kind: 'legal_hash' };
   }
 

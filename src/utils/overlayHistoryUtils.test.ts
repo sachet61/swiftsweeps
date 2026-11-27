@@ -211,5 +211,16 @@ test('resolvePopStateTransition handles real tab back navigation and legal hashe
     isSyntheticOverlayBack: false,
   });
   assert.deepEqual(legal, { kind: 'legal_hash' });
+
+  const removedDeletionHash = resolvePopStateTransition({
+    eventState: null,
+    currentHash: '#data-deletion',
+    currentTab: 'dashboard',
+    defaultTab: 'dashboard',
+    openOverlays: NO_OVERLAYS,
+    isSyntheticOverlayBack: false,
+  });
+  assert.notEqual(removedDeletionHash.kind, 'legal_hash');
+
   assert.deepEqual(buildHistoryState('dashboard'), { tab: 'dashboard' });
 });

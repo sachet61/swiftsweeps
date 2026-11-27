@@ -111,7 +111,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const fromHash = window.location.hash.replace(/^#\/?/, '').trim();
-      if (fromHash && fromHash !== 'privacy' && fromHash !== 'data-deletion' && fromHash !== 'datadeletion') {
+      if (fromHash && fromHash !== 'privacy') {
         return fromHash;
       }
     }
@@ -272,8 +272,6 @@ export default function App() {
       if (
         clean &&
         clean !== 'privacy' &&
-        clean !== 'data-deletion' &&
-        clean !== 'datadeletion' &&
         clean !== activeTab
       ) {
         resetAllOverlaysLocally();
@@ -479,10 +477,7 @@ export default function App() {
   }, [currentUser?.id, handleOpenWheelModal]);
 
   if (currentHash === '#privacy') {
-    return <LegalContent initialTab="privacy" onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
-  }
-  if (currentHash === '#data-deletion' || currentHash === '#datadeletion') {
-    return <LegalContent initialTab="deletion" onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
+    return <LegalContent onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
   }
 
   const isCustomer = currentUser?.role === 'customer';
@@ -931,11 +926,7 @@ export default function App() {
               )}
 
               {activeTab === 'privacy' && (
-                <LegalContent initialTab="privacy" onBack={handleGoBack} />
-              )}
-
-              {activeTab === 'data_deletion' && (
-                <LegalContent initialTab="deletion" onBack={handleGoBack} />
+                <LegalContent onBack={handleGoBack} />
               )}
 
               {activeTab === 'profile' && (
@@ -1044,11 +1035,7 @@ export default function App() {
               )}
 
               {isAgent && activeTab === 'privacy' && (
-                <LegalContent initialTab="privacy" onBack={handleGoBack} />
-              )}
-
-              {isAgent && activeTab === 'data_deletion' && (
-                <LegalContent initialTab="deletion" onBack={handleGoBack} />
+                <LegalContent onBack={handleGoBack} />
               )}
             </>
           )}

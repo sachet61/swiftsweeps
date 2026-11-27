@@ -56,9 +56,11 @@ test('getAgentFirstName returns first word or safe Support fallback', () => {
   assert.equal(getAgentFirstName(null), 'Support');
 });
 
-test('isAgentAllowedReadOnlyTab allows partners and rules for agents only and blocks admin-only tabs', () => {
+test('isAgentAllowedReadOnlyTab allows partners, rules, and privacy for agents only and blocks data_deletion and admin-only tabs', () => {
   assert.equal(isAgentAllowedReadOnlyTab('agent', 'official_partners'), true);
   assert.equal(isAgentAllowedReadOnlyTab('agent', 'rules'), true);
+  assert.equal(isAgentAllowedReadOnlyTab('agent', 'privacy'), true);
+  assert.equal(isAgentAllowedReadOnlyTab('agent', 'data_deletion'), false);
   assert.equal(isAgentAllowedReadOnlyTab('agent', 'ops_config'), false);
   assert.equal(isAgentAllowedReadOnlyTab('agent', 'ops_game_catalog'), false);
   assert.equal(isAgentAllowedReadOnlyTab('agent', 'ops_audit'), false);
