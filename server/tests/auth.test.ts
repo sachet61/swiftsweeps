@@ -1436,4 +1436,128 @@ test('SMTP email adapter integrates with Better Auth OTP signup flow and fails s
   assert.ok(!allLogs.includes(smtpSecretPass));
 });
 
+test('Email delivery adapter builds beautified SwiftSweeps HTML templates with OTP in subject and safe escaping', async () => {
+  const sentMessages: Array<{
+    from: { name: string; address: string };
+    to: string;
+    subject: string;
+    text: string;
+    html: string;
+  }> = [];
+
+  const logger = createSilentLogger([], []);
+  const smtpConfig = createTestConfig({
+    appOrigin: 'https://swiftsweeps.example.com',
+    emailProvider: 'smtp',
+    smtpHost: 'smtp-relay.brevo.com',
+    smtpPort: 587,
+    smtpSecure: false,
+    smtpUser: 'mailer@smtp-brevo.com',
+    smtpPass: 'secret-pass',
+    emailFromAddress: 'no-reply@swiftsweeps.example.com',
+    emailFromName: 'SwiftSweeps',
+  });
+
+  const adapter = createEmailDeliveryAdapter(smtpConfig, logger, {
+    smtpTransporter: {
+      async sendMail(mailOptions) {
+        sentMessages.push(mailOptions);
+      },
+    },
+  });
+
+  const otpCases = [
+    {
+      purpose: 'email-verification' as const,
+      otp: '482913',
+      expectedSubject: '482913 is your SwiftSweeps verification code',
+      expectedHeading: 'Welcome to SwiftSweeps!',
+    },
+    {
+      purpose: 'forget-password' as const,
+      otp: '917304',
+      expectedSubject: '917304 is your SwiftSweeps password reset code',
+      expectedHeading: 'Reset Your Password',
+    },
+    {
+      purpose: 'change-email' as const,
+      otp: '605128',
+      expectedSubject: '605128 is your SwiftSweeps email change code',
+      expectedHeading: 'Confirm Your Email Change',
+    },
+    {
+      purpose: 'sign-in' as const,
+      otp: '334890',
+      expectedSubject: '334890 is your SwiftSweeps sign-in code',
+      expectedHeading: 'Sign-In Security Code',
+    },
+  ];
+
+  for (const item of otpCases) {
+    await adapter.sendOtpEmail({
+      to: 'player@example.com',
+      otp: item.otp,
+      purpose: item.purpose,
+    });
+    const msg = sentMessages.at(-1);
+    assert.ok(msg);
+    assert.equal(msg.subject, item.expectedSubject);
+    assert.ok(msg.html.includes('SWIFT <span style="color:#F59E0B;">SWEEPS</span>'));
+    assert.ok(msg.html.includes('background-color:#131C2E'));
+    assert.ok(msg.html.includes('color:#F59E0B'));
+    assert.ok(msg.html.includes(item.expectedHeading));
+    assert.ok(msg.html.includes(`>${item.otp}<`));
+    assert.ok(msg.html.includes('5 minutes'));
+    assert.ok(msg.text.includes(item.otp));
+    assert.ok(msg.text.includes('5 minutes'));
+  }
+
+  await adapter.sendVerificationEmail({
+    to: 'player@example.com',
+    recipientName: 'Alex <script>alert(1)</script>\r\nBcc:evil@example.com',
+    url: 'https://swiftsweeps.example.com/verify?token=tok123',
+  });
+  const verifyMsg = sentMessages.at(-1);
+  assert.ok(verifyMsg);
+  assert.equal(verifyMsg.subject, 'Verify your SwiftSweeps email address');
+  assert.ok(verifyMsg.html.includes('Welcome to SwiftSweeps!'));
+  assert.ok(verifyMsg.html.includes('Verify Email Address'));
+  assert.ok(verifyMsg.html.includes('https://swiftsweeps.example.com/verify?token=tok123'));
+  assert.ok(verifyMsg.html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+  assert.ok(!verifyMsg.html.includes('<script>'));
+  assert.ok(verifyMsg.html.includes('5 minutes'));
+
+  await adapter.sendPasswordResetEmail({
+    to: 'player@example.com',
+    recipientName: 'Alex',
+    url: 'https://swiftsweeps.example.com/reset?token=rst456',
+  });
+  const resetLinkMsg = sentMessages.at(-1);
+  assert.ok(resetLinkMsg);
+  assert.equal(resetLinkMsg.subject, 'Reset your SwiftSweeps password');
+  assert.ok(resetLinkMsg.html.includes('Reset Your Password'));
+  assert.ok(resetLinkMsg.html.includes('https://swiftsweeps.example.com/reset?token=rst456'));
+  assert.ok(resetLinkMsg.html.includes('1 hour'));
+
+  await adapter.sendOtpEmail({
+    to: 'player@example.com',
+    otp: '123456\r\nBcc: attacker@evil.test',
+    purpose: 'forget-password',
+  });
+  const headerInjectionMsg = sentMessages.at(-1);
+  assert.ok(headerInjectionMsg);
+  assert.ok(!/[\r\n]/.test(headerInjectionMsg.subject));
+
+  await adapter.sendPasswordResetEmail({
+    to: 'player@example.com',
+    recipientName: 'Alex',
+    url: 'javascript:alert(1)',
+  });
+  const unsafeUrlMsg = sentMessages.at(-1);
+  assert.ok(unsafeUrlMsg);
+  assert.ok(!unsafeUrlMsg.html.includes('javascript:alert(1)'));
+  assert.ok(unsafeUrlMsg.html.includes('href="#"'));
+});
+
+
 
