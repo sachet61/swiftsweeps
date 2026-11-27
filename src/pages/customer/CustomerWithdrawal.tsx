@@ -97,6 +97,20 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
   const selectedCatalogGame = gameCatalog.find((g) => g.id === selectedGameId);
   const selectedGameTitle = selectedGameAccount?.gameName || selectedCatalogGame?.title || 'Selected Game';
 
+  const [, setHistoryVersion] = useState(0);
+
+  useEffect(() => {
+    void dataService.fetchWithdrawalsFromServer({
+      customerId: currentUser.id,
+      limit: 25,
+    });
+    const onStateChange = () => setHistoryVersion((v) => v + 1);
+    window.addEventListener('aetherpay_state_changed', onStateChange);
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', onStateChange);
+    };
+  }, [currentUser.id]);
+
   const parsedAmount = parseFloat(amount) || 0;
   const withdrawalHistory = dataService.getWithdrawalRequests(currentUser.id);
   const showLiveFeed = Boolean(dataService.getAppConfig().cashoutFeed?.enabled);
@@ -109,8 +123,9 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
     }, 50);
   };
 
-  const handleWithdrawalSubmit = (e: React.FormEvent) => {
+  const handleWithdrawalSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setErrorMessage(null);
     setSuccessMessage(null);
 
@@ -146,8 +161,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
     }
 
     setIsSubmitting(true);
-
-    setTimeout(() => {
+    try {
       const payoutDetails = {
         methodType: lastPaymentMethod,
         cashtag: lastPaymentMethod === 'cashapp' ? payoutAccountHandle : undefined,
@@ -157,7 +171,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
         collectedBySupport: true,
       };
 
-      const res = dataService.submitWithdrawal({
+      const res = await dataService.submitWithdrawalAsync({
         customerId: currentUser.id,
         customerName: currentUser.displayName,
         amount: parsedAmount,
@@ -170,21 +184,21 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
         payoutDetails,
       });
 
-      setIsSubmitting(false);
       if (res.success && res.request) {
         setSuccessMessage(
           `Cashout #${res.request.id.slice(-6)} submitted for $${parsedAmount.toFixed(2)} (${selectedGameTitle}). Opening Live Chat...`
         );
         setSelectedTrackingReq(res.request);
 
-        // Redirect to support chat after brief delay so player can chat with support
         setTimeout(() => {
           onNavigateTab('chat');
         }, 1500);
       } else {
         setErrorMessage(res.message);
       }
-    }, 600);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleCancelSubmitted = async (reqId: string) => {

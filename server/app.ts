@@ -8,6 +8,7 @@ import {
 } from './auth/emailDelivery.js';
 import { UserDirectoryRepo } from './auth/userDirectoryRepo.js';
 import { GameCatalogRepo } from './catalog/gameCatalogRepo.js';
+import { DepositRepo } from './deposits/depositRepo.js';
 import type { ServerConfig } from './config/env.js';
 import type { DatabasePool } from './db/pool.js';
 import type { Logger } from './logging/logger.js';
@@ -26,11 +27,14 @@ import {
 } from './middleware/security.js';
 import { createAdminAuthRouter } from './routes/adminAuth.js';
 import { createAuthProfileRouter } from './routes/authProfile.js';
+import { createDepositRouter } from './routes/deposits.js';
 import { createGameCatalogRouter } from './routes/gameCatalog.js';
 import { createHealthRouter } from './routes/health.js';
 import { createProfileRouter } from './routes/profile.js';
 import { createWalletRouter } from './routes/wallet.js';
+import { createWithdrawalRouter } from './routes/withdrawals.js';
 import { WalletRepo } from './wallet/walletRepo.js';
+import { WithdrawalRepo } from './withdrawals/withdrawalRepo.js';
 
 export interface ApiAppDependencies {
   config: ServerConfig;
@@ -64,7 +68,9 @@ export function createApiApp({
 
   const userRepo = new UserDirectoryRepo(pool);
   const gameCatalogRepo = new GameCatalogRepo(pool);
+  const depositRepo = new DepositRepo(pool);
   const walletRepo = new WalletRepo(pool);
+  const withdrawalRepo = new WithdrawalRepo(pool);
   const emailDelivery =
     emailDeliveryOverride ?? createEmailDeliveryAdapter(config, logger);
   const authRuntime = createAuthInstance({
@@ -132,6 +138,22 @@ export function createApiApp({
     '/api',
     createWalletRouter({
       walletRepo,
+      userRepo,
+      requireAuth,
+    }),
+  );
+  app.use(
+    '/api',
+    createWithdrawalRouter({
+      withdrawalRepo,
+      userRepo,
+      requireAuth,
+    }),
+  );
+  app.use(
+    '/api',
+    createDepositRouter({
+      depositRepo,
       userRepo,
       requireAuth,
     }),

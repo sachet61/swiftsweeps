@@ -13,7 +13,6 @@ import {
   saveTopUpDraft,
   validateImageFile,
 } from '../../utils/uploadUtils';
-import { formatTopUpSubmittedChatMessage } from '../../utils/uiCopyUtils';
 import {
   ArrowDownToLine,
   CreditCard,
@@ -178,6 +177,22 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     selectedMethodType === 'payment_link' ? 20 :
     selectedMethodType === 'chime' ? 15 : 0
   );
+
+  const [_syncVersion, setSyncVersion] = useState(0);
+
+  useEffect(() => {
+    void dataService.fetchDepositsFromServer({
+      customerId: currentUser.id,
+      limit: 25,
+    });
+    const handleStateChange = () => setSyncVersion((v) => v + 1);
+    window.addEventListener('aetherpay_state_changed', handleStateChange);
+    window.addEventListener('storage', handleStateChange);
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', handleStateChange);
+      window.removeEventListener('storage', handleStateChange);
+    };
+  }, [currentUser.id]);
 
   const topUpHistory = dataService.getTopUpRequests(currentUser.id);
 
@@ -407,70 +422,49 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     const providerRef = 'Payment Screenshot Proof Attached';
 
     setIsSubmitting(true);
-    setTimeout(() => {
-      try {
-        const newReq = dataService.submitTopUp({
-          customerId: currentUser.id,
-          customerName: currentUser.displayName,
-          amount: 0, // Admin / Agent verifies exact amount directly from screenshot proof
-          method: selectedMethodType,
-          methodName: currentMethod.name,
-          targetGameCatalogId: selectedGameCatalogId,
-          targetGameName: targetGameName,
-          targetGameUsername: targetAccount?.username || currentUser.displayName,
-          providerRef: providerRef,
-          receiptUrl: screenshotFile || undefined,
-          receiptName: screenshotName || 'payment_receipt.png',
-        });
+    try {
+      const res = await dataService.submitTopUpAsync({
+        customerId: currentUser.id,
+        customerName: currentUser.displayName,
+        amount: 0, // Admin / Agent verifies exact amount directly from screenshot proof
+        method: selectedMethodType,
+        methodName: currentMethod.name,
+        targetGameCatalogId: selectedGameCatalogId,
+        targetGameName: targetGameName,
+        targetGameUsername: targetAccount?.username || currentUser.displayName,
+        providerRef: providerRef,
+        receiptUrl: screenshotFile,
+        receiptName: screenshotName || 'payment_receipt.png',
+      });
 
-        // Register payment method on the customer
-        dataService.setUserRegisteredMethod(currentUser.id, selectedMethodType, providerRef);
-
-        // Forward notice to Support Chat so staff sees the proof immediately
-        try {
-          const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
-          dataService.sendChatMessage({
-            conversationId: conv.id,
-            senderId: currentUser.id,
-            senderName: currentUser.displayName,
-            senderRole: 'customer',
-            text: formatTopUpSubmittedChatMessage({
-              amount: 0,
-              methodName: currentMethod.name,
-              gameName: targetGameName,
-            }),
-            isInternalNote: false,
-          });
-        } catch (chatErr) {
-          console.warn('Customer topup chat notice:', chatErr);
-        }
-
-        // Forward alert to 24/7 Telegram Bot if active
-        telegramService.notify({
-          title: 'New Payment Proof Forwarded',
-          text: `Player ${currentUser.displayName} submitted payment proof for ${currentMethod.name} (Game: ${targetGameName}).`,
-          customerName: currentUser.displayName,
-          customerEmail: currentUser.email,
-          actionType: 'topup',
-          gameName: targetGameName,
-          proofUrl: screenshotFile,
-        }).catch(() => {});
-
-        setIsSubmitting(false);
-        setSuccessMessage(
-          `Payment proof submitted! Your deposit (+${dynamicBonusPercent}% bonus) will be credited to ${targetGameName} shortly.`
-        );
-        setScreenshotFile(null);
-        setScreenshotName('');
-        setUploadError(null);
-        if (typeof window !== 'undefined') {
-          clearTopUpDraft(window.sessionStorage, currentUser.id);
-        }
-      } catch (err: any) {
-        setIsSubmitting(false);
-        setErrorMessage(err.message || 'Error processing top-up proof.');
+      if (!res.success) {
+        setErrorMessage(res.message || 'Unable to submit payment proof.');
+        return;
       }
-    }, 600);
+
+      // Forward alert to 24/7 Telegram Bot if active
+      telegramService.notify({
+        title: 'New Payment Proof Forwarded',
+        text: `Player ${currentUser.displayName} submitted payment proof for ${currentMethod.name} (Game: ${targetGameName}).`,
+        customerName: currentUser.displayName,
+        customerEmail: currentUser.email,
+        actionType: 'topup',
+        gameName: targetGameName,
+        proofUrl: screenshotFile,
+      }).catch(() => {});
+
+      setSuccessMessage(res.message);
+      setScreenshotFile(null);
+      setScreenshotName('');
+      setUploadError(null);
+      if (typeof window !== 'undefined') {
+        clearTopUpDraft(window.sessionStorage, currentUser.id);
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Error processing top-up proof.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (

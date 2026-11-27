@@ -69,6 +69,8 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
 
   useEffect(() => {
     dataService.syncDelta().catch(() => {});
+    dataService.fetchDepositsFromServer({ limit: 25, replaceAll: false }).catch(() => {});
+    dataService.fetchWithdrawalsFromServer({ limit: 25, replaceAll: false }).catch(() => {});
     const handleStateChange = () => setSyncVersion((v) => v + 1);
     window.addEventListener('aetherpay_state_changed', handleStateChange);
     window.addEventListener('storage', handleStateChange);

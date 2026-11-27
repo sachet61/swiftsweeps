@@ -18,6 +18,10 @@ function isSelfHostedAuthPath(url: string | undefined): boolean {
     pathname === '/api/wallet' ||
     pathname.startsWith('/api/wallet/') ||
     pathname === '/api/wallets' ||
+    pathname === '/api/withdrawals' ||
+    pathname.startsWith('/api/withdrawals/') ||
+    pathname === '/api/deposits' ||
+    pathname.startsWith('/api/deposits/') ||
     pathname === '/api/healthz' ||
     pathname === '/api/readyz'
   );

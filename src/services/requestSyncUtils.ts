@@ -6,57 +6,140 @@ function readOptionalString(source: any, key: string): string | undefined {
   return typeof val === 'string' && val.trim() ? val : undefined;
 }
 
+export function parseWithdrawalApiError(
+  status: number,
+  rawText: string,
+  fallbackMessage: string
+): string {
+  const trimmed = rawText.trim();
+  if (
+    trimmed.startsWith('<!doctype') ||
+    trimmed.startsWith('<!DOCTYPE') ||
+    trimmed.startsWith('<html')
+  ) {
+    return status >= 500
+      ? 'Withdrawal service is temporarily unavailable.'
+      : fallbackMessage;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      error?: { message?: unknown } | unknown;
+      message?: unknown;
+    };
+    if (
+      parsed?.error &&
+      typeof parsed.error === 'object' &&
+      typeof (parsed.error as { message?: unknown }).message === 'string' &&
+      (parsed.error as { message: string }).message.trim()
+    ) {
+      return (parsed.error as { message: string }).message.trim();
+    }
+    if (typeof parsed?.message === 'string' && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+    if (typeof parsed?.error === 'string' && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+  } catch {
+    // Ignore non-JSON error body
+  }
+
+  return fallbackMessage;
+}
+
 export function mapDbWithdrawalRowToRequest(
   w: any,
   existing?: WithdrawalRequest
 ): WithdrawalRequest {
   const rawPayoutDetails =
-    w.payout_details && typeof w.payout_details === 'object' ? w.payout_details : {};
+    w.payoutDetails && typeof w.payoutDetails === 'object' && !Array.isArray(w.payoutDetails)
+      ? w.payoutDetails
+      : w.payout_details && typeof w.payout_details === 'object' && !Array.isArray(w.payout_details)
+      ? w.payout_details
+      : {};
 
   const existingTimeline = Array.isArray(existing?.timeline)
     ? [...existing.timeline]
     : [];
+  const rowTimeline = Array.isArray(w.timeline)
+    ? w.timeline
+    : Array.isArray(rawPayoutDetails.timeline)
+    ? rawPayoutDetails.timeline
+    : null;
 
   const amount = Number(w.amount ?? existing?.amount ?? 0);
-  const feeAmount = Number(w.fee ?? existing?.feeAmount ?? 0);
-  const netPayout = Number(w.net_amount ?? existing?.netPayout ?? amount);
+  const feeAmount = Number(w.feeAmount ?? w.fee ?? existing?.feeAmount ?? 0);
+  const netPayout = Number(
+    w.netPayout ?? w.netAmount ?? w.net_amount ?? existing?.netPayout ?? amount
+  );
 
   return {
     id: String(w.id),
-    customerId: String(w.customer_id ?? existing?.customerId ?? ''),
-    customerName: String(w.customer_name ?? existing?.customerName ?? 'Customer'),
+    customerId: String(w.customerId ?? w.customer_id ?? existing?.customerId ?? ''),
+    customerName: String(w.customerName ?? w.customer_name ?? existing?.customerName ?? 'Customer'),
     amount,
-    currency: existing?.currency || 'USD',
+    currency: w.currency || existing?.currency || 'USD',
     feeAmount,
     netPayout,
     reservedAmount:
-      typeof rawPayoutDetails.reservedAmount === 'number'
+      typeof w.reservedAmount === 'number'
+        ? w.reservedAmount
+        : typeof rawPayoutDetails.reservedAmount === 'number'
         ? rawPayoutDetails.reservedAmount
         : existing?.reservedAmount ?? amount,
-    method: w.payout_method_id || existing?.method || 'bank_transfer',
-    methodName: w.payout_method_name || existing?.methodName || 'Bank Transfer',
+    method:
+      w.method ||
+      w.payoutMethodId ||
+      w.payout_method_id ||
+      existing?.method ||
+      'bank_transfer',
+    methodName:
+      w.methodName ||
+      w.payoutMethodName ||
+      w.payout_method_name ||
+      existing?.methodName ||
+      'Bank Transfer',
     sourceGameCatalogId:
+      readOptionalString(w, 'sourceGameCatalogId') ??
       readOptionalString(rawPayoutDetails, 'sourceGameCatalogId') ??
       existing?.sourceGameCatalogId,
     sourceGameName:
-      readOptionalString(rawPayoutDetails, 'sourceGameName') ?? existing?.sourceGameName,
+      readOptionalString(w, 'sourceGameName') ??
+      readOptionalString(rawPayoutDetails, 'sourceGameName') ??
+      existing?.sourceGameName,
     sourceGameUsername:
+      readOptionalString(w, 'sourceGameUsername') ??
       readOptionalString(rawPayoutDetails, 'sourceGameUsername') ??
       existing?.sourceGameUsername,
     playerNotes:
-      readOptionalString(rawPayoutDetails, 'playerNotes') ?? existing?.playerNotes,
+      readOptionalString(w, 'playerNotes') ??
+      readOptionalString(rawPayoutDetails, 'playerNotes') ??
+      existing?.playerNotes,
     payoutDetails:
       Object.keys(rawPayoutDetails).length > 0
         ? rawPayoutDetails
         : existing?.payoutDetails || {},
     status: w.status || existing?.status || 'submitted',
-    reviewerId: w.reviewer_id ?? existing?.reviewerId ?? undefined,
-    reviewerName: w.reviewer_name ?? existing?.reviewerName ?? undefined,
-    reviewNotes: w.review_notes ?? existing?.reviewNotes ?? undefined,
-    payoutReference: w.transaction_hash ?? existing?.payoutReference ?? undefined,
-    timeline: existingTimeline,
-    createdAt: w.created_at || existing?.createdAt || new Date().toISOString(),
-    updatedAt: w.updated_at || w.created_at || existing?.updatedAt || new Date().toISOString(),
+    reviewerId: w.reviewerId ?? w.reviewer_id ?? existing?.reviewerId ?? undefined,
+    reviewerName: w.reviewerName ?? w.reviewer_name ?? existing?.reviewerName ?? undefined,
+    reviewNotes: w.reviewNotes ?? w.review_notes ?? existing?.reviewNotes ?? undefined,
+    payoutReference:
+      w.payoutReference ??
+      w.transactionHash ??
+      w.transaction_hash ??
+      existing?.payoutReference ??
+      undefined,
+    timeline:
+      rowTimeline && rowTimeline.length > 0 ? [...rowTimeline] : existingTimeline,
+    createdAt: w.createdAt || w.created_at || existing?.createdAt || new Date().toISOString(),
+    updatedAt:
+      w.updatedAt ||
+      w.updated_at ||
+      w.createdAt ||
+      w.created_at ||
+      existing?.updatedAt ||
+      new Date().toISOString(),
   };
 }
 
@@ -92,34 +175,108 @@ export function mergeWithdrawalRequests(
   );
 }
 
+export function parseDepositApiError(
+  status: number,
+  rawText: string,
+  fallbackMessage: string
+): string {
+  const trimmed = rawText.trim();
+  if (
+    trimmed.startsWith('<!doctype') ||
+    trimmed.startsWith('<!DOCTYPE') ||
+    trimmed.startsWith('<html')
+  ) {
+    return status >= 500
+      ? 'Deposit service is temporarily unavailable.'
+      : fallbackMessage;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      error?: { message?: unknown } | unknown;
+      message?: unknown;
+    };
+    if (
+      parsed?.error &&
+      typeof parsed.error === 'object' &&
+      typeof (parsed.error as { message?: unknown }).message === 'string' &&
+      (parsed.error as { message: string }).message.trim()
+    ) {
+      return (parsed.error as { message: string }).message.trim();
+    }
+    if (typeof parsed?.message === 'string' && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+    if (typeof parsed?.error === 'string' && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+  } catch {
+    // Ignore non-JSON error body
+  }
+
+  return fallbackMessage;
+}
+
 export function mapDbTopupRowToRequest(t: any, existing?: TopUpRequest): TopUpRequest {
   const amount = Number(t.amount ?? existing?.amount ?? 0);
-  const bonusAmount = Number(t.bonus_amount ?? existing?.bonusAmount ?? 0);
+  const bonusAmount = Number(t.bonusAmount ?? t.bonus_amount ?? existing?.bonusAmount ?? 0);
+  const bonusPercentage = Number(
+    t.bonusPercentage ?? t.bonus_percentage ?? existing?.bonusPercentage ?? 0
+  );
+  const feeAmount = Number(t.feeAmount ?? t.fee_amount ?? existing?.feeAmount ?? 0);
+  const finalWalletCredit = Number(
+    t.finalWalletCredit ?? t.final_wallet_credit ?? existing?.finalWalletCredit ?? amount + bonusAmount
+  );
 
   return {
     id: String(t.id),
-    customerId: String(t.customer_id ?? existing?.customerId ?? ''),
-    customerName: String(t.customer_name ?? existing?.customerName ?? 'Customer'),
+    customerId: String(t.customerId ?? t.customer_id ?? existing?.customerId ?? ''),
+    customerName: String(t.customerName ?? t.customer_name ?? existing?.customerName ?? 'Customer'),
     amount,
-    currency: existing?.currency || 'USD',
+    currency: t.currency || existing?.currency || 'USD',
     bonusAmount,
-    bonusPercentage: existing?.bonusPercentage || 0,
-    feeAmount: existing?.feeAmount || 0,
-    finalWalletCredit: amount + bonusAmount,
-    method: (t.payment_method_id as any) || existing?.method || 'payment_link',
-    methodName: t.payment_method_name || existing?.methodName || 'Payment Link',
+    bonusPercentage,
+    feeAmount,
+    finalWalletCredit,
+    method:
+      ((t.method ?? t.paymentMethodId ?? t.payment_method_id) as any) ||
+      existing?.method ||
+      'payment_link',
+    methodName:
+      t.methodName ||
+      t.paymentMethodName ||
+      t.payment_method_name ||
+      existing?.methodName ||
+      'Payment Link',
     status: t.status || existing?.status || 'submitted',
-    receiptUrl: t.proof_url ?? existing?.receiptUrl ?? undefined,
-    receiptName: existing?.receiptName,
-    targetGameName: t.target_game_name ?? existing?.targetGameName ?? undefined,
-    targetGameCatalogId: t.target_game_account_id ?? existing?.targetGameCatalogId ?? undefined,
-    targetGameUsername: existing?.targetGameUsername,
-    fundingSource: existing?.fundingSource,
-    reviewerId: t.reviewer_id ?? existing?.reviewerId ?? undefined,
-    reviewerName: t.reviewer_name ?? existing?.reviewerName ?? undefined,
-    reviewNotes: t.review_notes ?? existing?.reviewNotes ?? undefined,
-    createdAt: t.created_at || existing?.createdAt || new Date().toISOString(),
-    updatedAt: t.updated_at || t.created_at || existing?.updatedAt || new Date().toISOString(),
+    receiptUrl: t.receiptUrl ?? t.proofUrl ?? t.proof_url ?? existing?.receiptUrl ?? undefined,
+    receiptName: t.receiptName ?? t.receipt_name ?? existing?.receiptName ?? undefined,
+    targetGameName: t.targetGameName ?? t.target_game_name ?? existing?.targetGameName ?? undefined,
+    targetGameCatalogId:
+      t.targetGameCatalogId ??
+      t.target_game_account_id ??
+      existing?.targetGameCatalogId ??
+      undefined,
+    targetGameUsername:
+      t.targetGameUsername ?? t.target_game_username ?? existing?.targetGameUsername ?? undefined,
+    fundingSource:
+      t.fundingSource ?? t.funding_source ?? existing?.fundingSource ?? undefined,
+    providerRef:
+      t.providerRef ?? t.provider_ref ?? t.customer_notes ?? existing?.providerRef ?? undefined,
+    cryptoNetwork: t.cryptoNetwork ?? t.crypto_network ?? existing?.cryptoNetwork ?? undefined,
+    cryptoTxHash: t.cryptoTxHash ?? t.crypto_tx_hash ?? existing?.cryptoTxHash ?? undefined,
+    depositAddress: t.depositAddress ?? t.deposit_address ?? existing?.depositAddress ?? undefined,
+    reviewerId: t.reviewerId ?? t.reviewer_id ?? existing?.reviewerId ?? undefined,
+    reviewerName: t.reviewerName ?? t.reviewer_name ?? existing?.reviewerName ?? undefined,
+    reviewNotes: t.reviewNotes ?? t.review_notes ?? existing?.reviewNotes ?? undefined,
+    createdAt: t.createdAt || t.created_at || existing?.createdAt || new Date().toISOString(),
+    updatedAt:
+      t.updatedAt ||
+      t.updated_at ||
+      t.createdAt ||
+      t.created_at ||
+      existing?.updatedAt ||
+      new Date().toISOString(),
   };
 }
 

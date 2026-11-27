@@ -6,6 +6,8 @@ import {
   mapDbTopupRowToRequest,
   mergeTopupRequests,
   findRequestById,
+  parseDepositApiError,
+  parseWithdrawalApiError,
 } from './requestSyncUtils';
 import type { TopUpRequest, WithdrawalRequest } from '../types';
 
@@ -222,3 +224,134 @@ test('mapDbTopupRowToRequest & mergeTopupRequests preserve existing bonusPercent
   const merged = mergeTopupRequests([existing], [{ id: 'req_top_1', deleted_at: '2026-11-17T10:03:00.000Z' }], false);
   assert.equal(merged.length, 0);
 });
+
+test('mapDbWithdrawalRowToRequest maps camelCase /api/withdrawals DTO including timeline and payoutReference', () => {
+  const dto = {
+    id: 'req_wdr_api_1',
+    customerId: 'usr_123',
+    customerName: 'Alice Player',
+    amount: 150,
+    currency: 'USD',
+    feeAmount: 5,
+    netPayout: 145,
+    reservedAmount: 150,
+    method: 'chime',
+    methodName: 'Chime Direct',
+    sourceGameCatalogId: 'game_orion',
+    sourceGameName: 'Orion Stars',
+    sourceGameUsername: 'alice_os',
+    playerNotes: 'Please send quickly',
+    payoutDetails: {
+      chimeHandle: '$alice-chime',
+    },
+    status: 'completed',
+    reviewerId: 'usr_admin_1',
+    reviewerName: 'Admin',
+    reviewNotes: 'Dispatched cleanly',
+    payoutReference: 'CHIME_REF_1',
+    timeline: [
+      {
+        status: 'submitted',
+        note: 'Submitted',
+        timestamp: '2026-11-20T10:00:00.000Z',
+        actorName: 'Alice Player',
+      },
+      {
+        status: 'completed',
+        note: 'Dispatched cleanly',
+        timestamp: '2026-11-20T10:15:00.000Z',
+        actorName: 'Admin',
+      },
+    ],
+    createdAt: '2026-11-20T10:00:00.000Z',
+    updatedAt: '2026-11-20T10:15:00.000Z',
+  };
+
+  const mapped = mapDbWithdrawalRowToRequest(dto);
+  assert.equal(mapped.id, 'req_wdr_api_1');
+  assert.equal(mapped.customerId, 'usr_123');
+  assert.equal(mapped.feeAmount, 5);
+  assert.equal(mapped.netPayout, 145);
+  assert.equal(mapped.method, 'chime');
+  assert.equal(mapped.sourceGameName, 'Orion Stars');
+  assert.equal(mapped.payoutReference, 'CHIME_REF_1');
+  assert.equal(mapped.timeline.length, 2);
+  assert.equal(mapped.timeline[1].actorName, 'Admin');
+});
+
+test('parseWithdrawalApiError extracts server JSON messages and shields HTML error responses', () => {
+  assert.equal(
+    parseWithdrawalApiError(
+      403,
+      JSON.stringify({ error: { code: 'FORBIDDEN', message: 'You can only cancel your own withdrawal requests.' } }),
+      'Fallback'
+    ),
+    'You can only cancel your own withdrawal requests.'
+  );
+  assert.equal(
+    parseWithdrawalApiError(502, '<!doctype html><html><body>502 Bad Gateway</body></html>', 'Fallback'),
+    'Withdrawal service is temporarily unavailable.'
+  );
+  assert.equal(parseWithdrawalApiError(400, 'not-json', 'Fallback message'), 'Fallback message');
+});
+
+test('mapDbTopupRowToRequest maps camelCase /api/deposits DTO including bonusPercentage, receiptUrl, and game context', () => {
+  const dto = {
+    id: 'req_topup_api_1',
+    customerId: 'usr_123',
+    customerName: 'Alice Player',
+    amount: 100,
+    currency: 'USD',
+    bonusAmount: 30,
+    bonusPercentage: 30,
+    feeAmount: 0,
+    finalWalletCredit: 130,
+    method: 'cashapp',
+    methodName: 'CashApp Verified',
+    status: 'completed',
+    receiptUrl: '/api/storage/file?bucket=receipts&path=proof.png',
+    receiptName: 'proof.png',
+    targetGameName: 'Fire Kirin',
+    targetGameCatalogId: 'game_fire_kirin',
+    targetGameUsername: 'alice_fk',
+    fundingSource: 'payment_method',
+    providerRef: 'Payment Screenshot Proof Attached',
+    reviewerId: 'usr_admin_1',
+    reviewerName: 'Admin Desk',
+    reviewNotes: 'Approved from receipt',
+    createdAt: '2026-11-26T10:00:00.000Z',
+    updatedAt: '2026-11-26T10:05:00.000Z',
+  };
+
+  const mapped = mapDbTopupRowToRequest(dto);
+  assert.equal(mapped.id, 'req_topup_api_1');
+  assert.equal(mapped.customerId, 'usr_123');
+  assert.equal(mapped.amount, 100);
+  assert.equal(mapped.bonusAmount, 30);
+  assert.equal(mapped.bonusPercentage, 30);
+  assert.equal(mapped.finalWalletCredit, 130);
+  assert.equal(mapped.method, 'cashapp');
+  assert.equal(mapped.receiptUrl, '/api/storage/file?bucket=receipts&path=proof.png');
+  assert.equal(mapped.receiptName, 'proof.png');
+  assert.equal(mapped.targetGameCatalogId, 'game_fire_kirin');
+  assert.equal(mapped.targetGameUsername, 'alice_fk');
+  assert.equal(mapped.providerRef, 'Payment Screenshot Proof Attached');
+  assert.equal(mapped.reviewerName, 'Admin Desk');
+});
+
+test('parseDepositApiError extracts server JSON messages and shields HTML error responses', () => {
+  assert.equal(
+    parseDepositApiError(
+      409,
+      JSON.stringify({ error: { code: 'DEPOSIT_CONFLICT', message: 'Request is already completed (Double credit prevented).' } }),
+      'Fallback'
+    ),
+    'Request is already completed (Double credit prevented).'
+  );
+  assert.equal(
+    parseDepositApiError(503, '<!doctype html><html><body>503 Service Unavailable</body></html>', 'Fallback'),
+    'Deposit service is temporarily unavailable.'
+  );
+  assert.equal(parseDepositApiError(400, 'invalid', 'Fallback deposit error'), 'Fallback deposit error');
+});
+

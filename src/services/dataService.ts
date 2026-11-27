@@ -104,9 +104,13 @@ import {
   formatTransactionStatusChatMessage,
 } from '../utils/uiCopyUtils';
 import {
+  mapDbTopupRowToRequest,
+  mapDbWithdrawalRowToRequest,
   mergeWithdrawalRequests,
   mergeTopupRequests,
   findRequestById,
+  parseDepositApiError,
+  parseWithdrawalApiError,
 } from './requestSyncUtils';
 import {
   buildStaffTopUpDraft,
@@ -461,12 +465,6 @@ class DataService {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, (p) => {
         this.queueRealtimeMutation('conversations', p.eventType, p.new, p.old);
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'topups' }, (p) => {
-        this.queueRealtimeMutation('topups', p.eventType, p.new, p.old);
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'withdrawals' }, (p) => {
-        this.queueRealtimeMutation('withdrawals', p.eventType, p.new, p.old);
-      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_accounts' }, (p) => {
         this.queueRealtimeMutation('game_accounts', p.eventType, p.new, p.old);
       })
@@ -533,8 +531,6 @@ class DataService {
 
     const messageRows = filterRealtimeRowsForUser('messages', rowsByTable['messages'], activeUser);
     const conversationRows = filterRealtimeRowsForUser('conversations', rowsByTable['conversations'], activeUser);
-    const topupRows = filterRealtimeRowsForUser('topups', rowsByTable['topups'], activeUser);
-    const withdrawalRows = filterRealtimeRowsForUser('withdrawals', rowsByTable['withdrawals'], activeUser);
     const gameAccountRows = filterRealtimeRowsForUser('game_accounts', rowsByTable['game_accounts'], activeUser);
     const userRows = filterRealtimeRowsForUser('users', rowsByTable['users'], activeUser);
     const cashoutRows = filterRealtimeRowsForUser('faked_cashouts', rowsByTable['faked_cashouts'], activeUser);
@@ -550,14 +546,6 @@ class DataService {
     if (conversationRows.length) {
       this.applyConversationRows(conversationRows, false);
       tablesModified.add('conversations');
-    }
-    if (topupRows.length) {
-      this.applyTopupRows(topupRows, false);
-      tablesModified.add('topups');
-    }
-    if (withdrawalRows.length) {
-      this.applyWithdrawalRows(withdrawalRows, false);
-      tablesModified.add('withdrawals');
     }
     if (gameAccountRows.length) {
       this.applyGameAccountRows(gameAccountRows, false);
@@ -622,13 +610,29 @@ class DataService {
       ];
       if (user?.id) {
         if (isStaff) {
-          selfHostedTasks.push(this.fetchWalletsFromServer({ limit: 50, silentEvent: true }));
+          selfHostedTasks.push(
+            this.fetchWalletsFromServer({ limit: 50, silentEvent: true }),
+            this.fetchDepositsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
+            this.fetchWithdrawalsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
+          );
         } else {
           selfHostedTasks.push(
             this.fetchWalletFromServer({ customerId: user.id, silentEvent: true }),
             this.fetchWalletTransactionsFromServer({
               customerId: user.id,
               limit: 50,
+              replaceAll: true,
+              silentEvent: true,
+            }),
+            this.fetchDepositsFromServer({
+              customerId: user.id,
+              limit: 30,
+              replaceAll: true,
+              silentEvent: true,
+            }),
+            this.fetchWithdrawalsFromServer({
+              customerId: user.id,
+              limit: 30,
               replaceAll: true,
               silentEvent: true,
             }),
@@ -661,13 +665,13 @@ class DataService {
 
       if (isAdmin) {
         // Staff/Admin session: bounded administrative queue queries (Users fetched on-demand on tab open)
-        const [appConfigRes, cashoutsRes, _catRes, topupsRes, withdrawalsRes, walletsApiRes, convsRes, gameAccsRes] =
+        const [appConfigRes, cashoutsRes, _catRes, depositsApiRes, withdrawalsApiRes, walletsApiRes, convsRes, gameAccsRes] =
           await Promise.all([
             appConfigPromise,
             cashoutsPromise,
             catPromise,
-            supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(25),
-            supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(25),
+            this.fetchDepositsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
+            this.fetchWithdrawalsFromServer({ limit: 25, replaceAll: true, silentEvent: true }),
             this.fetchWalletsFromServer({ limit: 50, silentEvent: true }),
             supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
             supabase.from('game_accounts').select('*').order('created_at', { ascending: false }).limit(100),
@@ -675,8 +679,6 @@ class DataService {
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
         if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
-        if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
-        if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
         if (!convsRes.error && Array.isArray(convsRes.data)) {
           this.applyConversationRows(convsRes.data, true);
           if (convsRes.data.length === 0) {
@@ -685,8 +687,8 @@ class DataService {
           }
         }
         if (gameAccsRes?.data) this.applyGameAccountRows(gameAccsRes.data, false);
-        if (topupsRes.error && withdrawalsRes.error && !walletsApiRes.success) {
-          this.lastHydrationError = topupsRes.error.message || walletsApiRes.error || 'Unable to load staff operations data.';
+        if (!depositsApiRes.success && !withdrawalsApiRes.success && !walletsApiRes.success) {
+          this.lastHydrationError = depositsApiRes.error || withdrawalsApiRes.error || walletsApiRes.error || 'Unable to load staff operations data.';
         }
         if (user?.role === 'admin') {
           await this.fetchAuditLogsFromServer({ limit: 100 });
@@ -701,9 +703,8 @@ class DataService {
           _catRes,
           profileRes,
           walletApiRes,
-          topupsRes,
-          latestCompletedTopupRes,
-          withdrawalsRes,
+          depositsApiRes,
+          withdrawalsApiRes,
           txApiRes,
           gameAccsRes,
           convRes,
@@ -713,25 +714,18 @@ class DataService {
           catPromise,
           selfHostedAuthService.fetchProfile().catch(() => null),
           this.fetchWalletFromServer({ customerId: currentUserId, silentEvent: true }),
-          supabase
-            .from('topups')
-            .select('*')
-            .eq('customer_id', currentUserId)
-            .order('created_at', { ascending: false })
-            .limit(30),
-          supabase
-            .from('topups')
-            .select('*')
-            .eq('customer_id', currentUserId)
-            .in('status', ['completed', 'approved'])
-            .order('updated_at', { ascending: false })
-            .limit(1),
-          supabase
-            .from('withdrawals')
-            .select('*')
-            .eq('customer_id', currentUserId)
-            .order('created_at', { ascending: false })
-            .limit(30),
+          this.fetchDepositsFromServer({
+            customerId: currentUserId,
+            limit: 30,
+            replaceAll: true,
+            silentEvent: true,
+          }),
+          this.fetchWithdrawalsFromServer({
+            customerId: currentUserId,
+            limit: 30,
+            replaceAll: true,
+            silentEvent: true,
+          }),
           this.fetchWalletTransactionsFromServer({
             customerId: currentUserId,
             limit: 50,
@@ -760,29 +754,14 @@ class DataService {
           }
         }
 
-        // Apply Order Invariant: apply topups and withdrawals, then reconcile customer wallet
-        const combinedTopupRows: any[] = [];
-        const seenTopupIds = new Set<string>();
-        for (const row of [...(topupsRes.data || []), ...(latestCompletedTopupRes.data || [])]) {
-          if (row && row.id && !seenTopupIds.has(row.id)) {
-            seenTopupIds.add(row.id);
-            combinedTopupRows.push(row);
-          }
-        }
-        if (!topupsRes.error) {
+        // Apply Order Invariant: deposits & withdrawals already applied via self-hosted API; reconcile customer wallet
+        if (depositsApiRes.success) {
           this.authoritativelyLoadedTopupsForUser.add(currentUserId);
-          this.applyTopupRows(combinedTopupRows, true);
-        } else if (!latestCompletedTopupRes.error && Array.isArray(latestCompletedTopupRes.data) && latestCompletedTopupRes.data.length > 0) {
-          this.applyTopupRows(latestCompletedTopupRes.data, false);
-        }
-
-        if (!withdrawalsRes.error && Array.isArray(withdrawalsRes.data)) {
-          this.applyWithdrawalRows(withdrawalsRes.data, true);
         }
 
         this.reconcileCustomerWallet(currentUserId);
-        if (!walletApiRes.success && !txApiRes.success && topupsRes.error && withdrawalsRes.error) {
-          this.lastHydrationError = walletApiRes.error || 'Unable to load wallet and transaction history.';
+        if (!walletApiRes.success && !txApiRes.success && !depositsApiRes.success && !withdrawalsApiRes.success) {
+          this.lastHydrationError = walletApiRes.error || depositsApiRes.error || withdrawalsApiRes.error || 'Unable to load wallet and transaction history.';
         }
 
         // Game Accounts hydration with authenticated server fallback
@@ -866,11 +845,30 @@ class DataService {
       const user = this.getCurrentUser();
       const isStaff = user?.role === 'admin' || user?.role === 'agent';
       const selfHostedTasks: Promise<unknown>[] = [this.fetchGameCatalogFromServer()];
-      if (!isStaff && user?.id) {
-        selfHostedTasks.push(
-          this.fetchWalletFromServer({ customerId: user.id }),
-          this.fetchWalletTransactionsFromServer({ customerId: user.id, limit: 25 }),
-        );
+      if (user?.id) {
+        if (isStaff) {
+          selfHostedTasks.push(
+            this.fetchDepositsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
+            this.fetchWithdrawalsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
+          );
+        } else {
+          selfHostedTasks.push(
+            this.fetchWalletFromServer({ customerId: user.id }),
+            this.fetchWalletTransactionsFromServer({ customerId: user.id, limit: 25 }),
+            this.fetchDepositsFromServer({
+              customerId: user.id,
+              limit: 15,
+              replaceAll: false,
+              silentEvent: true,
+            }),
+            this.fetchWithdrawalsFromServer({
+              customerId: user.id,
+              limit: 15,
+              replaceAll: false,
+              silentEvent: true,
+            }),
+          );
+        }
       }
       await Promise.allSettled(selfHostedTasks);
       return;
@@ -908,10 +906,10 @@ class DataService {
               .order('created_at', { ascending: false })
               .limit(50);
 
-        const [walletApiRes, topupsRes, withdrawalsRes, txApiRes, gameAccsRes, catRes, msgsRes] = await Promise.all([
+        const [walletApiRes, depositsApiRes, withdrawalsApiRes, txApiRes, gameAccsRes, catRes, msgsRes] = await Promise.all([
           this.fetchWalletFromServer({ customerId: currentUserId, silentEvent: true }),
-          supabase.from('topups').select('*').eq('customer_id', currentUserId).order('updated_at', { ascending: false }).limit(15),
-          supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('updated_at', { ascending: false }).limit(15),
+          this.fetchDepositsFromServer({ customerId: currentUserId, limit: 15, replaceAll: false, silentEvent: true }),
+          this.fetchWithdrawalsFromServer({ customerId: currentUserId, limit: 15, replaceAll: false, silentEvent: true }),
           this.fetchWalletTransactionsFromServer({ customerId: currentUserId, limit: 25, replaceAll: false, silentEvent: true }),
           supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(30),
           this.fetchGameCatalogFromServer({ silentEvent: true }),
@@ -922,12 +920,10 @@ class DataService {
         if (catRes.success) {
           changed = true;
         }
-        if (!topupsRes.error && topupsRes.data && topupsRes.data.length > 0) {
-          this.applyTopupRows(topupsRes.data, false);
+        if (depositsApiRes.success && depositsApiRes.deposits.length > 0) {
           changed = true;
         }
-        if (!withdrawalsRes.error && withdrawalsRes.data && withdrawalsRes.data.length > 0) {
-          this.applyWithdrawalRows(withdrawalsRes.data, false);
+        if (withdrawalsApiRes.success && withdrawalsApiRes.withdrawals.length > 0) {
           changed = true;
         }
         if (txApiRes.success && txApiRes.transactions.length > 0) {
@@ -940,7 +936,7 @@ class DataService {
         if (walletApiRes.success) {
           this.reconcileCustomerWallet(currentUserId);
           changed = true;
-        } else if (topupsRes.data && topupsRes.data.length > 0) {
+        } else if (depositsApiRes.success && depositsApiRes.deposits.length > 0) {
           this.reconcileCustomerWallet(currentUserId);
         }
         if (msgsRes.data && msgsRes.data.length > 0) {
@@ -948,7 +944,7 @@ class DataService {
           changed = true;
         }
       } else if (isAdmin) {
-        // Admin: refresh recent topups, withdrawals, conversations, and delta chat messages
+        // Admin: refresh recent deposits, withdrawals, conversations, and delta chat messages
         const querySince = this.lastSyncTimestamp
           ? new Date(Math.max(0, Date.parse(this.lastSyncTimestamp) - 10000)).toISOString()
           : null;
@@ -965,9 +961,9 @@ class DataService {
               .order('created_at', { ascending: false })
               .limit(50);
 
-        const [topupsRes, withdrawalsRes, convsRes, catRes, msgsRes] = await Promise.all([
-          supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(15),
-          supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(15),
+        const [depositsApiRes, withdrawalsApiRes, convsRes, catRes, msgsRes] = await Promise.all([
+          this.fetchDepositsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
+          this.fetchWithdrawalsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
           supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
           this.fetchGameCatalogFromServer({ silentEvent: true }),
           adminMsgQuery,
@@ -976,12 +972,10 @@ class DataService {
         if (catRes.success) {
           changed = true;
         }
-        if (topupsRes.data && topupsRes.data.length > 0) {
-          this.applyTopupRows(topupsRes.data, false);
+        if (depositsApiRes.success && depositsApiRes.deposits.length > 0) {
           changed = true;
         }
-        if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
-          this.applyWithdrawalRows(withdrawalsRes.data, false);
+        if (withdrawalsApiRes.success && withdrawalsApiRes.withdrawals.length > 0) {
           changed = true;
         }
         if (!convsRes.error && Array.isArray(convsRes.data)) {
@@ -1330,97 +1324,63 @@ class DataService {
     }
   }
 
-  // On-demand pagination for older topups
+  // On-demand pagination for older topups (self-hosted API)
   public async fetchOlderTopups(options?: {
     beforeCreatedAt?: string;
     customerId?: string;
     limit?: number;
   }): Promise<{ newCount: number; hasMore: boolean }> {
-    if (!supabase || !isSupabaseConfigured()) {
+    const limit = Math.min(Math.max(1, options?.limit || 25), 100);
+    const res = await this.fetchDepositsFromServer({
+      customerId: options?.customerId,
+      beforeCreatedAt: options?.beforeCreatedAt,
+      limit,
+      replaceAll: false,
+      silentEvent: true,
+    });
+    if (!res.success) {
       return { newCount: 0, hasMore: false };
     }
-    const limit = options?.limit || 25;
-    try {
-      let query = supabase
-        .from('topups')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(limit);
 
-      if (options?.beforeCreatedAt) {
-        query = query.lt('created_at', options.beforeCreatedAt);
-      }
-      if (options?.customerId) {
-        query = query.eq('customer_id', options.customerId);
-      }
-
-      const { data, error } = await query;
-      if (error || !data) {
-        console.warn('fetchOlderTopups notice:', error);
-        return { newCount: 0, hasMore: false };
-      }
-
-      if (data.length > 0) {
-        this.applyTopupRows(data, false);
-        window.dispatchEvent(
-          new CustomEvent('aetherpay_state_changed', {
-            detail: { key: 'topups_fetched', count: data.length },
-          })
-        );
-      }
-      return { newCount: data.length, hasMore: data.length === limit };
-    } catch (e) {
-      console.warn('fetchOlderTopups exception:', e);
-      return { newCount: 0, hasMore: false };
+    if (res.deposits.length > 0 && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'topups_fetched', count: res.deposits.length },
+        })
+      );
     }
+    return { newCount: res.deposits.length, hasMore: res.hasMore };
   }
 
-  // On-demand pagination for older withdrawals
+  // On-demand pagination for older withdrawals (self-hosted API)
   public async fetchOlderWithdrawals(options?: {
     beforeCreatedAt?: string;
     customerId?: string;
     limit?: number;
   }): Promise<{ newCount: number; hasMore: boolean }> {
-    if (!supabase || !isSupabaseConfigured()) {
+    const limit = Math.min(Math.max(1, options?.limit || 25), 100);
+    const res = await this.fetchWithdrawalsFromServer({
+      customerId: options?.customerId,
+      beforeCreatedAt: options?.beforeCreatedAt,
+      limit,
+      replaceAll: false,
+      silentEvent: true,
+    });
+    if (!res.success) {
       return { newCount: 0, hasMore: false };
     }
-    const limit = options?.limit || 25;
-    try {
-      let query = supabase
-        .from('withdrawals')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(limit);
 
-      if (options?.beforeCreatedAt) {
-        query = query.lt('created_at', options.beforeCreatedAt);
-      }
-      if (options?.customerId) {
-        query = query.eq('customer_id', options.customerId);
-      }
-
-      const { data, error } = await query;
-      if (error || !data) {
-        console.warn('fetchOlderWithdrawals notice:', error);
-        return { newCount: 0, hasMore: false };
-      }
-
-      if (data.length > 0) {
-        this.applyWithdrawalRows(data, false);
-        window.dispatchEvent(
-          new CustomEvent('aetherpay_state_changed', {
-            detail: { key: 'withdrawals_fetched', count: data.length },
-          })
-        );
-      }
-      return { newCount: data.length, hasMore: data.length === limit };
-    } catch (e) {
-      console.warn('fetchOlderWithdrawals exception:', e);
-      return { newCount: 0, hasMore: false };
+    if (res.withdrawals.length > 0 && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'withdrawals_fetched', count: res.withdrawals.length },
+        })
+      );
     }
+    return { newCount: res.withdrawals.length, hasMore: res.hasMore };
   }
 
-  // On-demand authoritative lookup for a single withdrawal request (prevents stale cache "not found" errors)
+  // On-demand authoritative lookup for a single withdrawal request via /api/withdrawals/:id
   public async ensureWithdrawalRequest(
     requestId: string,
     options?: { forceRefresh?: boolean }
@@ -1434,42 +1394,49 @@ class DataService {
       return { request: cached };
     }
 
-    if (!supabase || !isSupabaseConfigured()) {
-      return { request: cached };
-    }
-
     try {
-      const { data, error } = await supabase
-        .from('withdrawals')
-        .select('*')
-        .eq('id', normalizedId)
-        .maybeSingle();
-
-      if (error) {
-        console.warn('ensureWithdrawalRequest error:', error);
-        return { request: cached, error: error.message };
+      const res = await fetch(`/api/withdrawals/${encodeURIComponent(normalizedId)}`, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          request: cached,
+          error: parseWithdrawalApiError(res.status, rawText, 'Failed to query withdrawal request.'),
+        };
       }
-
-      if (!data) {
+      let payload: { withdrawal?: Record<string, unknown> };
+      try {
+        payload = JSON.parse(rawText) as { withdrawal?: Record<string, unknown> };
+      } catch {
+        return { request: cached, error: 'Received unexpected response from withdrawal service.' };
+      }
+      if (!payload?.withdrawal?.id) {
         return { request: cached };
       }
 
-      this.applyWithdrawalRows([data], false);
+      this.applyWithdrawalRows([payload.withdrawal], false);
       const refreshedList = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
       const hydrated = findRequestById(refreshedList, normalizedId) || null;
-      window.dispatchEvent(
-        new CustomEvent('aetherpay_state_changed', {
-          detail: { key: 'withdrawal_hydrated', requestId: normalizedId },
-        })
-      );
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'withdrawal_hydrated', requestId: normalizedId },
+          })
+        );
+      }
       return { request: hydrated };
     } catch (e: any) {
-      console.warn('ensureWithdrawalRequest exception:', e);
       return { request: cached, error: e?.message || 'Failed to query withdrawal request' };
     }
   }
 
-  // On-demand authoritative lookup for a single top-up request
+  // On-demand authoritative lookup for a single top-up request via /api/deposits/:id
   public async ensureTopUpRequest(
     requestId: string,
     options?: { forceRefresh?: boolean }
@@ -1483,37 +1450,44 @@ class DataService {
       return { request: cached };
     }
 
-    if (!supabase || !isSupabaseConfigured()) {
-      return { request: cached };
-    }
-
     try {
-      const { data, error } = await supabase
-        .from('topups')
-        .select('*')
-        .eq('id', normalizedId)
-        .maybeSingle();
-
-      if (error) {
-        console.warn('ensureTopUpRequest error:', error);
-        return { request: cached, error: error.message };
+      const res = await fetch(`/api/deposits/${encodeURIComponent(normalizedId)}`, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          request: cached,
+          error: parseDepositApiError(res.status, rawText, 'Failed to query deposit request.'),
+        };
       }
-
-      if (!data) {
+      let payload: { deposit?: Record<string, unknown> };
+      try {
+        payload = JSON.parse(rawText) as { deposit?: Record<string, unknown> };
+      } catch {
+        return { request: cached, error: 'Received unexpected response from deposit service.' };
+      }
+      if (!payload?.deposit?.id) {
         return { request: cached };
       }
 
-      this.applyTopupRows([data], false);
+      this.applyTopupRows([payload.deposit], false);
       const refreshedList = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
       const hydrated = findRequestById(refreshedList, normalizedId) || null;
-      window.dispatchEvent(
-        new CustomEvent('aetherpay_state_changed', {
-          detail: { key: 'topup_hydrated', requestId: normalizedId },
-        })
-      );
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'topup_hydrated', requestId: normalizedId },
+          })
+        );
+      }
       return { request: hydrated };
     } catch (e: any) {
-      console.warn('ensureTopUpRequest exception:', e);
       return { request: cached, error: e?.message || 'Failed to query top-up request' };
     }
   }
@@ -1534,10 +1508,32 @@ class DataService {
         replaceAll: false,
         silentEvent: true,
       });
+      const depositsPromise = this.fetchDepositsFromServer({
+        customerId: cleanCustomerId,
+        limit: 20,
+        replaceAll: false,
+        silentEvent: true,
+      });
+      const withdrawalsPromise = this.fetchWithdrawalsFromServer({
+        customerId: cleanCustomerId,
+        limit: 20,
+        replaceAll: false,
+        silentEvent: true,
+      });
 
       if (!supabase || !isSupabaseConfigured()) {
-        const [walletApiRes, txApiRes] = await Promise.all([walletPromise, txPromise]);
-        if (walletApiRes.success || (txApiRes.success && txApiRes.transactions.length > 0)) {
+        const [walletApiRes, txApiRes, depApiRes, wdrApiRes] = await Promise.all([
+          walletPromise,
+          txPromise,
+          depositsPromise,
+          withdrawalsPromise,
+        ]);
+        if (
+          walletApiRes.success ||
+          (txApiRes.success && txApiRes.transactions.length > 0) ||
+          (depApiRes.success && depApiRes.deposits.length > 0) ||
+          (wdrApiRes.success && wdrApiRes.withdrawals.length > 0)
+        ) {
           window.dispatchEvent(
             new CustomEvent('aetherpay_state_changed', {
               detail: { key: 'customer_requests_synced', customerId: cleanCustomerId },
@@ -1547,28 +1543,11 @@ class DataService {
         return;
       }
 
-      const [walletApiRes, txApiRes, topupsRes, latestCompletedTopupRes, withdrawalsRes, accountsRes] = await Promise.all([
+      const [walletApiRes, txApiRes, depApiRes, wdrApiRes, accountsRes] = await Promise.all([
         walletPromise,
         txPromise,
-        supabase
-          .from('topups')
-          .select('*')
-          .eq('customer_id', cleanCustomerId)
-          .order('created_at', { ascending: false })
-          .limit(20),
-        supabase
-          .from('topups')
-          .select('*')
-          .eq('customer_id', cleanCustomerId)
-          .in('status', ['completed', 'approved'])
-          .order('updated_at', { ascending: false })
-          .limit(1),
-        supabase
-          .from('withdrawals')
-          .select('*')
-          .eq('customer_id', cleanCustomerId)
-          .order('created_at', { ascending: false })
-          .limit(20),
+        depositsPromise,
+        withdrawalsPromise,
         supabase
           .from('game_accounts')
           .select('*')
@@ -1576,16 +1555,11 @@ class DataService {
           .limit(25),
       ]);
 
-      let changed = walletApiRes.success || (txApiRes.success && txApiRes.transactions.length > 0);
-      const topupRows = [...(topupsRes.data || []), ...(latestCompletedTopupRes.data || [])];
-      if (!topupsRes.error && topupRows.length > 0) {
-        this.applyTopupRows(topupRows, false);
-        changed = true;
-      }
-      if (!withdrawalsRes.error && Array.isArray(withdrawalsRes.data) && withdrawalsRes.data.length > 0) {
-        this.applyWithdrawalRows(withdrawalsRes.data, false);
-        changed = true;
-      }
+      let changed =
+        walletApiRes.success ||
+        (txApiRes.success && txApiRes.transactions.length > 0) ||
+        (depApiRes.success && depApiRes.deposits.length > 0) ||
+        (wdrApiRes.success && wdrApiRes.withdrawals.length > 0);
       if (!accountsRes.error && Array.isArray(accountsRes.data) && accountsRes.data.length > 0) {
         this.applyGameAccountRows(accountsRes.data, false);
         changed = true;
@@ -1658,7 +1632,8 @@ class DataService {
 
     const affectedCustomerIds = new Set<string>();
     for (const r of rows || []) {
-      if (r?.customer_id) affectedCustomerIds.add(String(r.customer_id));
+      const cid = r?.customerId ?? r?.customer_id;
+      if (cid) affectedCustomerIds.add(String(cid));
     }
     if (replaceAll && this.currentUserId) {
       affectedCustomerIds.add(this.currentUserId);
@@ -2128,47 +2103,10 @@ class DataService {
             created_at: t.createdAt,
           });
         }
-      } else if (key === STORAGE_KEYS.TOPUPS && Array.isArray(value) && value.length > 0) {
-        const topupsToUpsert = (value as TopUpRequest[]).slice(0, 10).map((top) => ({
-          id: top.id,
-          customer_id: top.customerId,
-          customer_name: top.customerName,
-          amount: top.amount,
-          bonus_amount: top.bonusAmount || 0,
-          payment_method_id: top.method || 'payment_link',
-          payment_method_name: top.methodName || 'Payment Link',
-          status: top.status,
-          proof_url: top.receiptUrl || null,
-          target_game_name: top.targetGameName || null,
-          target_game_account_id: top.targetGameCatalogId || null,
-          customer_notes: null,
-          reviewer_id: top.reviewerId || null,
-          reviewer_name: top.reviewerName || null,
-          review_notes: top.reviewNotes || null,
-          created_at: top.createdAt,
-          updated_at: top.updatedAt,
-        }));
-        await supabase.from('topups').upsert(topupsToUpsert);
-      } else if (key === STORAGE_KEYS.WITHDRAWALS && Array.isArray(value) && value.length > 0) {
-        const withdrawalsToUpsert = (value as WithdrawalRequest[]).slice(0, 10).map((w) => ({
-          id: w.id,
-          customer_id: w.customerId,
-          customer_name: w.customerName,
-          amount: w.amount,
-          fee: w.feeAmount || 0,
-          net_amount: w.netPayout,
-          payout_method_id: w.method || 'bank_transfer',
-          payout_method_name: w.methodName || 'Bank Transfer',
-          payout_details: w.payoutDetails || {},
-          status: w.status,
-          reviewer_id: w.reviewerId || null,
-          reviewer_name: w.reviewerName || null,
-          review_notes: w.reviewNotes || null,
-          transaction_hash: w.payoutReference || null,
-          created_at: w.createdAt,
-          updated_at: w.updatedAt,
-        }));
-        await supabase.from('withdrawals').upsert(withdrawalsToUpsert);
+      } else if (key === STORAGE_KEYS.TOPUPS) {
+        // Deposits migrated to self-hosted /api/deposits endpoints
+      } else if (key === STORAGE_KEYS.WITHDRAWALS) {
+        // Withdrawals migrated to self-hosted /api/withdrawals endpoints
       } else if (key === STORAGE_KEYS.GAME_ACCOUNTS && Array.isArray(value) && value.length > 0) {
         const accountsToUpsert = (value as GameAccount[]).slice(0, 15).map((a) => ({
           id: a.id,
@@ -2290,56 +2228,7 @@ class DataService {
       // 2 & 3. Wallets & Transactions migrated to self-hosted /api/wallet and /api/wallet/transactions
 
 
-      // 4. Topups
-      const topups = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
-      if (topups.length > 0) {
-        const rows = topups.map((top) => ({
-          id: top.id,
-          customer_id: top.customerId,
-          customer_name: top.customerName,
-          amount: top.amount,
-          bonus_amount: top.bonusAmount || 0,
-          payment_method_id: top.method || 'payment_link',
-          payment_method_name: top.methodName || 'Payment Link',
-          status: top.status,
-          proof_url: top.receiptUrl || null,
-          target_game_name: top.targetGameName || null,
-          target_game_account_id: top.targetGameCatalogId || null,
-          customer_notes: null,
-          reviewer_id: top.reviewerId || null,
-          reviewer_name: top.reviewerName || null,
-          review_notes: top.reviewNotes || null,
-          created_at: top.createdAt,
-          updated_at: top.updatedAt,
-        }));
-        const { error } = await supabase.from('topups').upsert(rows);
-        if (!error) counts['topups'] = rows.length;
-      }
-
-      // 5. Withdrawals
-      const withdrawals = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
-      if (withdrawals.length > 0) {
-        const rows = withdrawals.map((w) => ({
-          id: w.id,
-          customer_id: w.customerId,
-          customer_name: w.customerName,
-          amount: w.amount,
-          fee: w.feeAmount || 0,
-          net_amount: w.netPayout,
-          payout_method_id: w.method || 'bank_transfer',
-          payout_method_name: w.methodName || 'Bank Transfer',
-          payout_details: w.payoutDetails || {},
-          status: w.status,
-          reviewer_id: w.reviewerId || null,
-          reviewer_name: w.reviewerName || null,
-          review_notes: w.reviewNotes || null,
-          transaction_hash: w.payoutReference || null,
-          created_at: w.createdAt,
-          updated_at: w.updatedAt,
-        }));
-        const { error } = await supabase.from('withdrawals').upsert(rows);
-        if (!error) counts['withdrawals'] = rows.length;
-      }
+      // 4 & 5. Deposits (topups) & Withdrawals migrated to self-hosted /api/deposits and /api/withdrawals endpoints
 
       // 6. Conversations & Messages (game_catalog migrated to self-hosted /api/game-catalog)
       const convs = this.load<SupportConversation[]>(STORAGE_KEYS.CONVERSATIONS, INITIAL_CONVERSATIONS);
@@ -4006,7 +3895,126 @@ class DataService {
     return [...topups, ...withdrawals];
   }
 
-  public submitTopUp(params: {
+  public async fetchDepositsFromServer(options?: {
+    customerId?: string;
+    status?: string;
+    beforeCreatedAt?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+    replaceAll?: boolean;
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    deposits: TopUpRequest[];
+    total: number;
+    hasMore: boolean;
+    error?: string;
+  }> {
+    try {
+      const params = new URLSearchParams();
+      if (options?.customerId?.trim()) {
+        params.set('customerId', options.customerId.trim());
+      }
+      if (options?.status?.trim()) {
+        params.set('status', options.status.trim());
+      }
+      if (options?.beforeCreatedAt?.trim()) {
+        params.set('beforeCreatedAt', options.beforeCreatedAt.trim());
+      }
+      if (options?.q?.trim()) {
+        params.set('q', options.q.trim());
+      }
+      if (options?.limit !== undefined) {
+        params.set('limit', String(options.limit));
+      }
+      if (options?.offset !== undefined) {
+        params.set('offset', String(options.offset));
+      }
+
+      const query = params.toString();
+      const url = query ? `/api/deposits?${query}` : '/api/deposits';
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          deposits: [],
+          total: 0,
+          hasMore: false,
+          error: parseDepositApiError(
+            res.status,
+            rawText,
+            'Failed to load deposit requests from server.',
+          ),
+        };
+      }
+
+      let payload: {
+        deposits?: unknown[];
+        total?: number;
+        hasMore?: boolean;
+      };
+      try {
+        payload = JSON.parse(rawText) as {
+          deposits?: unknown[];
+          total?: number;
+          hasMore?: boolean;
+        };
+      } catch {
+        return {
+          success: false,
+          deposits: [],
+          total: 0,
+          hasMore: false,
+          error: 'Received an unexpected response from deposit service.',
+        };
+      }
+
+      const rows = Array.isArray(payload?.deposits) ? payload.deposits : [];
+      this.applyTopupRows(rows, Boolean(options?.replaceAll));
+      if (options?.customerId && options?.replaceAll) {
+        this.authoritativelyLoadedTopupsForUser.add(options.customerId.trim());
+      }
+
+      const mapped = rows
+        .filter((r: any) => r && r.id)
+        .map((r: any) => mapDbTopupRowToRequest(r));
+
+      if (!options?.silentEvent && typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: STORAGE_KEYS.TOPUPS },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        deposits: mapped,
+        total: Number(payload?.total ?? mapped.length),
+        hasMore: Boolean(payload?.hasMore),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        deposits: [],
+        total: 0,
+        hasMore: false,
+        error: err?.message || 'Unable to load deposit requests from server.',
+      };
+    }
+  }
+
+  public async submitTopUpAsync(params: {
     customerId: string;
     customerName: string;
     amount: number;
@@ -4015,538 +4023,173 @@ class DataService {
     targetGameCatalogId?: string;
     targetGameName?: string;
     targetGameUsername?: string;
-    fundingSource?: 'payment_method' | 'referral_bonus' | 'wallet_balance';
     providerRef?: string;
-    receiptUrl?: string;
+    receiptUrl: string;
     receiptName?: string;
     cryptoNetwork?: string;
     cryptoTxHash?: string;
     depositAddress?: string;
-    simulateInstantGateway?: boolean;
-  }): TopUpRequest {
-    const config = this.getAppConfig();
-    const pm = config.paymentMethods.find((m) => m.type === params.method);
-
-    // Calculate eligible bonus accurately based on payment method config
-    let bonusPercentage = 0;
-    if (pm && pm.bonusPercentage) {
-      bonusPercentage = pm.bonusPercentage;
-    } else {
-      bonusPercentage =
-        params.method === 'cashapp' ? 30 :
-        params.method === 'crypto' ? 30 :
-        params.method === 'payment_link' ? 20 :
-        params.method === 'chime' ? 15 : 20;
+  }): Promise<{ success: boolean; message: string; request?: TopUpRequest }> {
+    const cleanReceiptUrl = (params.receiptUrl || '').trim();
+    if (!cleanReceiptUrl) {
+      return {
+        success: false,
+        message: 'Please upload a screenshot of your payment receipt before submitting.',
+      };
     }
 
-    const bonusAmount = params.amount > 0 ? Number(((params.amount * bonusPercentage) / 100).toFixed(2)) : 0;
-    const feeAmount = pm && pm.feePercentage ? (params.amount * pm.feePercentage) / 100 : 0;
-    const finalWalletCredit = params.amount + bonusAmount;
-
-    const newReqId = `req_topup_${Date.now()}`;
-    const initialStatus = params.simulateInstantGateway ? 'completed' : params.method === 'manual_receipt' ? 'verifying' : 'submitted';
-
-    const newReq: TopUpRequest = {
-      id: newReqId,
-      customerId: params.customerId,
-      customerName: params.customerName,
-      amount: params.amount,
-      currency: config.currency,
-      method: params.method,
-      methodName: params.methodName,
-      targetGameCatalogId: params.targetGameCatalogId,
-      targetGameName: params.targetGameName,
-      targetGameUsername: params.targetGameUsername,
-      fundingSource: params.fundingSource || 'payment_method',
-      providerRef: params.providerRef || (params.simulateInstantGateway ? `GW_AUTH_${Date.now().toString(36).toUpperCase()}` : undefined),
-      receiptUrl: params.receiptUrl,
-      receiptName: params.receiptName,
-      cryptoNetwork: params.cryptoNetwork,
-      cryptoTxHash: params.cryptoTxHash,
-      depositAddress: params.depositAddress,
-      bonusAmount,
-      bonusPercentage,
-      feeAmount,
-      finalWalletCredit,
-      status: initialStatus,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    const allReqs = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
-    allReqs.unshift(newReq);
-    this.save(STORAGE_KEYS.TOPUPS, allReqs);
-
-    // Update wallet balances atomically
-    const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
-    const wallet = wallets[params.customerId] || {
-      customerId: params.customerId,
-      currency: config.currency,
-      availableBalance: 0,
-      referralBonusBalance: 0,
-      reservedBalance: 0,
-      pendingDepositBalance: 0,
-      lastUpdatedAt: new Date().toISOString(),
-    };
-
-    // Update registered payment method on user & wallet
-    this.setUserRegisteredMethod(params.customerId, params.method, params.providerRef || params.cryptoTxHash || params.depositAddress);
-
-    if (initialStatus === 'completed') {
-      // Instant direct game credit
-      if (params.targetGameCatalogId) {
-        const allAccounts = this.getGameAccounts();
-        const gameAcc = allAccounts.find(
-          (a) => a.customerId === params.customerId && a.gameCatalogId === params.targetGameCatalogId
-        );
-        if (gameAcc) {
-          gameAcc.balance = (gameAcc.balance || 0) + finalWalletCredit;
-          gameAcc.updatedAt = new Date().toISOString();
-          this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
-        }
-      }
-
-      // Top-up goes directly to the game server and is not treated as a withdrawable wallet balance
-      wallet.lastTopUpAmount = finalWalletCredit;
-      wallet.lastTopUpGame = params.targetGameName || 'Game';
-      wallet.lastTopUpAt = new Date().toISOString();
-      wallet.lastUpdatedAt = new Date().toISOString();
-      wallets[params.customerId] = wallet;
-      this.save(STORAGE_KEYS.WALLETS, wallets, true);
-      void this.syncWalletFieldsToSupabase(
-        params.customerId,
-        {
-          total_deposited: computeCumulativeCompletedDeposits(allReqs, params.customerId),
-        },
-        wallet
-      );
-
-      // Record immutable ledger entry
-      this.recordTransaction({
-        customerId: params.customerId,
-        type: 'deposit',
-        amount: params.amount,
-        fee: feeAmount,
-        netAmount: params.amount,
-        currency: config.currency,
-        balanceAfter: wallet.availableBalance,
-        targetGameName: params.targetGameName,
-        targetGameUsername: params.targetGameUsername,
-        relatedRequestId: newReqId,
-        description: params.targetGameName
-          ? `Direct Game Top-Up to ${params.targetGameName} (${params.targetGameUsername || 'Player'}) via ${params.methodName}`
-          : `Instant ${params.methodName} Deposit to Game Processed`,
-        idempotencyKey: `idemp_dep_${newReqId}`,
-        status: 'completed',
-      });
-
-      if (bonusAmount > 0) {
-        this.recordTransaction({
-          customerId: params.customerId,
-          type: 'bonus',
-          amount: bonusAmount,
-          fee: 0,
-          netAmount: bonusAmount,
-          currency: config.currency,
-          balanceAfter: wallet.availableBalance,
-          relatedRequestId: newReqId,
-          description: `${bonusPercentage}% Deposit Promotion Bonus Credit`,
-          idempotencyKey: `idemp_bns_${newReqId}`,
-          status: 'completed',
-        });
-      }
-
-      if (supabase && isSupabaseConfigured()) {
-        void (async () => {
-          try {
-            await supabase.from('topups').upsert({
-              id: newReq.id,
-              customer_id: newReq.customerId,
-              customer_name: newReq.customerName,
-              amount: newReq.amount,
-              bonus_amount: newReq.bonusAmount || 0,
-              payment_method_id: newReq.method || 'payment_link',
-              payment_method_name: newReq.methodName || 'Payment Link',
-              status: newReq.status,
-              proof_url: newReq.receiptUrl || null,
-              target_game_name: newReq.targetGameName || null,
-              target_game_account_id: newReq.targetGameCatalogId || null,
-              customer_notes: null,
-              reviewer_id: newReq.reviewerId || null,
-              reviewer_name: newReq.reviewerName || null,
-              review_notes: newReq.reviewNotes || null,
-              created_at: newReq.createdAt,
-              updated_at: newReq.updatedAt,
-            });
-          } catch {}
-          await this.triggerServerReferralEvaluation(params.customerId);
-        })();
-      } else {
-        this.checkAndAwardReferral(params.customerId, params.amount);
-      }
-    } else {
-      wallet.pendingDepositBalance += params.amount;
-      wallet.lastUpdatedAt = new Date().toISOString();
-      wallets[params.customerId] = wallet;
-      this.save(STORAGE_KEYS.WALLETS, wallets, true);
-      void this.syncWalletFieldsToSupabase(
-        params.customerId,
-        { pending_deposit: wallet.pendingDepositBalance },
-        wallet
-      );
-    }
-
-    this.createNotification({
-      userId: params.customerId,
-      title: initialStatus === 'completed' ? 'Direct Game Top-Up Credited' : 'Top-Up Submitted',
-      message:
-        initialStatus === 'completed'
-          ? `$${finalWalletCredit.toFixed(2)} loaded directly to ${params.targetGameName || 'your game'}! (Tracked as latest top-up, not wallet balance).`
-          : `Your top-up of $${params.amount.toFixed(2)} for ${params.targetGameName || 'game'} (${params.methodName}) is under review.`,
-      type: 'topup',
-      linkTab: 'topup',
-      linkRequestId: newReqId,
-    });
-
-    this.logAudit({
-      actorId: params.customerId,
-      actorName: params.customerName,
-      actorRole: 'customer',
-      action: 'TOPUP_SUBMITTED',
-      entityType: 'topup',
-      entityId: newReqId,
-      details: `Submitted ${params.methodName} top-up for $${params.amount} (Status: ${initialStatus}).`,
-    });
-
-    // Automatically forward transaction to customer support chat for review & approval
-    const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
-    this.sendChatMessage({
-      conversationId: conv.id,
-      senderId: params.customerId,
-      senderName: params.customerName,
-      senderRole: 'customer',
-      text: formatTopUpSubmittedChatMessage({
-        amount: params.amount,
-        bonusAmount,
-        methodName: params.methodName,
-        gameName: params.targetGameName,
-        isCompleted: initialStatus === 'completed',
-      }),
-      attachmentUrl: params.receiptUrl,
-      attachmentName: params.receiptName,
-      isInternalNote: false,
-      transactionData: {
-        transactionType: 'topup',
-        requestId: newReqId,
-        gameName: params.targetGameName,
-        gameUsername: params.targetGameUsername,
-        amount: params.amount,
-        bonusAmount,
-        bonusPercentage,
-        finalCredit: finalWalletCredit,
-        methodName: params.methodName,
-        status: initialStatus === 'completed' ? 'completed' : 'pending',
-        proofUrl: params.receiptUrl,
-        proofName: params.receiptName,
-        details: params.providerRef || params.cryptoTxHash,
-      },
-    });
-
-    return newReq;
-  }
-
-  public approveTopUp(
-    params: {
-      requestId: string;
-      reviewerId: string;
-      reviewerName: string;
-      notes?: string;
-      verifiedAmount?: number;
-    },
-    options?: { skipReferralEval?: boolean }
-  ): { success: boolean; message: string } {
-    const allReqs = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
-    const req = findRequestById(allReqs, params.requestId);
-    if (!req) return { success: false, message: 'Request not found' };
-    if (req.status === 'completed') return { success: false, message: 'Request is already completed (Double credit prevented).' };
-
-    if (!req.bonusPercentage || req.bonusPercentage === 0) {
-      req.bonusPercentage =
-        req.method === 'cashapp' ? 30 :
-        req.method === 'crypto' ? 30 :
-        req.method === 'payment_link' ? 20 :
-        req.method === 'chime' ? 15 : 20;
-    }
-
-    const effectiveVerifiedAmt = (params.verifiedAmount !== undefined && params.verifiedAmount > 0) ? params.verifiedAmount : req.amount;
-    req.amount = effectiveVerifiedAmt;
-    const bonusPct = req.bonusPercentage || 20;
-    req.bonusAmount = Number(((req.amount * bonusPct) / 100).toFixed(2));
-    req.finalWalletCredit = Number((req.amount + req.bonusAmount).toFixed(2));
-
-    req.status = 'completed';
-    req.reviewerId = params.reviewerId;
-    req.reviewerName = params.reviewerName;
-    req.reviewNotes = params.notes || 'Approved by customer care operator.';
-    req.updatedAt = new Date().toISOString();
-    this.save(STORAGE_KEYS.TOPUPS, allReqs);
-
-    // Authoritative wallet adjustment
-    const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
-    const wallet = wallets[req.customerId] || {
-      customerId: req.customerId,
-      currency: req.currency,
-      availableBalance: 0,
-      referralBonusBalance: 0,
-      reservedBalance: 0,
-      pendingDepositBalance: 0,
-      lastUpdatedAt: new Date().toISOString(),
-    };
-
-    wallet.pendingDepositBalance = Math.max(0, wallet.pendingDepositBalance - req.amount);
-    // Credited to game, recorded as latest top-up
-    wallet.lastTopUpAmount = req.finalWalletCredit;
-    wallet.lastTopUpGame = req.targetGameName || 'Game';
-    wallet.lastTopUpAt = new Date().toISOString();
-    wallet.lastUpdatedAt = new Date().toISOString();
-    wallets[req.customerId] = wallet;
-    this.save(STORAGE_KEYS.WALLETS, wallets, true);
-
-    // Direct game account crediting & credential verification
-    const allAccounts = this.getGameAccounts();
-    const gameAcc = allAccounts.find(
-      (a) =>
-        a.customerId === req.customerId &&
-        (a.gameCatalogId === req.targetGameCatalogId ||
-          a.gameName.toLowerCase() === req.targetGameName?.toLowerCase())
-    );
-    const hasActiveCredentials = Boolean(gameAcc && gameAcc.status === 'active' && gameAcc.username);
-
-    if (hasActiveCredentials && gameAcc) {
-      gameAcc.balance = (gameAcc.balance || 0) + req.finalWalletCredit;
-      gameAcc.updatedAt = new Date().toISOString();
-      this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
-    }
-
-    // Ledger records
-    this.recordTransaction({
-      customerId: req.customerId,
-      type: 'deposit',
-      amount: req.amount,
-      fee: req.feeAmount,
-      netAmount: req.amount,
-      currency: req.currency,
-      balanceAfter: wallet.availableBalance - req.bonusAmount,
-      targetGameName: req.targetGameName,
-      targetGameUsername: req.targetGameUsername,
-      relatedRequestId: req.id,
-      description: req.targetGameName
-        ? `Direct Game Top-Up to ${req.targetGameName} (${req.targetGameUsername || 'Player'}) Approved`
-        : `${req.methodName} Deposit Approved by Staff`,
-      idempotencyKey: `idemp_dep_${req.id}`,
-      status: 'completed',
-    });
-
-    if (req.bonusAmount > 0) {
-      this.recordTransaction({
-        customerId: req.customerId,
-        type: 'bonus',
-        amount: req.bonusAmount,
-        fee: 0,
-        netAmount: req.bonusAmount,
-        currency: req.currency,
-        balanceAfter: wallet.availableBalance,
-        relatedRequestId: req.id,
-        description: `Promo Bonus (${req.bonusPercentage}%) Credited`,
-        idempotencyKey: `idemp_bns_${req.id}`,
-        status: 'completed',
-      });
-    }
-
-    this.createNotification({
-      userId: req.customerId,
-      title: 'Game Top-Up Approved & Loaded',
-      message: `Your deposit of $${req.amount.toFixed(2)}${req.bonusAmount > 0 ? ` plus $${req.bonusAmount.toFixed(2)} bonus` : ''} was loaded directly into your ${req.targetGameName || 'game'} account! (Tracked as latest top-up).`,
-      type: 'topup',
-      linkTab: 'topup',
-      linkRequestId: req.id,
-    });
-
-    this.logAudit({
-      actorId: params.reviewerId,
-      actorName: params.reviewerName,
-      actorRole: 'agent',
-      action: 'TOPUP_APPROVED',
-      entityType: 'topup',
-      entityId: req.id,
-      details: `Approved $${req.amount} deposit + $${req.bonusAmount} bonus for ${req.customerName}. Note: ${params.notes || 'None'}`,
-    });
-
-    // Update transaction card in chat thread and post confirmation
-    this.updateChatTransactionStatus(req.id, 'completed', params.reviewerName, params.notes, {
-      amount: req.amount,
-      bonusAmount: req.bonusAmount,
-      finalCredit: req.finalWalletCredit,
-    });
-
-    // Dispatch chat confirmation with Game ID & password or reminder
     try {
-      const conv = this.getOrCreateConversationForCustomer(req.customerId, req.customerName);
-      if (hasActiveCredentials && gameAcc) {
-        this.sendChatMessage({
-          conversationId: conv.id,
-          senderId: params.reviewerId,
-          senderName: params.reviewerName,
-          senderRole: 'agent',
-          text: formatTopUpApprovedChatMessage({
-            totalCredit: req.finalWalletCredit,
-            baseAmount: req.amount,
-            bonusAmount: req.bonusAmount,
-            gameName: req.targetGameName,
-            gameUsername: gameAcc.username,
-            hasActiveCredentials: true,
-          }),
-          isInternalNote: false,
-        });
-      } else {
-        this.sendChatMessage({
-          conversationId: conv.id,
-          senderId: params.reviewerId,
-          senderName: params.reviewerName,
-          senderRole: 'agent',
-          text: formatTopUpApprovedChatMessage({
-            totalCredit: req.finalWalletCredit,
-            baseAmount: req.amount,
-            bonusAmount: req.bonusAmount,
-            gameName: req.targetGameName,
-            hasActiveCredentials: false,
-          }),
-          isInternalNote: false,
-        });
-      }
-    } catch (chatErr) {
-      console.warn('Top-up approval chat dispatch warning:', chatErr);
-    }
-
-    // High-priority Web Push Notification to customer phone / PWA (Messenger style)
-    if (typeof window !== 'undefined') {
-      webPushClient
-        .dispatchPushAlert({
-          recipientId: req.customerId,
-          recipientRole: 'customer',
-          title: '🎉 Deposit Approved & Loaded!',
-          body: `$${req.amount.toFixed(2)}${req.bonusAmount > 0 ? ` (+ $${req.bonusAmount.toFixed(2)} bonus = $${req.finalWalletCredit.toFixed(2)} total)` : ''} loaded to ${req.targetGameName || 'your game'}.`,
-          url: '/#games',
-          tag: `topup_${req.id}`,
-          actionType: 'deposit',
-        })
-        .catch(() => {});
-    }
-
-    if (supabase && isSupabaseConfigured()) {
-      const cumulativeDeposited = Math.max(
-        wallet.totalDeposited || 0,
-        computeCumulativeCompletedDeposits(allReqs, req.customerId)
-      );
-      wallet.totalDeposited = cumulativeDeposited;
-      wallets[req.customerId] = wallet;
-      this.cache[STORAGE_KEYS.WALLETS] = wallets;
-      this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
-
-      supabase.from('topups').update({
-        status: 'completed',
-        amount: req.amount,
-        bonus_amount: req.bonusAmount,
-        reviewer_id: params.reviewerId,
-        reviewer_name: params.reviewerName,
-        review_notes: req.reviewNotes,
-        updated_at: req.updatedAt,
-      }).eq('id', req.id).then(
-        () => {
-          if (!options?.skipReferralEval) {
-            void this.triggerServerReferralEvaluation(req.customerId);
-          }
+      const res = await fetch('/api/deposits', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
         },
-        (err) => console.warn('Supabase topup approve sync error:', err)
+        body: JSON.stringify({
+          amount: Number.isFinite(params.amount) ? Number(params.amount.toFixed(2)) : 0,
+          method: params.method,
+          methodName: params.methodName,
+          targetGameCatalogId: params.targetGameCatalogId?.trim() || undefined,
+          targetGameName: params.targetGameName?.trim() || undefined,
+          targetGameUsername: params.targetGameUsername?.trim() || undefined,
+          receiptUrl: cleanReceiptUrl,
+          receiptName: params.receiptName?.trim() || undefined,
+          providerRef: params.providerRef?.trim() || undefined,
+          cryptoNetwork: params.cryptoNetwork?.trim() || undefined,
+          cryptoTxHash: params.cryptoTxHash?.trim() || undefined,
+          depositAddress: params.depositAddress?.trim() || undefined,
+        }),
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseDepositApiError(
+            res.status,
+            rawText,
+            'Failed to submit deposit request.',
+          ),
+        };
+      }
+
+      let payload: {
+        deposit?: Record<string, unknown>;
+        wallet?: Record<string, unknown>;
+        message?: string;
+      };
+      try {
+        payload = JSON.parse(rawText) as {
+          deposit?: Record<string, unknown>;
+          wallet?: Record<string, unknown>;
+          message?: string;
+        };
+      } catch {
+        return {
+          success: false,
+          message: 'Received unexpected response from deposit service.',
+        };
+      }
+
+      if (!payload?.deposit?.id) {
+        return {
+          success: false,
+          message: 'Invalid deposit response from server.',
+        };
+      }
+
+      this.applyTopupRows([payload.deposit], false);
+      const newReq =
+        findRequestById(this.getTopUpRequests(), String(payload.deposit.id)) ||
+        mapDbTopupRowToRequest(payload.deposit);
+
+      if (payload.wallet && (payload.wallet.customerId || payload.wallet.customer_id)) {
+        this.applyWalletRows([payload.wallet]);
+      } else {
+        this.reconcileCustomerWallet(newReq.customerId);
+      }
+
+      this.setUserRegisteredMethod(
+        newReq.customerId,
+        newReq.method,
+        newReq.providerRef || newReq.cryptoTxHash || newReq.depositAddress,
       );
 
-      supabase.from('wallets').update({
-        total_deposited: cumulativeDeposited,
-        updated_at: new Date().toISOString(),
-      }).eq('customer_id', req.customerId).then(() => {}, (err) => console.warn('Supabase wallet topup sync error:', err));
-    } else if (!options?.skipReferralEval) {
-      this.checkAndAwardReferral(req.customerId, req.amount);
+      this.createNotification({
+        userId: newReq.customerId,
+        title: 'Top-Up Submitted',
+        message:
+          newReq.amount > 0
+            ? `Your top-up of $${newReq.amount.toFixed(2)} for ${newReq.targetGameName || 'game'} (${newReq.methodName}) is under review.`
+            : `Your payment proof for ${newReq.targetGameName || 'game'} (${newReq.methodName}) has been submitted for review.`,
+        type: 'topup',
+        linkTab: 'topup',
+        linkRequestId: newReq.id,
+      });
+
+      // Automatically forward transaction to customer support chat for review & approval
+      try {
+        const conv = this.getOrCreateConversationForCustomer(
+          newReq.customerId,
+          newReq.customerName,
+        );
+        this.sendChatMessage({
+          conversationId: conv.id,
+          senderId: newReq.customerId,
+          senderName: newReq.customerName,
+          senderRole: 'customer',
+          text: formatTopUpSubmittedChatMessage({
+            amount: newReq.amount,
+            bonusAmount: newReq.bonusAmount,
+            methodName: newReq.methodName,
+            gameName: newReq.targetGameName,
+            isCompleted: false,
+          }),
+          attachmentUrl: newReq.receiptUrl,
+          attachmentName: newReq.receiptName,
+          isInternalNote: false,
+          transactionData: {
+            transactionType: 'topup',
+            requestId: newReq.id,
+            gameName: newReq.targetGameName,
+            gameUsername: newReq.targetGameUsername,
+            amount: newReq.amount,
+            bonusAmount: newReq.bonusAmount,
+            bonusPercentage: newReq.bonusPercentage,
+            finalCredit: newReq.finalWalletCredit,
+            methodName: newReq.methodName,
+            status: 'pending',
+            proofUrl: newReq.receiptUrl,
+            proofName: newReq.receiptName,
+            details: newReq.providerRef || newReq.cryptoTxHash,
+          },
+        });
+      } catch (chatErr) {
+        console.warn('Customer topup chat notice:', chatErr);
+      }
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'topup_submitted', requestId: newReq.id },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        message:
+          payload.message ||
+          `Payment proof submitted! Your deposit (+${newReq.bonusPercentage || 0}% bonus) will be credited to ${newReq.targetGameName || 'your game'} shortly.`,
+        request: newReq,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to connect to deposit service.',
+      };
     }
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'topup_approved', requestId: req.id } }));
-
-    return { success: true, message: 'Deposit successfully approved and credited.' };
-  }
-
-  public rejectTopUp(params: {
-    requestId: string;
-    reviewerId: string;
-    reviewerName: string;
-    reason: string;
-  }): { success: boolean; message: string } {
-    const allReqs = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
-    const req = allReqs.find((r) => r.id === params.requestId);
-    if (!req) return { success: false, message: 'Request not found' };
-    if (req.status === 'completed') return { success: false, message: 'Cannot reject completed deposit.' };
-
-    req.status = 'rejected';
-    req.reviewerId = params.reviewerId;
-    req.reviewerName = params.reviewerName;
-    req.reviewNotes = params.reason;
-    req.updatedAt = new Date().toISOString();
-    this.save(STORAGE_KEYS.TOPUPS, allReqs);
-
-    // Release pending counter
-    const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
-    if (wallets[req.customerId]) {
-      wallets[req.customerId].pendingDepositBalance = Math.max(0, wallets[req.customerId].pendingDepositBalance - req.amount);
-      wallets[req.customerId].lastUpdatedAt = new Date().toISOString();
-      this.save(STORAGE_KEYS.WALLETS, wallets, true);
-      void this.syncWalletFieldsToSupabase(
-        req.customerId,
-        { pending_deposit: wallets[req.customerId].pendingDepositBalance },
-        wallets[req.customerId]
-      );
-    }
-
-    this.createNotification({
-      userId: req.customerId,
-      title: 'Deposit Request Declined',
-      message: `Your deposit was rejected. Reason: ${params.reason}`,
-      type: 'topup',
-      linkTab: 'topup',
-      linkRequestId: req.id,
-    });
-
-    this.logAudit({
-      actorId: params.reviewerId,
-      actorName: params.reviewerName,
-      actorRole: 'agent',
-      action: 'TOPUP_REJECTED',
-      entityType: 'topup',
-      entityId: req.id,
-      details: `Declined deposit for ${req.customerName}. Reason: ${params.reason}`,
-    });
-
-    // Update transaction card in chat thread
-    this.updateChatTransactionStatus(req.id, 'rejected', params.reviewerName, params.reason);
-
-    if (supabase && isSupabaseConfigured()) {
-      supabase.from('topups').update({
-        status: 'rejected',
-        reviewer_id: params.reviewerId,
-        reviewer_name: params.reviewerName,
-        review_notes: params.reason,
-        updated_at: req.updatedAt,
-      }).eq('id', req.id).then(() => {}, (err) => console.warn('Supabase topup reject sync error:', err));
-    }
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'topup_rejected', requestId: req.id } }));
-
-    return { success: true, message: 'Deposit rejected.' };
   }
 
   public async approveTopUpAsync(params: {
@@ -4555,53 +4198,185 @@ class DataService {
     reviewerName: string;
     notes?: string;
     verifiedAmount?: number;
-  }): Promise<{ success: boolean; message: string }> {
-    const lookup = await this.ensureTopUpRequest(params.requestId, { forceRefresh: true });
-    if (!lookup.request) {
+  }): Promise<{ success: boolean; message: string; request?: TopUpRequest }> {
+    const cleanId = (params.requestId || '').trim();
+    if (!cleanId) {
+      return { success: false, message: 'Deposit request ID is required.' };
+    }
+
+    try {
+      const res = await fetch(`/api/deposits/${encodeURIComponent(cleanId)}/approve`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          verifiedAmount:
+            params.verifiedAmount !== undefined && Number.isFinite(params.verifiedAmount)
+              ? Number(params.verifiedAmount.toFixed(2))
+              : undefined,
+          notes: params.notes?.trim() || undefined,
+        }),
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseDepositApiError(
+            res.status,
+            rawText,
+            'Failed to approve deposit request.',
+          ),
+        };
+      }
+
+      let payload: {
+        deposit?: Record<string, unknown>;
+        wallet?: Record<string, unknown>;
+        message?: string;
+      };
+      try {
+        payload = JSON.parse(rawText) as {
+          deposit?: Record<string, unknown>;
+          wallet?: Record<string, unknown>;
+          message?: string;
+        };
+      } catch {
+        return {
+          success: false,
+          message: 'Received unexpected response when approving deposit.',
+        };
+      }
+
+      if (!payload?.deposit?.id) {
+        return {
+          success: false,
+          message: 'Invalid deposit approval response from server.',
+        };
+      }
+
+      this.applyTopupRows([payload.deposit], false);
+      const updatedReq =
+        findRequestById(this.getTopUpRequests(), String(payload.deposit.id)) ||
+        mapDbTopupRowToRequest(payload.deposit);
+
+      if (payload.wallet && (payload.wallet.customerId || payload.wallet.customer_id)) {
+        this.applyWalletRows([payload.wallet]);
+      } else {
+        void this.fetchWalletFromServer({ customerId: updatedReq.customerId, silentEvent: true });
+      }
+      this.reconcileCustomerWallet(updatedReq.customerId);
+      void this.fetchWalletTransactionsFromServer({
+        customerId: updatedReq.customerId,
+        limit: 25,
+        replaceAll: false,
+        silentEvent: true,
+      });
+
+      const allAccounts = this.getGameAccounts();
+      const gameAcc = allAccounts.find(
+        (a) =>
+          a.customerId === updatedReq.customerId &&
+          (a.gameCatalogId === updatedReq.targetGameCatalogId ||
+            a.gameName.toLowerCase() === updatedReq.targetGameName?.toLowerCase()),
+      );
+      const hasActiveCredentials = Boolean(
+        gameAcc && gameAcc.status === 'active' && gameAcc.username,
+      );
+
+      if (hasActiveCredentials && gameAcc) {
+        gameAcc.balance = (gameAcc.balance || 0) + (updatedReq.finalWalletCredit || updatedReq.amount);
+        gameAcc.updatedAt = updatedReq.updatedAt;
+        this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
+      }
+
+      this.createNotification({
+        userId: updatedReq.customerId,
+        title: 'Game Top-Up Approved & Loaded',
+        message: `Your deposit of $${updatedReq.amount.toFixed(2)}${updatedReq.bonusAmount > 0 ? ` plus $${updatedReq.bonusAmount.toFixed(2)} bonus` : ''} was loaded directly into your ${updatedReq.targetGameName || 'game'} account! (Tracked as latest top-up).`,
+        type: 'topup',
+        linkTab: 'topup',
+        linkRequestId: updatedReq.id,
+      });
+
+      this.updateChatTransactionStatus(
+        updatedReq.id,
+        'completed',
+        updatedReq.reviewerName || params.reviewerName,
+        updatedReq.reviewNotes,
+        {
+          amount: updatedReq.amount,
+          bonusAmount: updatedReq.bonusAmount,
+          finalCredit: updatedReq.finalWalletCredit,
+        },
+      );
+      await this.persistChatTransactionStatusInSupabase(
+        updatedReq.id,
+        updatedReq.customerId,
+      );
+
+      try {
+        const conv = this.getOrCreateConversationForCustomer(
+          updatedReq.customerId,
+          updatedReq.customerName,
+        );
+        this.sendChatMessage({
+          conversationId: conv.id,
+          senderId: updatedReq.reviewerId || params.reviewerId,
+          senderName: updatedReq.reviewerName || params.reviewerName,
+          senderRole: 'agent',
+          text: formatTopUpApprovedChatMessage({
+            totalCredit: updatedReq.finalWalletCredit,
+            baseAmount: updatedReq.amount,
+            bonusAmount: updatedReq.bonusAmount,
+            gameName: updatedReq.targetGameName,
+            gameUsername: hasActiveCredentials ? gameAcc?.username : undefined,
+            hasActiveCredentials,
+          }),
+          isInternalNote: false,
+        });
+      } catch (chatErr) {
+        console.warn('Top-up approval chat dispatch warning:', chatErr);
+      }
+
+      if (typeof window !== 'undefined') {
+        webPushClient
+          .dispatchPushAlert({
+            recipientId: updatedReq.customerId,
+            recipientRole: 'customer',
+            title: '🎉 Deposit Approved & Loaded!',
+            body: `$${updatedReq.amount.toFixed(2)}${updatedReq.bonusAmount > 0 ? ` (+ $${updatedReq.bonusAmount.toFixed(2)} bonus = $${updatedReq.finalWalletCredit.toFixed(2)} total)` : ''} loaded to ${updatedReq.targetGameName || 'your game'}.`,
+            url: '/#games',
+            tag: `topup_${updatedReq.id}`,
+            actionType: 'deposit',
+          })
+          .catch(() => {});
+      }
+
+      await this.triggerServerReferralEvaluation(updatedReq.customerId);
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'topup_approved', requestId: updatedReq.id },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        message: payload.message || 'Deposit successfully approved and credited.',
+        request: updatedReq,
+      };
+    } catch (err: any) {
       return {
         success: false,
-        message: lookup.error
-          ? `Unable to verify deposit request from database: ${lookup.error}`
-          : 'Request not found',
+        message: err?.message || 'Unable to connect to deposit service.',
       };
     }
-
-    const res = this.approveTopUp(params, { skipReferralEval: true });
-    if (!res.success) return res;
-
-    if (supabase && isSupabaseConfigured()) {
-      const updatedReq = findRequestById(
-        this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS),
-        params.requestId
-      );
-      if (updatedReq) {
-        const { error } = await supabase
-          .from('topups')
-          .update({
-            status: 'completed',
-            amount: updatedReq.amount,
-            bonus_amount: updatedReq.bonusAmount,
-            reviewer_id: params.reviewerId,
-            reviewer_name: params.reviewerName,
-            review_notes: updatedReq.reviewNotes,
-            updated_at: updatedReq.updatedAt,
-          })
-          .eq('id', updatedReq.id);
-        if (error) {
-          console.warn('approveTopUpAsync Supabase update error:', error);
-          return {
-            success: false,
-            message: `Failed to save top-up approval to database: ${error.message}`,
-          };
-        }
-        await this.persistChatTransactionStatusInSupabase(updatedReq.id, updatedReq.customerId);
-        await this.triggerServerReferralEvaluation(updatedReq.customerId);
-      }
-    } else {
-      await this.triggerServerReferralEvaluation(lookup.request.customerId);
-    }
-
-    return res;
   }
 
   public async rejectTopUpAsync(params: {
@@ -4609,48 +4384,117 @@ class DataService {
     reviewerId: string;
     reviewerName: string;
     reason: string;
-  }): Promise<{ success: boolean; message: string }> {
-    const lookup = await this.ensureTopUpRequest(params.requestId, { forceRefresh: true });
-    if (!lookup.request) {
+  }): Promise<{ success: boolean; message: string; request?: TopUpRequest }> {
+    const cleanId = (params.requestId || '').trim();
+    if (!cleanId) {
+      return { success: false, message: 'Deposit request ID is required.' };
+    }
+    const cleanReason = (params.reason || '').trim();
+    if (!cleanReason) {
+      return { success: false, message: 'Rejection reason is required.' };
+    }
+
+    try {
+      const res = await fetch(`/api/deposits/${encodeURIComponent(cleanId)}/reject`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          reason: cleanReason,
+        }),
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseDepositApiError(
+            res.status,
+            rawText,
+            'Failed to reject deposit request.',
+          ),
+        };
+      }
+
+      let payload: {
+        deposit?: Record<string, unknown>;
+        wallet?: Record<string, unknown>;
+        message?: string;
+      };
+      try {
+        payload = JSON.parse(rawText) as {
+          deposit?: Record<string, unknown>;
+          wallet?: Record<string, unknown>;
+          message?: string;
+        };
+      } catch {
+        return {
+          success: false,
+          message: 'Received unexpected response when rejecting deposit.',
+        };
+      }
+
+      if (!payload?.deposit?.id) {
+        return {
+          success: false,
+          message: 'Invalid deposit rejection response from server.',
+        };
+      }
+
+      this.applyTopupRows([payload.deposit], false);
+      const updatedReq =
+        findRequestById(this.getTopUpRequests(), String(payload.deposit.id)) ||
+        mapDbTopupRowToRequest(payload.deposit);
+
+      if (payload.wallet && (payload.wallet.customerId || payload.wallet.customer_id)) {
+        this.applyWalletRows([payload.wallet]);
+      } else {
+        void this.fetchWalletFromServer({ customerId: updatedReq.customerId, silentEvent: true });
+      }
+      this.reconcileCustomerWallet(updatedReq.customerId);
+
+      this.createNotification({
+        userId: updatedReq.customerId,
+        title: 'Deposit Request Declined',
+        message: `Your deposit was rejected. Reason: ${cleanReason}`,
+        type: 'topup',
+        linkTab: 'topup',
+        linkRequestId: updatedReq.id,
+      });
+
+      this.updateChatTransactionStatus(
+        updatedReq.id,
+        'rejected',
+        updatedReq.reviewerName || params.reviewerName,
+        cleanReason,
+      );
+      await this.persistChatTransactionStatusInSupabase(
+        updatedReq.id,
+        updatedReq.customerId,
+      );
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'topup_rejected', requestId: updatedReq.id },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        message: payload.message || 'Deposit rejected.',
+        request: updatedReq,
+      };
+    } catch (err: any) {
       return {
         success: false,
-        message: lookup.error
-          ? `Unable to verify deposit request from database: ${lookup.error}`
-          : 'Request not found',
+        message: err?.message || 'Unable to connect to deposit service.',
       };
     }
-
-    const res = this.rejectTopUp(params);
-    if (!res.success) return res;
-
-    if (supabase && isSupabaseConfigured()) {
-      const updatedReq = findRequestById(
-        this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS),
-        params.requestId
-      );
-      if (updatedReq) {
-        const { error } = await supabase
-          .from('topups')
-          .update({
-            status: 'rejected',
-            reviewer_id: params.reviewerId,
-            reviewer_name: params.reviewerName,
-            review_notes: params.reason,
-            updated_at: updatedReq.updatedAt,
-          })
-          .eq('id', updatedReq.id);
-        if (error) {
-          console.warn('rejectTopUpAsync Supabase update error:', error);
-          return {
-            success: false,
-            message: `Failed to save top-up rejection to database: ${error.message}`,
-          };
-        }
-        await this.persistChatTransactionStatusInSupabase(updatedReq.id, updatedReq.customerId);
-      }
-    }
-
-    return res;
   }
 
   public async createStaffTopUpAsync(params: {
@@ -4704,245 +4548,314 @@ class DataService {
       return { success: false, message: draft.error || 'Invalid top-up parameters.' };
     }
 
-    const newReq = draft.request;
-    const isCompleted = newReq.status === 'completed';
-
-    if (isSupabaseConfigured() && supabase) {
-      const { error: topupErr } = await supabase.from('topups').upsert({
-        id: newReq.id,
-        customer_id: newReq.customerId,
-        customer_name: newReq.customerName,
-        amount: newReq.amount,
-        bonus_amount: newReq.bonusAmount || 0,
-        payment_method_id: newReq.method || 'manual_receipt',
-        payment_method_name: newReq.methodName || 'Direct Support Desk',
-        status: newReq.status,
-        proof_url: newReq.receiptUrl || null,
-        target_game_name: newReq.targetGameName || null,
-        target_game_account_id: newReq.targetGameCatalogId || null,
-        customer_notes: newReq.providerRef || null,
-        reviewer_id: newReq.reviewerId || null,
-        reviewer_name: newReq.reviewerName || null,
-        review_notes: newReq.reviewNotes || null,
-        created_at: newReq.createdAt,
-        updated_at: newReq.updatedAt,
+    try {
+      const res = await fetch('/api/deposits/staff', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          customerId: params.customerId,
+          amount: draft.request.amount,
+          bonusPercentage: draft.request.bonusPercentage,
+          method: params.method,
+          methodName: params.methodName || 'Direct Support Desk',
+          targetGameCatalogId: params.targetGameCatalogId?.trim() || undefined,
+          targetGameName: params.targetGameName?.trim() || undefined,
+          targetGameUsername: params.targetGameUsername?.trim() || undefined,
+          providerRef: params.providerRef?.trim() || undefined,
+          receiptUrl: params.receiptUrl?.trim() || undefined,
+          receiptName: params.receiptName?.trim() || undefined,
+          notes: params.notes?.trim() || undefined,
+          status: params.status,
+        }),
       });
 
-      if (topupErr) {
-        console.warn('createStaffTopUpAsync Supabase error:', topupErr);
+      const rawText = await res.text();
+      if (!res.ok) {
         return {
           success: false,
-          message: `Failed to save top-up to database: ${topupErr.message}`,
+          message: parseDepositApiError(
+            res.status,
+            rawText,
+            'Failed to create staff deposit on server.',
+          ),
         };
       }
-    }
 
-    // Update topups cache & local storage
-    const allReqs = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
-    allReqs.unshift(newReq);
-    this.cache[STORAGE_KEYS.TOPUPS] = allReqs;
-    this.saveToLocalStorage(STORAGE_KEYS.TOPUPS, allReqs);
+      let payload: {
+        deposit?: Record<string, unknown>;
+        wallet?: Record<string, unknown>;
+        message?: string;
+      };
+      try {
+        payload = JSON.parse(rawText) as {
+          deposit?: Record<string, unknown>;
+          wallet?: Record<string, unknown>;
+          message?: string;
+        };
+      } catch {
+        return {
+          success: false,
+          message: 'Received unexpected response when saving deposit.',
+        };
+      }
 
-    // Update customer wallet cleanly
-    const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
-    const baseWallet = wallets[params.customerId] || {
-      customerId: params.customerId,
-      currency: config.currency,
-      availableBalance: 0,
-      referralBonusBalance: 0,
-      reservedBalance: 0,
-      pendingDepositBalance: 0,
-      lastTopUpAmount: 0,
-      totalDeposited: 0,
-      totalWithdrawn: 0,
-      lastUpdatedAt: newReq.updatedAt,
-    };
+      if (!payload?.deposit?.id) {
+        return {
+          success: false,
+          message: 'Invalid deposit response from server.',
+        };
+      }
 
-    if (isCompleted) {
-      baseWallet.lastTopUpAmount = newReq.finalWalletCredit || newReq.amount;
-      baseWallet.lastTopUpGame = newReq.targetGameName || baseWallet.lastTopUpGame;
-      baseWallet.lastTopUpAt = newReq.updatedAt;
-      baseWallet.totalDeposited = Math.max(
-        baseWallet.totalDeposited || 0,
-        computeCumulativeCompletedDeposits(allReqs, params.customerId)
-      );
-    } else {
-      baseWallet.pendingDepositBalance = Number(
-        ((baseWallet.pendingDepositBalance || 0) + newReq.amount).toFixed(2)
-      );
-    }
-    baseWallet.lastUpdatedAt = newReq.updatedAt;
-    const reconciledWallet = reconcileWalletWithTopups(baseWallet, allReqs, {
-      authoritativeTopupsLoaded: true,
-    });
-    wallets[params.customerId] = reconciledWallet;
-    this.cache[STORAGE_KEYS.WALLETS] = wallets;
-    this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+      this.applyTopupRows([payload.deposit], false);
+      const savedReq =
+        findRequestById(this.getTopUpRequests(), String(payload.deposit.id)) ||
+        mapDbTopupRowToRequest(payload.deposit);
 
-    if (isSupabaseConfigured() && supabase) {
-      await this.syncWalletFieldsToSupabase(
-        params.customerId,
-        isCompleted
-          ? { total_deposited: reconciledWallet.totalDeposited || 0 }
-          : { pending_deposit: reconciledWallet.pendingDepositBalance || 0 },
-        reconciledWallet
-      );
-    }
+      if (payload.wallet && (payload.wallet.customerId || payload.wallet.customer_id)) {
+        this.applyWalletRows([payload.wallet]);
+      } else {
+        void this.fetchWalletFromServer({ customerId: params.customerId, silentEvent: true });
+      }
+      this.reconcileCustomerWallet(params.customerId);
+      void this.fetchWalletTransactionsFromServer({
+        customerId: params.customerId,
+        limit: 25,
+        replaceAll: false,
+        silentEvent: true,
+      });
 
-    if (isCompleted) {
-      if (newReq.targetGameCatalogId) {
-        const allAccounts = this.getGameAccounts();
-        const gameAcc = allAccounts.find(
-          (a) =>
-            a.customerId === params.customerId &&
-            (a.gameCatalogId === newReq.targetGameCatalogId ||
-              (newReq.targetGameName &&
-                a.gameName?.toLowerCase() === newReq.targetGameName.toLowerCase()))
+      const isCompleted = savedReq.status === 'completed';
+
+      if (isCompleted) {
+        if (savedReq.targetGameCatalogId) {
+          const allAccounts = this.getGameAccounts();
+          const gameAcc = allAccounts.find(
+            (a) =>
+              a.customerId === params.customerId &&
+              (a.gameCatalogId === savedReq.targetGameCatalogId ||
+                (savedReq.targetGameName &&
+                  a.gameName?.toLowerCase() === savedReq.targetGameName.toLowerCase())),
+          );
+          if (gameAcc) {
+            gameAcc.balance =
+              (gameAcc.balance || 0) + (savedReq.finalWalletCredit || savedReq.amount);
+            gameAcc.updatedAt = savedReq.updatedAt;
+            this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
+          }
+        }
+
+        await this.triggerServerReferralEvaluation(params.customerId);
+      }
+
+      if (params.postToChat) {
+        const conv = this.getOrCreateConversationForCustomer(
+          savedReq.customerId,
+          savedReq.customerName,
         );
-        if (gameAcc) {
-          gameAcc.balance = (gameAcc.balance || 0) + (newReq.finalWalletCredit || newReq.amount);
-          gameAcc.updatedAt = newReq.updatedAt;
-          this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
-        }
-      }
-
-      const nowTs = newReq.updatedAt;
-      const allTxs = this.load<WalletTransaction[]>(STORAGE_KEYS.TRANSACTIONS, INITIAL_TRANSACTIONS);
-      const createdTxs: WalletTransaction[] = [
-        {
-          id: `tx_dep_${newReq.id}`,
-          customerId: params.customerId,
-          type: 'deposit',
-          amount: newReq.amount,
-          fee: newReq.feeAmount || 0,
-          netAmount: newReq.amount,
-          currency: config.currency,
-          balanceAfter: reconciledWallet.availableBalance,
-          targetGameName: newReq.targetGameName,
-          targetGameUsername: newReq.targetGameUsername,
-          relatedRequestId: newReq.id,
-          description: newReq.targetGameName
-            ? `Staff Logged Top-Up to ${newReq.targetGameName}${newReq.targetGameUsername ? ` (${newReq.targetGameUsername})` : ''} via ${newReq.methodName}`
-            : `Staff Logged ${newReq.methodName} Deposit`,
-          idempotencyKey: `idemp_dep_${newReq.id}`,
-          status: 'completed',
-          createdAt: nowTs,
-        },
-      ];
-
-      if ((newReq.bonusAmount || 0) > 0) {
-        createdTxs.push({
-          id: `tx_bns_${newReq.id}`,
-          customerId: params.customerId,
-          type: 'bonus',
-          amount: newReq.bonusAmount || 0,
-          fee: 0,
-          netAmount: newReq.bonusAmount || 0,
-          currency: config.currency,
-          balanceAfter: reconciledWallet.availableBalance,
-          targetGameName: newReq.targetGameName,
-          relatedRequestId: newReq.id,
-          description: `Promo Bonus (${newReq.bonusPercentage || 0}%) Credited by Staff`,
-          idempotencyKey: `idemp_bns_${newReq.id}`,
-          status: 'completed',
-          createdAt: nowTs,
+        this.sendChatMessage({
+          conversationId: conv.id,
+          senderId: savedReq.reviewerId || params.reviewerId,
+          senderName: savedReq.reviewerName || params.reviewerName,
+          senderRole: 'agent',
+          text: formatTopUpSubmittedChatMessage({
+            amount: savedReq.amount,
+            bonusAmount: savedReq.bonusAmount,
+            methodName: savedReq.methodName,
+            gameName: savedReq.targetGameName,
+            isCompleted,
+          }),
+          attachmentUrl: savedReq.receiptUrl,
+          attachmentName: savedReq.receiptName,
+          isInternalNote: false,
+          transactionData: {
+            transactionType: 'topup',
+            requestId: savedReq.id,
+            gameName: savedReq.targetGameName,
+            gameUsername: savedReq.targetGameUsername,
+            amount: savedReq.amount,
+            bonusAmount: savedReq.bonusAmount,
+            bonusPercentage: savedReq.bonusPercentage,
+            finalCredit: savedReq.finalWalletCredit,
+            methodName: savedReq.methodName,
+            status: isCompleted ? 'completed' : 'pending',
+            proofUrl: savedReq.receiptUrl,
+            proofName: savedReq.receiptName,
+            details: savedReq.providerRef,
+            notes: savedReq.reviewNotes,
+            approvedBy: isCompleted ? savedReq.reviewerName : undefined,
+            approvedAt: isCompleted ? savedReq.updatedAt : undefined,
+          },
         });
-      }
 
-      const nextTxs = [...createdTxs, ...allTxs];
-      this.cache[STORAGE_KEYS.TRANSACTIONS] = nextTxs;
-      this.saveToLocalStorage(STORAGE_KEYS.TRANSACTIONS, nextTxs);
+        this.createNotification({
+          userId: savedReq.customerId,
+          title: isCompleted ? 'Deposit Logged & Credited' : 'Deposit Request Created',
+          message: isCompleted
+            ? `$${(savedReq.finalWalletCredit || savedReq.amount).toFixed(2)} has been credited${savedReq.targetGameName ? ` to ${savedReq.targetGameName}` : ''}.`
+            : `A deposit request of $${savedReq.amount.toFixed(2)} was created for your review.`,
+          type: 'topup',
+          linkTab: 'wallet',
+          linkRequestId: savedReq.id,
+        });
 
-      if (isSupabaseConfigured() && supabase) {
-        const txRows = createdTxs.map((t) => ({
-          id: t.id,
-          customer_id: t.customerId,
-          amount: t.amount,
-          type: t.type,
-          status: t.status,
-          description: t.description,
-          reference_id: t.relatedRequestId || null,
-          game_name: t.targetGameName || null,
-          created_at: t.createdAt,
-        }));
-        const { error: txErr } = await supabase.from('transactions').upsert(txRows);
-        if (txErr) {
-          console.warn('createStaffTopUpAsync transactions upsert warning:', txErr);
+        if (isCompleted && typeof window !== 'undefined') {
+          webPushClient
+            .dispatchPushAlert({
+              recipientId: savedReq.customerId,
+              recipientRole: 'customer',
+              title: '💳 Deposit Credited!',
+              body: `$${(savedReq.finalWalletCredit || savedReq.amount).toFixed(2)} credited${savedReq.targetGameName ? ` to ${savedReq.targetGameName}` : ''}.`,
+              url: '/#wallet',
+              tag: `topup_${savedReq.id}`,
+              actionType: 'deposit',
+            })
+            .catch(() => {});
         }
       }
 
-      await this.triggerServerReferralEvaluation(params.customerId);
-    }
-
-    this.logAudit({
-      actorId: params.reviewerId,
-      actorName: params.reviewerName,
-      actorRole: 'agent',
-      action: isCompleted ? 'STAFF_TOPUP_LOGGED_COMPLETED' : 'STAFF_TOPUP_LOGGED_PENDING',
-      entityType: 'topup',
-      entityId: newReq.id,
-      details: `${isCompleted ? 'Logged completed' : 'Created pending'} top-up of $${newReq.amount.toFixed(2)} (+$${(newReq.bonusAmount || 0).toFixed(2)} bonus) for ${params.customerName}${newReq.targetGameName ? ` on ${newReq.targetGameName}` : ''}. Note: ${newReq.reviewNotes}`,
-    });
-
-    if (params.postToChat) {
-      const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
-      this.sendChatMessage({
-        conversationId: conv.id,
-        senderId: params.reviewerId,
-        senderName: params.reviewerName,
-        senderRole: 'agent',
-        text: formatTopUpSubmittedChatMessage({
-          amount: newReq.amount,
-          bonusAmount: newReq.bonusAmount,
-          methodName: newReq.methodName,
-          gameName: newReq.targetGameName,
-          isCompleted,
-        }),
-        attachmentUrl: newReq.receiptUrl,
-        attachmentName: newReq.receiptName,
-        isInternalNote: false,
-        transactionData: draft.chatTransactionData,
-      });
-
-      this.createNotification({
-        userId: params.customerId,
-        title: isCompleted ? 'Deposit Logged & Credited' : 'Deposit Request Created',
-        message: isCompleted
-          ? `$${(newReq.finalWalletCredit || newReq.amount).toFixed(2)} has been credited${newReq.targetGameName ? ` to ${newReq.targetGameName}` : ''}.`
-          : `A deposit request of $${newReq.amount.toFixed(2)} was created for your review.`,
-        type: 'topup',
-        linkTab: 'wallet',
-        linkRequestId: newReq.id,
-      });
-
-      if (isCompleted && typeof window !== 'undefined') {
-        webPushClient
-          .dispatchPushAlert({
-            recipientId: params.customerId,
-            recipientRole: 'customer',
-            title: '💳 Deposit Credited!',
-            body: `$${(newReq.finalWalletCredit || newReq.amount).toFixed(2)} credited${newReq.targetGameName ? ` to ${newReq.targetGameName}` : ''}.`,
-            url: '/#wallet',
-            tag: `topup_${newReq.id}`,
-            actionType: 'deposit',
-          })
-          .catch(() => {});
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: isCompleted ? 'topup_approved' : 'topup_submitted', requestId: savedReq.id },
+          }),
+        );
       }
+
+      return {
+        success: true,
+        message:
+          payload.message ||
+          (isCompleted
+            ? `Completed deposit of $${(savedReq.finalWalletCredit || savedReq.amount).toFixed(2)} saved.`
+            : `Pending deposit request of $${savedReq.amount.toFixed(2)} created.`),
+        request: savedReq,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to connect to deposit service.',
+      };
     }
+  }
 
-    window.dispatchEvent(
-      new CustomEvent('aetherpay_state_changed', {
-        detail: { key: isCompleted ? 'topup_approved' : 'topup_submitted', requestId: newReq.id },
-      })
-    );
+  public async fetchWithdrawalsFromServer(options?: {
+    customerId?: string;
+    status?: string;
+    beforeCreatedAt?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+    replaceAll?: boolean;
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    withdrawals: WithdrawalRequest[];
+    total: number;
+    hasMore: boolean;
+    error?: string;
+  }> {
+    try {
+      const params = new URLSearchParams();
+      if (options?.customerId?.trim()) {
+        params.set('customerId', options.customerId.trim());
+      }
+      if (options?.status?.trim()) {
+        params.set('status', options.status.trim());
+      }
+      if (options?.beforeCreatedAt?.trim()) {
+        params.set('beforeCreatedAt', options.beforeCreatedAt.trim());
+      }
+      if (options?.q?.trim()) {
+        params.set('q', options.q.trim());
+      }
+      if (options?.limit !== undefined) {
+        params.set('limit', String(options.limit));
+      }
+      if (options?.offset !== undefined) {
+        params.set('offset', String(options.offset));
+      }
 
-    return {
-      success: true,
-      message: isCompleted
-        ? `Completed deposit of $${(newReq.finalWalletCredit || newReq.amount).toFixed(2)} saved.`
-        : `Pending deposit request of $${newReq.amount.toFixed(2)} created.`,
-      request: newReq,
-    };
+      const query = params.toString();
+      const url = query ? `/api/withdrawals?${query}` : '/api/withdrawals';
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          withdrawals: [],
+          total: 0,
+          hasMore: false,
+          error: parseWithdrawalApiError(
+            res.status,
+            rawText,
+            'Failed to load withdrawal requests from server.',
+          ),
+        };
+      }
+
+      let payload: {
+        withdrawals?: unknown[];
+        total?: number;
+        hasMore?: boolean;
+      };
+      try {
+        payload = JSON.parse(rawText) as {
+          withdrawals?: unknown[];
+          total?: number;
+          hasMore?: boolean;
+        };
+      } catch {
+        return {
+          success: false,
+          withdrawals: [],
+          total: 0,
+          hasMore: false,
+          error: 'Received an unexpected response from withdrawal service.',
+        };
+      }
+
+      const rows = Array.isArray(payload?.withdrawals) ? payload.withdrawals : [];
+      this.applyWithdrawalRows(rows, Boolean(options?.replaceAll));
+
+      const mapped = rows
+        .filter((r: any) => r && r.id)
+        .map((r: any) => mapDbWithdrawalRowToRequest(r));
+
+      if (!options?.silentEvent && typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: STORAGE_KEYS.WITHDRAWALS },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        withdrawals: mapped,
+        total: Number(payload?.total ?? mapped.length),
+        hasMore: Boolean(payload?.hasMore),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        withdrawals: [],
+        total: 0,
+        hasMore: false,
+        error: err?.message || 'Unable to load withdrawal requests from server.',
+      };
+    }
   }
 
   public async createStaffWithdrawalAsync(params: {
@@ -4983,202 +4896,189 @@ class DataService {
       currency: config.currency,
     });
 
-    if (!draft.valid || !draft.request || !draft.chatTransactionData) {
+    if (!draft.valid || !draft.request) {
       return { success: false, message: draft.error || 'Invalid cashout parameters.' };
     }
 
-    const newReq = draft.request;
-    const isCompleted = newReq.status === 'completed';
-
-    if (isSupabaseConfigured() && supabase) {
-      const { error: wdrErr } = await supabase.from('withdrawals').upsert({
-        id: newReq.id,
-        customer_id: newReq.customerId,
-        customer_name: newReq.customerName,
-        amount: newReq.amount,
-        fee: newReq.feeAmount || 0,
-        net_amount: newReq.netPayout,
-        payout_method_id: newReq.method || 'manual_support',
-        payout_method_name: newReq.methodName || 'Customer Support Manual Payout',
-        payout_details: newReq.payoutDetails || {},
-        status: newReq.status,
-        reviewer_id: newReq.reviewerId || null,
-        reviewer_name: newReq.reviewerName || null,
-        review_notes: newReq.reviewNotes || null,
-        transaction_hash: newReq.payoutReference || null,
-        created_at: newReq.createdAt,
-        updated_at: newReq.updatedAt,
+    try {
+      const res = await fetch('/api/withdrawals/staff', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          customerId: params.customerId,
+          amount: draft.request.amount,
+          feeAmount: draft.request.feeAmount || 0,
+          method: params.method || 'manual_support',
+          methodName: params.methodName || 'Customer Support Manual Payout',
+          payoutHandle: params.payoutHandle?.trim() || undefined,
+          payoutReference: params.payoutReference?.trim() || undefined,
+          sourceGameCatalogId: params.sourceGameCatalogId?.trim() || undefined,
+          sourceGameName: params.sourceGameName?.trim() || undefined,
+          sourceGameUsername: params.sourceGameUsername?.trim() || undefined,
+          notes: params.notes?.trim() || undefined,
+          status: params.status,
+        }),
       });
 
-      if (wdrErr) {
-        console.warn('createStaffWithdrawalAsync Supabase error:', wdrErr);
+      const rawText = await res.text();
+      if (!res.ok) {
         return {
           success: false,
-          message: `Failed to save cashout to database: ${wdrErr.message}`,
+          message: parseWithdrawalApiError(
+            res.status,
+            rawText,
+            'Failed to create staff cashout on server.',
+          ),
         };
       }
-    }
 
-    const allReqs = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
-    allReqs.unshift(newReq);
-    this.cache[STORAGE_KEYS.WITHDRAWALS] = allReqs;
-    this.saveToLocalStorage(STORAGE_KEYS.WITHDRAWALS, allReqs);
-
-    const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
-    const wallet = wallets[params.customerId] || {
-      customerId: params.customerId,
-      currency: config.currency,
-      availableBalance: 0,
-      referralBonusBalance: 0,
-      reservedBalance: 0,
-      pendingDepositBalance: 0,
-      lastTopUpAmount: 0,
-      totalDeposited: 0,
-      totalWithdrawn: 0,
-      lastUpdatedAt: newReq.updatedAt,
-    };
-
-    if (isCompleted) {
-      wallet.totalWithdrawn = Math.max(
-        wallet.totalWithdrawn || 0,
-        computeCumulativeCompletedWithdrawals(allReqs, params.customerId)
-      );
-    }
-    wallet.lastUpdatedAt = newReq.updatedAt;
-    wallets[params.customerId] = wallet;
-    this.cache[STORAGE_KEYS.WALLETS] = wallets;
-    this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
-
-    if (isSupabaseConfigured() && supabase && isCompleted) {
-      await this.syncWalletFieldsToSupabase(
-        params.customerId,
-        { total_withdrawn: wallet.totalWithdrawn || 0 },
-        wallet
-      );
-    }
-
-    const allTxs = this.load<WalletTransaction[]>(STORAGE_KEYS.TRANSACTIONS, INITIAL_TRANSACTIONS);
-    const ledgerTx: WalletTransaction = {
-      id: `tx_wdr_${newReq.id}`,
-      customerId: params.customerId,
-      type: isCompleted ? 'withdrawal' : 'withdrawal_hold',
-      amount: newReq.amount,
-      fee: newReq.feeAmount || 0,
-      netAmount: newReq.netPayout,
-      currency: config.currency,
-      balanceAfter: wallet.availableBalance,
-      targetGameName: newReq.sourceGameName,
-      targetGameUsername: newReq.sourceGameUsername,
-      relatedRequestId: newReq.id,
-      description: isCompleted
-        ? `Staff Logged Cashout Paid Out via ${newReq.methodName}${newReq.payoutReference ? ` (${newReq.payoutReference})` : ''}`
-        : `Staff Created Cashout Request #${newReq.id.slice(-6)}${newReq.sourceGameName ? ` from ${newReq.sourceGameName}` : ''}`,
-      idempotencyKey: isCompleted ? `idemp_wdr_final_${newReq.id}` : `idemp_wdr_${newReq.id}`,
-      status: isCompleted ? 'completed' : 'pending',
-      createdAt: newReq.updatedAt,
-    };
-
-    const nextTxs = [ledgerTx, ...allTxs];
-    this.cache[STORAGE_KEYS.TRANSACTIONS] = nextTxs;
-    this.saveToLocalStorage(STORAGE_KEYS.TRANSACTIONS, nextTxs);
-
-    if (isSupabaseConfigured() && supabase) {
-      const { error: txErr } = await supabase.from('transactions').upsert({
-        id: ledgerTx.id,
-        customer_id: ledgerTx.customerId,
-        amount: ledgerTx.amount,
-        type: ledgerTx.type,
-        status: ledgerTx.status,
-        description: ledgerTx.description,
-        reference_id: ledgerTx.relatedRequestId || null,
-        game_name: ledgerTx.targetGameName || null,
-        created_at: ledgerTx.createdAt,
-      });
-      if (txErr) {
-        console.warn('createStaffWithdrawalAsync transaction upsert warning:', txErr);
+      let payload: {
+        withdrawal?: Record<string, unknown>;
+        wallet?: Record<string, unknown>;
+        message?: string;
+      };
+      try {
+        payload = JSON.parse(rawText) as {
+          withdrawal?: Record<string, unknown>;
+          wallet?: Record<string, unknown>;
+          message?: string;
+        };
+      } catch {
+        return {
+          success: false,
+          message: 'Received unexpected response when saving cashout.',
+        };
       }
-    }
 
-    this.logAudit({
-      actorId: params.reviewerId,
-      actorName: params.reviewerName,
-      actorRole: 'agent',
-      action: isCompleted ? 'STAFF_WITHDRAWAL_LOGGED_COMPLETED' : 'STAFF_WITHDRAWAL_LOGGED_PENDING',
-      entityType: 'withdrawal',
-      entityId: newReq.id,
-      details: `${isCompleted ? 'Logged completed' : 'Created pending'} emergency cashout of $${newReq.amount.toFixed(2)} (Net $${newReq.netPayout.toFixed(2)}) via ${newReq.methodName} for ${params.customerName}. Bypassed deposit lock. Note: ${newReq.reviewNotes}`,
-    });
-
-    if (params.postToChat) {
-      const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
-      this.sendChatMessage({
-        conversationId: conv.id,
-        senderId: params.reviewerId,
-        senderName: params.reviewerName,
-        senderRole: 'agent',
-        text: formatCashoutChatMessage({
-          amount: newReq.amount,
-          netPayout: newReq.netPayout,
-          methodName: newReq.methodName,
-          gameName: newReq.sourceGameName,
-          status: isCompleted ? 'completed' : 'submitted',
-          payoutReference: newReq.payoutReference,
-        }),
-        isInternalNote: false,
-        transactionData: draft.chatTransactionData,
-      });
-
-      this.createNotification({
-        userId: params.customerId,
-        title: isCompleted ? 'Cashout Logged & Completed' : 'Cashout Request Created',
-        message: isCompleted
-          ? `Your cashout of $${newReq.netPayout.toFixed(2)} via ${newReq.methodName} has been recorded as completed.`
-          : `A cashout request of $${newReq.amount.toFixed(2)} via ${newReq.methodName} was created for review.`,
-        type: 'withdrawal',
-        linkTab: 'wallet',
-        linkRequestId: newReq.id,
-      });
-
-      if (isCompleted && typeof window !== 'undefined') {
-        webPushClient
-          .dispatchPushAlert({
-            recipientId: params.customerId,
-            recipientRole: 'customer',
-            title: '💸 Payout Recorded & Completed!',
-            body: `Your $${newReq.netPayout.toFixed(2)} cashout via ${newReq.methodName} is complete.`,
-            url: '/#wallet',
-            tag: `wdr_comp_${newReq.id}`,
-            actionType: 'payout',
-          })
-          .catch(() => {});
+      if (!payload?.withdrawal?.id) {
+        return {
+          success: false,
+          message: 'Invalid cashout response from server.',
+        };
       }
+
+      this.applyWithdrawalRows([payload.withdrawal], false);
+      const savedReq =
+        findRequestById(this.getWithdrawalRequests(), String(payload.withdrawal.id)) ||
+        mapDbWithdrawalRowToRequest(payload.withdrawal);
+
+      if (payload.wallet && (payload.wallet.customerId || payload.wallet.customer_id)) {
+        this.applyWalletRows([payload.wallet]);
+      } else {
+        void this.fetchWalletFromServer({ customerId: params.customerId, silentEvent: true });
+      }
+      void this.fetchWalletTransactionsFromServer({
+        customerId: params.customerId,
+        limit: 25,
+        replaceAll: false,
+        silentEvent: true,
+      });
+
+      const isCompleted = savedReq.status === 'completed';
+
+      if (params.postToChat) {
+        const conv = this.getOrCreateConversationForCustomer(
+          savedReq.customerId,
+          savedReq.customerName,
+        );
+        this.sendChatMessage({
+          conversationId: conv.id,
+          senderId: params.reviewerId,
+          senderName: params.reviewerName,
+          senderRole: 'agent',
+          text: formatCashoutChatMessage({
+            amount: savedReq.amount,
+            netPayout: savedReq.netPayout,
+            methodName: savedReq.methodName,
+            gameName: savedReq.sourceGameName,
+            status: isCompleted ? 'completed' : 'submitted',
+            payoutReference: savedReq.payoutReference,
+          }),
+          isInternalNote: false,
+          transactionData: {
+            transactionType: 'withdrawal',
+            requestId: savedReq.id,
+            gameName: savedReq.sourceGameName,
+            gameUsername: savedReq.sourceGameUsername,
+            amount: savedReq.amount,
+            methodName: savedReq.methodName,
+            status: isCompleted ? 'completed' : 'pending',
+            details: [params.payoutHandle?.trim(), savedReq.payoutReference]
+              .filter(Boolean)
+              .join(' • ') || undefined,
+            notes: savedReq.reviewNotes,
+            approvedBy: isCompleted ? savedReq.reviewerName : undefined,
+            approvedAt: isCompleted ? savedReq.updatedAt : undefined,
+          },
+        });
+
+        this.createNotification({
+          userId: savedReq.customerId,
+          title: isCompleted ? 'Cashout Logged & Completed' : 'Cashout Request Created',
+          message: isCompleted
+            ? `Your cashout of $${(savedReq.netPayout ?? savedReq.amount).toFixed(2)} via ${savedReq.methodName} has been recorded as completed.`
+            : `A cashout request of $${savedReq.amount.toFixed(2)} via ${savedReq.methodName} was created for review.`,
+          type: 'withdrawal',
+          linkTab: 'wallet',
+          linkRequestId: savedReq.id,
+        });
+
+        if (isCompleted && typeof window !== 'undefined') {
+          webPushClient
+            .dispatchPushAlert({
+              recipientId: savedReq.customerId,
+              recipientRole: 'customer',
+              title: '💸 Payout Recorded & Completed!',
+              body: `Your $${(savedReq.netPayout ?? savedReq.amount).toFixed(2)} cashout via ${savedReq.methodName} is complete.`,
+              url: '/#wallet',
+              tag: `wdr_comp_${savedReq.id}`,
+              actionType: 'payout',
+            })
+            .catch(() => {});
+        }
+      }
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'withdrawal_updated', requestId: savedReq.id },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        message:
+          payload.message ||
+          (isCompleted
+            ? `Completed cashout of $${savedReq.amount.toFixed(2)} logged.`
+            : `Pending cashout request of $${savedReq.amount.toFixed(2)} created.`),
+        request: savedReq,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to connect to withdrawal service.',
+      };
     }
-
-    window.dispatchEvent(
-      new CustomEvent('aetherpay_state_changed', {
-        detail: { key: 'withdrawal_updated', requestId: newReq.id },
-      })
-    );
-
-    return {
-      success: true,
-      message: isCompleted
-        ? `Completed cashout of $${newReq.amount.toFixed(2)} logged.`
-        : `Pending cashout request of $${newReq.amount.toFixed(2)} created.`,
-      request: newReq,
-    };
   }
 
   // Cashout / Withdrawal Workflow
   public getWithdrawalRequests(customerId?: string): WithdrawalRequest[] {
     const reqs = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
     if (customerId) {
-      return reqs.filter((r) => r.customerId === customerId).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return reqs
+        .filter((r) => r.customerId === customerId)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     }
     return reqs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
-  public submitWithdrawal(params: {
+  public async submitWithdrawalAsync(params: {
     customerId: string;
     customerName: string;
     amount: number;
@@ -5189,334 +5089,166 @@ class DataService {
     sourceGameUsername?: string;
     playerNotes?: string;
     payoutDetails?: WithdrawalRequest['payoutDetails'];
-  }): { success: boolean; message: string; request?: WithdrawalRequest } {
-    if (params.amount <= 0) {
+  }): Promise<{ success: boolean; message: string; request?: WithdrawalRequest }> {
+    if (!Number.isFinite(params.amount) || params.amount <= 0) {
       return { success: false, message: 'Please enter a valid cashout amount to request.' };
     }
 
-    const customer = this.getUserById(params.customerId);
-    const isEmailVerified = Boolean(customer?.emailVerified);
-    if (!isEmailVerified) {
-      return {
-        success: false,
-        message: 'Email verification is required before requesting cashouts. Please verify your email address to unlock withdrawals.',
-      };
-    }
-
-    const config = this.getAppConfig();
-    const methodName = params.methodName || 'Customer Support Manual Payout';
-    const newReqId = `req_wdr_${Date.now()}`;
-
-    const newReq: WithdrawalRequest = {
-      id: newReqId,
-      customerId: params.customerId,
-      customerName: params.customerName,
-      amount: params.amount,
-      currency: config.currency,
-      feeAmount: 0,
-      netPayout: params.amount,
-      method: params.method || 'manual_support',
-      methodName,
-      sourceGameCatalogId: params.sourceGameCatalogId,
-      sourceGameName: params.sourceGameName,
-      sourceGameUsername: params.sourceGameUsername,
-      playerNotes: params.playerNotes,
-      payoutDetails: {
-        ...(params.payoutDetails || { collectedBySupport: false }),
-        ...(params.sourceGameCatalogId ? { sourceGameCatalogId: params.sourceGameCatalogId } : {}),
-        ...(params.sourceGameName ? { sourceGameName: params.sourceGameName } : {}),
-        ...(params.sourceGameUsername ? { sourceGameUsername: params.sourceGameUsername } : {}),
-        ...(params.playerNotes ? { playerNotes: params.playerNotes } : {}),
-        reservedAmount: params.amount,
-      },
-      reservedAmount: params.amount,
-      status: 'submitted',
-      timeline: [
-        {
-          status: 'submitted',
-          note: `Player requested $${params.amount.toFixed(2)} from ${params.sourceGameName || 'Game'}. Support will manually review game balance and request payout info in chat.`,
-          timestamp: new Date().toISOString(),
-          actorName: params.customerName,
-        },
-      ],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    const allReqs = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
-    allReqs.unshift(newReq);
-    this.save(STORAGE_KEYS.WITHDRAWALS, allReqs);
-
-    // Immutable ledger record
-    this.recordTransaction({
-      customerId: params.customerId,
-      type: 'withdrawal_hold',
-      amount: params.amount,
-      fee: 0,
-      netAmount: params.amount,
-      currency: config.currency,
-      balanceAfter: 0,
-      targetGameName: params.sourceGameName,
-      targetGameUsername: params.sourceGameUsername,
-      relatedRequestId: newReqId,
-      description: `Manual Cashout Request #${newReqId} from ${params.sourceGameName || 'Game'} under Support Review`,
-      idempotencyKey: `idemp_wdr_${newReqId}`,
-      status: 'pending',
-    });
-
-    // Automatically initialize support chat so customer support can manually process cashout
-    const lastMethodInfo = this.getUserRegisteredMethod(params.customerId);
-    const lastMethodName = lastMethodInfo.methodName || 'Standard Method';
-    const lastMethodDetail = lastMethodInfo.details ? ` (${lastMethodInfo.details})` : '';
-
-    const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
-    this.sendChatMessage({
-      conversationId: conv.id,
-      senderId: params.customerId,
-      senderName: params.customerName,
-      senderRole: 'customer',
-      text: formatCashoutChatMessage({
-        amount: params.amount,
-        methodName: lastMethodName,
-        methodDetail: lastMethodDetail,
-        gameName: params.sourceGameName,
-        status: 'submitted',
-      }),
-      isInternalNote: false,
-      transactionData: {
-        transactionType: 'withdrawal',
-        requestId: newReqId,
-        gameName: params.sourceGameName,
-        gameUsername: params.sourceGameUsername,
-        amount: params.amount,
-        methodName: lastMethodName,
-        status: 'pending',
-        notes: params.playerNotes,
-        details: lastMethodDetail,
-      },
-    });
-
-    this.sendChatMessage({
-      conversationId: conv.id,
-      senderId: 'usr_admin_1',
-      senderName: 'System / Treasury Desk',
-      senderRole: 'system',
-      text: `⏳ Payout Review: $${params.amount.toFixed(2)}\n${params.customerName} • ${lastMethodName}${lastMethodDetail}`,
-      isInternalNote: false,
-    });
-
-    this.createNotification({
-      userId: params.customerId,
-      title: 'Cashout Request Submitted',
-      message: `Your $${params.amount.toFixed(2)} cashout request for ${params.sourceGameName || 'Game'} is under manual review. Support will message you for payout info.`,
-      type: 'withdrawal',
-      linkTab: 'chat',
-      linkRequestId: newReqId,
-    });
-
-    this.logAudit({
-      actorId: params.customerId,
-      actorName: params.customerName,
-      actorRole: 'customer',
-      action: 'WITHDRAWAL_SUBMITTED',
-      entityType: 'withdrawal',
-      entityId: newReqId,
-      details: `Submitted manual cashout request for $${params.amount} from ${params.sourceGameName || 'Game'}. Dispatched to Support Chat.`,
-    });
-
-    return { success: true, message: 'Withdrawal request created! Customer Support is reviewing your request.', request: newReq };
-  }
-
-  public updateWithdrawalStatus(params: {
-    requestId: string;
-    newStatus: WithdrawalStatus;
-    reviewerId: string;
-    reviewerName: string;
-    note?: string;
-    payoutReference?: string;
-  }): { success: boolean; message: string } {
-    const allReqs = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
-    const req = findRequestById(allReqs, params.requestId);
-    if (!req) return { success: false, message: 'Withdrawal request not found' };
-
-    const oldStatus = req.status;
-    if (oldStatus === 'completed' || oldStatus === 'rejected' || oldStatus === 'cancelled') {
-      return { success: false, message: `Cannot change status of an already ${oldStatus} withdrawal.` };
-    }
-
-    req.status = params.newStatus;
-    req.reviewerId = params.reviewerId;
-    req.reviewerName = params.reviewerName;
-    if (params.note) req.reviewNotes = params.note;
-    if (params.payoutReference) req.payoutReference = params.payoutReference;
-    req.updatedAt = new Date().toISOString();
-
-    req.timeline.push({
-      status: params.newStatus,
-      note: params.note || `Status updated to ${params.newStatus}.`,
-      timestamp: new Date().toISOString(),
-      actorName: params.reviewerName,
-    });
-
-    this.save(STORAGE_KEYS.WITHDRAWALS, allReqs);
-
-    const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
-    const wallet = wallets[req.customerId];
-
-    if (params.newStatus === 'completed') {
-      // Deduct from reserved balance permanently
-      if (wallet) {
-        wallet.reservedBalance = Math.max(0, wallet.reservedBalance - req.reservedAmount);
-        wallet.lastUpdatedAt = new Date().toISOString();
-        this.save(STORAGE_KEYS.WALLETS, wallets, true);
-        void this.syncWalletFieldsToSupabase(
-          req.customerId,
-          { pending_withdrawal: wallet.reservedBalance },
-          wallet
-        );
-      }
-
-      this.recordTransaction({
-        customerId: req.customerId,
-        type: 'withdrawal',
-        amount: req.amount,
-        fee: req.feeAmount,
-        netAmount: req.netPayout,
-        currency: req.currency,
-        balanceAfter: wallet ? wallet.availableBalance : 0,
-        relatedRequestId: req.id,
-        description: `Cashout Paid Out via ${req.methodName} (${params.payoutReference || 'Ref' + req.id})`,
-        idempotencyKey: `idemp_wdr_final_${req.id}`,
-        status: 'completed',
-      });
-
-      this.createNotification({
-        userId: req.customerId,
-        title: 'Withdrawal Completed',
-        message: `Your $${req.netPayout.toFixed(2)} cashout was dispatched. Reference: ${params.payoutReference || 'Completed'}`,
-        type: 'withdrawal',
-        linkTab: 'withdrawal',
-      });
-    } else if (params.newStatus === 'rejected' || params.newStatus === 'cancelled') {
-      // Compensating transaction: release reserved funds back to available balance!
-      if (wallet) {
-        wallet.reservedBalance = Math.max(0, wallet.reservedBalance - req.reservedAmount);
-        wallet.availableBalance += req.reservedAmount;
-        wallet.lastUpdatedAt = new Date().toISOString();
-        this.save(STORAGE_KEYS.WALLETS, wallets, true);
-        void this.syncWalletFieldsToSupabase(
-          req.customerId,
-          {
-            pending_withdrawal: wallet.reservedBalance,
-            balance: wallet.availableBalance,
-          },
-          wallet
-        );
-      }
-
-      // Restore source game balance if cashout originated from a specific game
-      if (req.sourceGameCatalogId) {
-        const allAccounts = this.getGameAccounts();
-        const gameAcc = allAccounts.find(
-          (a) => a.customerId === req.customerId && a.gameCatalogId === req.sourceGameCatalogId
-        );
-        if (gameAcc) {
-          gameAcc.balance = (gameAcc.balance || 0) + req.amount;
-          gameAcc.updatedAt = new Date().toISOString();
-          this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
+    try {
+      const sanitizedPayoutDetails: Record<string, unknown> = {};
+      if (params.payoutDetails && typeof params.payoutDetails === 'object') {
+        for (const key of [
+          'methodType',
+          'cashtag',
+          'chimeHandle',
+          'cryptoAddress',
+          'linkAccountRef',
+          'payoutHandle',
+          'collectedBySupport',
+        ]) {
+          if (params.payoutDetails[key] !== undefined) {
+            sanitizedPayoutDetails[key] = params.payoutDetails[key];
+          }
         }
       }
 
-      this.recordTransaction({
-        customerId: req.customerId,
-        type: 'withdrawal_release',
-        amount: req.amount,
-        fee: 0,
-        netAmount: req.amount,
-        currency: req.currency,
-        balanceAfter: wallet ? wallet.availableBalance : 0,
-        relatedRequestId: req.id,
-        description: `Reserved Funds Released for Cancelled/Rejected Cashout #${req.id}`,
-        idempotencyKey: `idemp_wdr_release_${req.id}`,
-        status: 'completed',
+      const res = await fetch('/api/withdrawals', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          amount: Number(params.amount.toFixed(2)),
+          method: params.method || 'manual_support',
+          methodName: params.methodName || 'Customer Support Manual Payout',
+          sourceGameCatalogId: params.sourceGameCatalogId?.trim() || undefined,
+          sourceGameName: params.sourceGameName?.trim() || undefined,
+          sourceGameUsername: params.sourceGameUsername?.trim() || undefined,
+          playerNotes: params.playerNotes?.trim() || undefined,
+          payoutDetails: sanitizedPayoutDetails,
+        }),
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseWithdrawalApiError(
+            res.status,
+            rawText,
+            'Failed to submit withdrawal request.',
+          ),
+        };
+      }
+
+      let payload: { withdrawal?: Record<string, unknown>; message?: string };
+      try {
+        payload = JSON.parse(rawText) as {
+          withdrawal?: Record<string, unknown>;
+          message?: string;
+        };
+      } catch {
+        return {
+          success: false,
+          message: 'Received unexpected response from withdrawal service.',
+        };
+      }
+
+      if (!payload?.withdrawal?.id) {
+        return {
+          success: false,
+          message: 'Invalid withdrawal response from server.',
+        };
+      }
+
+      this.applyWithdrawalRows([payload.withdrawal], false);
+      const newReq =
+        findRequestById(this.getWithdrawalRequests(), String(payload.withdrawal.id)) ||
+        mapDbWithdrawalRowToRequest(payload.withdrawal);
+
+      void this.fetchWalletTransactionsFromServer({
+        customerId: newReq.customerId,
+        limit: 25,
+        replaceAll: false,
+        silentEvent: true,
+      });
+
+      // Automatically initialize support chat so customer support can manually process cashout
+      const lastMethodInfo = this.getUserRegisteredMethod(newReq.customerId);
+      const lastMethodName = lastMethodInfo.methodName || newReq.methodName || 'Standard Method';
+      const lastMethodDetail = lastMethodInfo.details ? ` (${lastMethodInfo.details})` : '';
+
+      const conv = this.getOrCreateConversationForCustomer(
+        newReq.customerId,
+        newReq.customerName,
+      );
+      this.sendChatMessage({
+        conversationId: conv.id,
+        senderId: newReq.customerId,
+        senderName: newReq.customerName,
+        senderRole: 'customer',
+        text: formatCashoutChatMessage({
+          amount: newReq.amount,
+          methodName: lastMethodName,
+          methodDetail: lastMethodDetail,
+          gameName: newReq.sourceGameName,
+          status: 'submitted',
+        }),
+        isInternalNote: false,
+        transactionData: {
+          transactionType: 'withdrawal',
+          requestId: newReq.id,
+          gameName: newReq.sourceGameName,
+          gameUsername: newReq.sourceGameUsername,
+          amount: newReq.amount,
+          methodName: lastMethodName,
+          status: 'pending',
+          notes: newReq.playerNotes,
+          details: lastMethodDetail,
+        },
+      });
+
+      this.sendChatMessage({
+        conversationId: conv.id,
+        senderId: 'usr_admin_1',
+        senderName: 'System / Treasury Desk',
+        senderRole: 'system',
+        text: `⏳ Payout Review: $${newReq.amount.toFixed(2)}\n${newReq.customerName} • ${lastMethodName}${lastMethodDetail}`,
+        isInternalNote: false,
       });
 
       this.createNotification({
-        userId: req.customerId,
-        title: 'Withdrawal Rejected - Funds Released',
-        message: `Your $${req.amount.toFixed(2)} cashout was declined. Reserved funds have been restored to your available balance. Reason: ${params.note || 'None'}`,
+        userId: newReq.customerId,
+        title: 'Cashout Request Submitted',
+        message: `Your $${newReq.amount.toFixed(2)} cashout request for ${newReq.sourceGameName || 'Game'} is under manual review. Support will message you for payout info.`,
         type: 'withdrawal',
-        linkTab: 'wallet',
-        linkRequestId: req.id,
+        linkTab: 'chat',
+        linkRequestId: newReq.id,
       });
-    } else {
-      this.createNotification({
-        userId: req.customerId,
-        title: 'Withdrawal Update',
-        message: `Your cashout #${req.id} is now ${params.newStatus.replace('_', ' ')}.`,
-        type: 'withdrawal',
-        linkTab: 'withdrawal',
-        linkRequestId: req.id,
-      });
-    }
 
-    this.logAudit({
-      actorId: params.reviewerId,
-      actorName: params.reviewerName,
-      actorRole: 'agent',
-      action: `WITHDRAWAL_${params.newStatus.toUpperCase()}`,
-      entityType: 'withdrawal',
-      entityId: req.id,
-      details: `Status transitioned from ${oldStatus} to ${params.newStatus}. Note: ${params.note || 'None'}. Reference: ${params.payoutReference || 'None'}`,
-    });
-
-    // Sync chat transaction card in conversation thread
-    if (params.newStatus === 'completed') {
-      this.updateChatTransactionStatus(req.id, 'completed', params.reviewerName, params.note);
       if (typeof window !== 'undefined') {
-        webPushClient
-          .dispatchPushAlert({
-            recipientId: req.customerId,
-            recipientRole: 'customer',
-            title: '💸 Payout Sent & Completed!',
-            body: `Your cashout of $${req.amount.toFixed(2)} has been sent! ${params.payoutReference ? `Ref: ${params.payoutReference}` : ''}`,
-            url: '/#wallet',
-            tag: `wdr_comp_${req.id}`,
-            actionType: 'payout',
-          })
-          .catch(() => {});
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'withdrawal_updated', requestId: newReq.id },
+          }),
+        );
       }
-    } else if (params.newStatus === 'rejected' || params.newStatus === 'cancelled') {
-      this.updateChatTransactionStatus(req.id, 'rejected', params.reviewerName, params.note);
-    } else if (params.newStatus === 'processing') {
-      if (typeof window !== 'undefined') {
-        webPushClient
-          .dispatchPushAlert({
-            recipientId: req.customerId,
-            recipientRole: 'customer',
-            title: '⏳ Cashout In Processing',
-            body: `Your cashout of $${req.amount.toFixed(2)} is being processed by the payout operator.`,
-            url: '/#wallet',
-            tag: `wdr_proc_${req.id}`,
-            actionType: 'payout',
-          })
-          .catch(() => {});
-      }
-    }
 
-    if (supabase && isSupabaseConfigured()) {
-      supabase.from('withdrawals').update({
-        status: params.newStatus,
-        reviewer_id: params.reviewerId,
-        reviewer_name: params.reviewerName,
-        review_notes: req.reviewNotes,
-        transaction_hash: req.payoutReference,
-        updated_at: req.updatedAt,
-      }).eq('id', req.id).then(() => {}, (err) => console.warn('Supabase withdrawal status sync error:', err));
+      return {
+        success: true,
+        message:
+          payload.message ||
+          'Withdrawal request created! Customer Support is reviewing your request.',
+        request: newReq,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to connect to withdrawal service.',
+      };
     }
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'withdrawal_updated', requestId: req.id } }));
-
-    return { success: true, message: `Withdrawal status updated to ${params.newStatus}.` };
   }
 
   public async updateWithdrawalStatusAsync(params: {
@@ -5526,51 +5258,199 @@ class DataService {
     reviewerName: string;
     note?: string;
     payoutReference?: string;
-  }): Promise<{ success: boolean; message: string }> {
-    const lookup = await this.ensureWithdrawalRequest(params.requestId, { forceRefresh: true });
-    if (!lookup.request) {
-      return {
-        success: false,
-        message: lookup.error
-          ? `Unable to load withdrawal request from database: ${lookup.error}`
-          : 'Withdrawal request not found',
-      };
+  }): Promise<{ success: boolean; message: string; request?: WithdrawalRequest }> {
+    const cleanId = (params.requestId || '').trim();
+    if (!cleanId) {
+      return { success: false, message: 'Withdrawal request ID is required.' };
     }
 
-    const res = this.updateWithdrawalStatus(params);
-    if (!res.success) return res;
+    try {
+      const res = await fetch(`/api/withdrawals/${encodeURIComponent(cleanId)}/status`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          newStatus: params.newStatus,
+          note: params.note?.trim() || undefined,
+          payoutReference: params.payoutReference?.trim() || undefined,
+        }),
+      });
 
-    if (supabase && isSupabaseConfigured()) {
-      const updatedReq = findRequestById(
-        this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS),
-        params.requestId
-      );
-      if (updatedReq) {
-        const { error } = await supabase
-          .from('withdrawals')
-          .update({
-            status: updatedReq.status,
-            reviewer_id: params.reviewerId,
-            reviewer_name: params.reviewerName,
-            review_notes: updatedReq.reviewNotes || null,
-            transaction_hash: updatedReq.payoutReference || null,
-            updated_at: updatedReq.updatedAt,
-          })
-          .eq('id', updatedReq.id);
+      const rawText = await res.text();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: parseWithdrawalApiError(
+            res.status,
+            rawText,
+            'Failed to update withdrawal status.',
+          ),
+        };
+      }
 
-        if (error) {
-          console.warn('updateWithdrawalStatusAsync Supabase update error:', error);
-          return {
-            success: false,
-            message: `Failed to save withdrawal status to database: ${error.message}`,
-          };
+      let payload: {
+        withdrawal?: Record<string, unknown>;
+        wallet?: Record<string, unknown>;
+        message?: string;
+      };
+      try {
+        payload = JSON.parse(rawText) as {
+          withdrawal?: Record<string, unknown>;
+          wallet?: Record<string, unknown>;
+          message?: string;
+        };
+      } catch {
+        return {
+          success: false,
+          message: 'Received unexpected response when updating withdrawal status.',
+        };
+      }
+
+      if (!payload?.withdrawal?.id) {
+        return {
+          success: false,
+          message: 'Invalid withdrawal update response from server.',
+        };
+      }
+
+      this.applyWithdrawalRows([payload.withdrawal], false);
+      const updatedReq =
+        findRequestById(this.getWithdrawalRequests(), String(payload.withdrawal.id)) ||
+        mapDbWithdrawalRowToRequest(payload.withdrawal);
+
+      if (payload.wallet && (payload.wallet.customerId || payload.wallet.customer_id)) {
+        this.applyWalletRows([payload.wallet]);
+      } else {
+        void this.fetchWalletFromServer({ customerId: updatedReq.customerId, silentEvent: true });
+      }
+      void this.fetchWalletTransactionsFromServer({
+        customerId: updatedReq.customerId,
+        limit: 25,
+        replaceAll: false,
+        silentEvent: true,
+      });
+
+      const actorDisplayName = updatedReq.reviewerName || params.reviewerName;
+
+      if (params.newStatus === 'completed') {
+        this.createNotification({
+          userId: updatedReq.customerId,
+          title: 'Withdrawal Completed',
+          message: `Your $${(updatedReq.netPayout ?? updatedReq.amount).toFixed(2)} cashout was dispatched. Reference: ${updatedReq.payoutReference || 'Completed'}`,
+          type: 'withdrawal',
+          linkTab: 'withdrawal',
+        });
+
+        this.updateChatTransactionStatus(
+          updatedReq.id,
+          'completed',
+          actorDisplayName,
+          params.note,
+        );
+        if (typeof window !== 'undefined') {
+          webPushClient
+            .dispatchPushAlert({
+              recipientId: updatedReq.customerId,
+              recipientRole: 'customer',
+              title: '💸 Payout Sent & Completed!',
+              body: `Your cashout of $${updatedReq.amount.toFixed(2)} has been sent! ${updatedReq.payoutReference ? `Ref: ${updatedReq.payoutReference}` : ''}`,
+              url: '/#wallet',
+              tag: `wdr_comp_${updatedReq.id}`,
+              actionType: 'payout',
+            })
+            .catch(() => {});
+        }
+      } else if (params.newStatus === 'rejected' || params.newStatus === 'cancelled') {
+        // Restore source game balance if cashout originated from a specific game (non-migrated game_accounts cache)
+        if (updatedReq.sourceGameCatalogId) {
+          const allAccounts = this.getGameAccounts();
+          const gameAcc = allAccounts.find(
+            (a) =>
+              a.customerId === updatedReq.customerId &&
+              a.gameCatalogId === updatedReq.sourceGameCatalogId,
+          );
+          if (gameAcc) {
+            gameAcc.balance = (gameAcc.balance || 0) + updatedReq.amount;
+            gameAcc.updatedAt = new Date().toISOString();
+            this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
+          }
         }
 
-        await this.persistChatTransactionStatusInSupabase(updatedReq.id, updatedReq.customerId);
-      }
-    }
+        this.createNotification({
+          userId: updatedReq.customerId,
+          title:
+            params.newStatus === 'cancelled'
+              ? 'Withdrawal Cancelled'
+              : 'Withdrawal Rejected - Funds Released',
+          message:
+            params.newStatus === 'cancelled'
+              ? `Your $${updatedReq.amount.toFixed(2)} cashout request was cancelled.`
+              : `Your $${updatedReq.amount.toFixed(2)} cashout was declined. Reason: ${params.note || 'None'}`,
+          type: 'withdrawal',
+          linkTab: 'wallet',
+          linkRequestId: updatedReq.id,
+        });
 
-    return res;
+        this.updateChatTransactionStatus(
+          updatedReq.id,
+          'rejected',
+          actorDisplayName,
+          params.note,
+        );
+      } else {
+        this.createNotification({
+          userId: updatedReq.customerId,
+          title: 'Withdrawal Update',
+          message: `Your cashout #${updatedReq.id} is now ${params.newStatus.replace('_', ' ')}.`,
+          type: 'withdrawal',
+          linkTab: 'withdrawal',
+          linkRequestId: updatedReq.id,
+        });
+
+        if (params.newStatus === 'processing' && typeof window !== 'undefined') {
+          webPushClient
+            .dispatchPushAlert({
+              recipientId: updatedReq.customerId,
+              recipientRole: 'customer',
+              title: '⏳ Cashout In Processing',
+              body: `Your cashout of $${updatedReq.amount.toFixed(2)} is being processed by the payout operator.`,
+              url: '/#wallet',
+              tag: `wdr_proc_${updatedReq.id}`,
+              actionType: 'payout',
+            })
+            .catch(() => {});
+        }
+      }
+
+      if (isSupabaseConfigured() && supabase) {
+        await this.persistChatTransactionStatusInSupabase(
+          updatedReq.id,
+          updatedReq.customerId,
+        );
+      }
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'withdrawal_updated', requestId: updatedReq.id },
+          }),
+        );
+      }
+
+      return {
+        success: true,
+        message: payload.message || `Withdrawal status updated to ${updatedReq.status}.`,
+        request: updatedReq,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to connect to withdrawal service.',
+      };
+    }
   }
 
   // Master Game Catalog (Admin Account Managed)
