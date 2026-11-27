@@ -15,6 +15,7 @@ import {
 } from '../appConfig/appConfigRepo.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 
 export type TelegramFetchFn = (
   url: string,
@@ -28,6 +29,7 @@ export type TelegramFetchFn = (
 export interface AppConfigRouterDeps {
   appConfigRepo: AppConfigRepo;
   requireAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
   telegramFetch?: TelegramFetchFn;
 }
 
@@ -980,6 +982,7 @@ function mapDomainError(err: unknown): never {
 export function createAppConfigRouter({
   appConfigRepo,
   requireAuth,
+  realtimeEvents,
   telegramFetch,
 }: AppConfigRouterDeps): Router {
   const router = Router();
@@ -1105,6 +1108,12 @@ export function createAppConfigRouter({
           role: actor.role,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['app_config', 'audit_logs'],
+          'app_config_updated',
+        );
+
         res.status(200).json({
           success: true,
           config: saved.config,
@@ -1137,6 +1146,12 @@ export function createAppConfigRouter({
           displayName: actor.displayName,
           role: actor.role,
         });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['app_config', 'audit_logs'],
+          'app_config_policies_updated',
+        );
 
         res.status(200).json({
           success: true,
@@ -1196,6 +1211,12 @@ export function createAppConfigRouter({
           role: actor.role,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['faked_cashouts', 'audit_logs'],
+          'faked_cashout_created',
+        );
+
         res.status(201).json({
           success: true,
           item: created,
@@ -1228,6 +1249,12 @@ export function createAppConfigRouter({
           role: actor.role,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['faked_cashouts', 'audit_logs'],
+          'faked_cashouts_reseeded',
+        );
+
         res.status(200).json({
           success: true,
           items: inserted,
@@ -1259,6 +1286,12 @@ export function createAppConfigRouter({
           displayName: actor.displayName,
           role: actor.role,
         });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['faked_cashouts', 'audit_logs'],
+          'faked_cashout_deleted',
+        );
 
         res.status(200).json({
           success: true,

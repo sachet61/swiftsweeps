@@ -135,6 +135,16 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
     window.addEventListener('aetherpay_state_changed', handleLocalState);
 
     const unsubStream = chatStreamClient.subscribe({
+      onReconnect: () => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+        void dataService
+          .fetchConversationsFromServer({
+            limit: isCustomer ? 10 : 25,
+            replaceAll: false,
+            silentEvent: true,
+          })
+          .catch(() => {});
+      },
       onChatMessage: (event) => {
         if (!event?.message?.id) return;
         const incoming = mapDbMessageRowToChatMessage(event.message, event.conversationId);

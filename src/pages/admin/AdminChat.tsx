@@ -578,8 +578,33 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       }
     };
 
+    let lastAdminCatchUpAt = 0;
+    const performAdminCatchUp = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastAdminCatchUpAt < 800) return;
+      lastAdminCatchUpAt = now;
+
+      dataService.fetchConversations().then(() => {
+        syncFromMemory();
+      });
+
+      const currentActive = selectedConvIdRef.current;
+      if (currentActive) {
+        const canonicalActive = dataService.resolveCanonicalConvId(currentActive);
+        dataService.fetchMessagesForConversation(canonicalActive, { limit: 50 }).then((fresh) => {
+          if (fresh && fresh.length > 0 && selectedConvIdRef.current) {
+            setMessages(fresh);
+          }
+        });
+      }
+    };
+
     const unsubStream = chatStreamClient.subscribe({
       onStatus: (status) => setRealtimeStatus(status),
+      onReconnect: () => {
+        performAdminCatchUp();
+      },
       onChatMessage: (event) => {
         if (event?.message?.id) {
           const incoming = mapDbMessageRowToChatMessage(event.message, event.conversationId);
@@ -609,28 +634,6 @@ export const AdminChat: React.FC<AdminChatProps> = ({
         }
       },
     });
-
-    let lastAdminCatchUpAt = 0;
-    const performAdminCatchUp = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      const now = Date.now();
-      if (now - lastAdminCatchUpAt < 800) return;
-      lastAdminCatchUpAt = now;
-
-      dataService.fetchConversations().then(() => {
-        syncFromMemory();
-      });
-
-      const currentActive = selectedConvIdRef.current;
-      if (currentActive) {
-        const canonicalActive = dataService.resolveCanonicalConvId(currentActive);
-        dataService.fetchMessagesForConversation(canonicalActive, { limit: 50 }).then((fresh) => {
-          if (fresh && fresh.length > 0 && selectedConvIdRef.current) {
-            setMessages(fresh);
-          }
-        });
-      }
-    };
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {

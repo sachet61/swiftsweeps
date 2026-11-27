@@ -8,6 +8,7 @@ import {
 } from './auth/emailDelivery.js';
 import { UserDirectoryRepo } from './auth/userDirectoryRepo.js';
 import { AppConfigRepo } from './appConfig/appConfigRepo.js';
+import { AuditLogRepo } from './auditLogs/auditLogRepo.js';
 import { GameCatalogRepo } from './catalog/gameCatalogRepo.js';
 import { ChatEventBroker } from './chat/chatEvents.js';
 import { ChatRepo } from './chat/chatRepo.js';
@@ -34,6 +35,7 @@ import {
   createAppConfigRouter,
   type TelegramFetchFn,
 } from './routes/appConfig.js';
+import { createAuditLogRouter } from './routes/auditLogs.js';
 import { createAuthProfileRouter } from './routes/authProfile.js';
 import { createChatRouter } from './routes/chat.js';
 import { createDepositRouter } from './routes/deposits.js';
@@ -43,6 +45,7 @@ import { createHealthRouter } from './routes/health.js';
 import { createNotificationRouter } from './routes/notifications.js';
 import { createOfficialPartnerRouter } from './routes/officialPartners.js';
 import { createProfileRouter } from './routes/profile.js';
+import { createRealtimeRouter } from './routes/realtime.js';
 import { createReferralRouter } from './routes/referrals.js';
 import { createWalletRouter } from './routes/wallet.js';
 import { createWheelRouter } from './routes/wheel.js';
@@ -53,6 +56,7 @@ import {
   type WebPushSender,
 } from './notifications/webPushSender.js';
 import { OfficialPartnerRepo } from './officialPartners/officialPartnerRepo.js';
+import { RealtimeEventBroker } from './realtime/realtimeEvents.js';
 import { ReferralRepo } from './referrals/referralRepo.js';
 import { createStorageRouter } from './routes/storage.js';
 import { StorageRepo } from './storage/storageRepo.js';
@@ -82,6 +86,7 @@ export interface ApiAppDependencies {
       pool: Pick<DatabasePool, 'query'>;
       requireAuth: RequestHandler;
       optionalAuth: RequestHandler;
+      realtimeEvents: RealtimeEventBroker;
     },
   ) => void;
 }
@@ -110,9 +115,11 @@ export function createApiApp({
 
   const userRepo = new UserDirectoryRepo(pool);
   const appConfigRepo = new AppConfigRepo(pool);
+  const auditLogRepo = new AuditLogRepo(pool);
   const gameCatalogRepo = new GameCatalogRepo(pool);
   const chatRepo = new ChatRepo(pool);
   const chatEvents = new ChatEventBroker();
+  const realtimeEvents = new RealtimeEventBroker();
   const gameAccountRepo = new GameAccountRepo(pool);
   const depositRepo = new DepositRepo(pool);
   const notificationRepo = new NotificationRepo(pool);
@@ -172,10 +179,18 @@ export function createApiApp({
   );
   app.use(
     '/api',
+    createRealtimeRouter({
+      realtimeEvents,
+      requireAuth,
+    }),
+  );
+  app.use(
+    '/api',
     createAdminAuthRouter({
       authRuntime,
       userRepo,
       requireAuth,
+      realtimeEvents,
     }),
   );
   app.use(
@@ -183,6 +198,7 @@ export function createApiApp({
     createProfileRouter({
       userRepo,
       requireAuth,
+      realtimeEvents,
     }),
   );
   app.use(
@@ -192,6 +208,7 @@ export function createApiApp({
       userRepo,
       requireAuth,
       optionalAuth,
+      realtimeEvents,
     }),
   );
   app.use(
@@ -200,6 +217,7 @@ export function createApiApp({
       gameAccountRepo,
       userRepo,
       requireAuth,
+      realtimeEvents,
     }),
   );
   app.use(
@@ -216,6 +234,7 @@ export function createApiApp({
       withdrawalRepo,
       userRepo,
       requireAuth,
+      realtimeEvents,
     }),
   );
   app.use(
@@ -224,6 +243,7 @@ export function createApiApp({
       depositRepo,
       userRepo,
       requireAuth,
+      realtimeEvents,
     }),
   );
   app.use(
@@ -232,6 +252,7 @@ export function createApiApp({
       referralRepo,
       userRepo,
       requireAuth,
+      realtimeEvents,
     }),
   );
   app.use(
@@ -240,7 +261,10 @@ export function createApiApp({
       wheelRepo,
       userRepo,
       requireAuth,
+      appConfigRepo,
+      telegramFetch: telegramFetchOverride,
       chatEvents,
+      realtimeEvents,
       nowFn: wheelNowFnOverride,
       randomUnitFn: wheelRandomUnitOverride,
     }),
@@ -251,6 +275,7 @@ export function createApiApp({
       chatRepo,
       chatEvents,
       requireAuth,
+      realtimeEvents,
     }),
   );
   app.use(
@@ -258,6 +283,7 @@ export function createApiApp({
     createOfficialPartnerRouter({
       officialPartnerRepo,
       requireAuth,
+      realtimeEvents,
     }),
   );
   app.use(
@@ -275,6 +301,7 @@ export function createApiApp({
     createAppConfigRouter({
       appConfigRepo,
       requireAuth,
+      realtimeEvents,
       telegramFetch: telegramFetchOverride,
     }),
   );
@@ -288,12 +315,21 @@ export function createApiApp({
       optionalAuth,
     }),
   );
+  app.use(
+    '/api',
+    createAuditLogRouter({
+      auditLogRepo,
+      requireAuth,
+      realtimeEvents,
+    }),
+  );
 
   extraRoutes?.(app, {
     userRepo,
     pool,
     requireAuth,
     optionalAuth,
+    realtimeEvents,
   });
 
   app.use(notFoundHandler);

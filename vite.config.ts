@@ -38,6 +38,8 @@ function isSelfHostedAuthPath(url: string | undefined): boolean {
     pathname.startsWith('/api/notifications/') ||
     pathname === '/api/chat' ||
     pathname.startsWith('/api/chat/') ||
+    pathname === '/api/realtime' ||
+    pathname.startsWith('/api/realtime/') ||
     pathname === '/api/admin/users' ||
     pathname.startsWith('/api/admin/users/') ||
     pathname === '/api/admin/official-partners' ||
@@ -54,6 +56,8 @@ function isSelfHostedAuthPath(url: string | undefined): boolean {
     pathname.startsWith('/api/telegram/') ||
     pathname === '/api/storage' ||
     pathname.startsWith('/api/storage/') ||
+    pathname === '/api/audit-logs' ||
+    pathname.startsWith('/api/audit-logs/') ||
     pathname === '/api/healthz' ||
     pathname === '/api/readyz'
   );
@@ -97,7 +101,9 @@ function attachSelfHostedProxyMiddleware(
     const headers: http.OutgoingHttpHeaders = { ...req.headers };
     headers.host = targetUrl.host;
 
-    const isSseStream = targetUrl.pathname === '/api/chat/stream';
+    const isSseStream =
+      targetUrl.pathname === '/api/chat/stream' ||
+      targetUrl.pathname === '/api/realtime/stream';
     const proxyReq = client.request(
       {
         protocol: targetUrl.protocol,

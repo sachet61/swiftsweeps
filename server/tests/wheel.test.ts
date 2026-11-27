@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 import { memoryAdapter } from 'better-auth/adapters/memory';
 import { createApiApp } from '../app.js';
+import type { TelegramFetchFn } from '../routes/appConfig.js';
 import type {
   EmailDeliveryAdapter,
   SendOtpEmailPayload,
@@ -112,9 +113,12 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
   public gameAccounts = new Map<string, InMemoryGameAccountRow>();
   public transactions = new Map<string, InMemoryTransactionRow>();
   public appConfig = new Map<string, Record<string, unknown>>();
+  public notifications: Array<Record<string, unknown>> = [];
   public auditLogs: InMemoryAuditLogRow[] = [];
 
   public failNextWheelOrTransferQuery = false;
+  public failNextTransactionInsert = false;
+  public lockSequence: string[] = [];
   public delayInsideTxMs = 0;
 
   private lockQueue: Promise<void> = Promise.resolve();
@@ -124,6 +128,7 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
     gameAccounts: Map<string, InMemoryGameAccountRow>;
     transactions: Map<string, InMemoryTransactionRow>;
     appConfig: Map<string, Record<string, unknown>>;
+    notifications: Array<Record<string, unknown>>;
     auditLogs: InMemoryAuditLogRow[];
   } | null = null;
 
@@ -162,6 +167,7 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
                 structuredClone(v),
               ]),
             ),
+            notifications: this.notifications.map((n) => ({ ...n })),
             auditLogs: [...this.auditLogs],
           };
           return { rows: [], rowCount: 0 };
@@ -177,6 +183,7 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
             this.gameAccounts = this.txSnapshot.gameAccounts;
             this.transactions = this.txSnapshot.transactions;
             this.appConfig = this.txSnapshot.appConfig;
+            this.notifications = this.txSnapshot.notifications;
             this.auditLogs = this.txSnapshot.auditLogs;
             this.txSnapshot = null;
           }
@@ -206,7 +213,7 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
     }
 
     if (normalized.includes("to_regclass('public.notifications')")) {
-      return { rows: [{ reg: null }] };
+      return { rows: [{ reg: 'public.notifications' }] };
     }
 
     if (
@@ -214,6 +221,32 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
       normalized.includes("to_regclass('public.messages')")
     ) {
       return { rows: [{ conv_reg: null, msg_reg: null }] };
+    }
+
+    if (normalized.startsWith('INSERT INTO public.notifications')) {
+      const [id, user_id, title, message, type, link_tab, link_request_id] = values as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string | null,
+      ];
+      if (!this.notifications.some((n) => n.id === id)) {
+        this.notifications.push({
+          id,
+          user_id,
+          title,
+          message,
+          type,
+          is_read: false,
+          link_tab,
+          link_request_id,
+          created_at: new Date(),
+        });
+      }
+      return { rows: [], rowCount: 1 };
     }
 
     // UserDirectoryRepo lookups
@@ -387,7 +420,14 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
       normalized.includes('FROM public.wallets') &&
       normalized.includes('WHERE customer_id = $1')
     ) {
-      const w = this.wallets.get(String(values[0] ?? ''));
+      const cid = String(values[0] ?? '');
+      if (normalized.includes('FOR UPDATE')) {
+        if (this.delayInsideTxMs > 0) {
+          await new Promise((r) => setTimeout(r, this.delayInsideTxMs));
+        }
+        this.lockSequence.push(`wallets:${cid}`);
+      }
+      const w = this.wallets.get(cid);
       return { rows: w ? [{ ...w }] : [] };
     }
 
@@ -519,7 +559,11 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
       normalized.includes('FROM public.game_accounts') &&
       normalized.includes('WHERE id = $1')
     ) {
-      const acc = this.gameAccounts.get(String(values[0] ?? ''));
+      const id = String(values[0] ?? '');
+      if (normalized.includes('FOR UPDATE')) {
+        this.lockSequence.push(`game_accounts:${id}`);
+      }
+      const acc = this.gameAccounts.get(id);
       return { rows: acc ? [{ ...acc }] : [] };
     }
 
@@ -531,6 +575,9 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
       const found = Array.from(this.gameAccounts.values()).find(
         (a) => a.customer_id === cid && a.game_id === gameId,
       );
+      if (found && normalized.includes('FOR UPDATE')) {
+        this.lockSequence.push(`game_accounts:${found.id}`);
+      }
       return { rows: found ? [{ ...found }] : [] };
     }
 
@@ -550,6 +597,10 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
 
     // transactions
     if (normalized.startsWith('INSERT INTO public.transactions')) {
+      if (this.failNextTransactionInsert) {
+        this.failNextTransactionInsert = false;
+        throw new Error('pg_tx_error: simulated mid-transaction failure');
+      }
       if (normalized.includes("'free_play_bonus'")) {
         const [id, customer_id, amount, description, reference_id, nowIso] =
           values as [string, string, number, string, string, string];
@@ -561,7 +612,7 @@ class InMemoryWheelDatabase implements Pick<DatabasePool, 'query' | 'connect'> {
           status: 'completed',
           description,
           reference_id,
-          game_name: null,
+          game_name: 'Wheel of Luck',
           created_at: new Date(nowIso),
         });
         return { rows: [], rowCount: 1 };
@@ -681,6 +732,7 @@ async function startTestServer(
   options: {
     nowFn?: () => number;
     randomUnitFn?: () => number;
+    telegramFetchOverride?: TelegramFetchFn;
   } = {},
 ) {
   const otps: SendOtpEmailPayload[] = [];
@@ -697,6 +749,7 @@ async function startTestServer(
     pool: db,
     authDatabaseOverride: memoryAdapter(authMemDb),
     emailDeliveryOverride: createCaptureEmailAdapter(otps),
+    telegramFetchOverride: options.telegramFetchOverride,
     wheelNowFnOverride: options.nowFn,
     wheelRandomUnitOverride: options.randomUnitFn,
   });
@@ -942,6 +995,7 @@ test('wheel status isolation, spin reward vs simulated showcase separation, idem
   assert.equal(spin1.status, 200);
   assert.equal(spin1.json.idempotentReplay, false);
   assert.equal(spin1.json.rewardAmount, 5);
+  assert.equal(spin1.json.actualRewardAmount, 5);
   assert.equal(spin1.json.simulatedWinAmount, 250);
   assert.equal(spin1.json.freePlayBalance, 5);
   assert.equal(spin1.json.availableBalance, 0);
@@ -953,6 +1007,10 @@ test('wheel status isolation, spin reward vs simulated showcase separation, idem
   const spinTx = Array.from(db.transactions.values())[0]!;
   assert.equal(spinTx.type, 'free_play_bonus');
   assert.equal(spinTx.amount, '5.00');
+  assert.equal(spinTx.game_name, 'Wheel of Luck');
+  assert.equal(db.notifications.length, 1);
+  assert.equal(db.notifications[0]!.type, 'bonus');
+  assert.equal(db.notifications[0]!.link_tab, 'game_accounts');
 
   // Same idempotencyKey replay returns exact same spin without double-crediting
   const replay = await requestJson(baseUrl, '/api/wheel/spin', {
@@ -962,6 +1020,7 @@ test('wheel status isolation, spin reward vs simulated showcase separation, idem
   });
   assert.equal(replay.status, 200);
   assert.equal(replay.json.idempotentReplay, true);
+  assert.equal(replay.json.actualRewardAmount, 5);
   assert.equal(replay.json.spin.id, spin1.json.spin.id);
   assert.equal(db.wallets.get(player.appUserId)!.free_play_balance, '5.00');
   assert.equal(db.wheelSpins.size, 1);
@@ -1355,3 +1414,177 @@ test('game-accounts transfer enforces ownership, status, funding sources, unload
   assert.equal(dbFail.json.error.code, 'INTERNAL_SERVER_ERROR');
   assert.ok(!JSON.stringify(dbFail.json).includes('pg_wheel_error'));
 });
+
+test('RPC replacement guarantees: rollback safety, DAG lock order, concurrent transfer isolation, and post-commit Telegram alerts', async (t) => {
+  const db = new InMemoryWheelDatabase();
+  const telegramRequests: Array<{ url: string; chatId: string; text: string }> = [];
+  let telegramFailNext = false;
+
+  const telegramFetchOverride: TelegramFetchFn = async (url, init) => {
+    const parsed = init?.body ? JSON.parse(String(init.body)) : {};
+    const chatId = String(parsed.chat_id ?? '');
+    const text = String(parsed.text ?? '');
+    telegramRequests.push({ url, chatId, text });
+    if (telegramFailNext) {
+      telegramFailNext = false;
+      return {
+        ok: false,
+        status: 500,
+        json: async () => ({ ok: false, description: 'telegram unavailable' }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, result: { message_id: telegramRequests.length } }),
+    };
+  };
+
+  let mockNowMs = Date.parse('2026-11-26T12:00:00.000Z');
+  const { server, baseUrl } = await startTestServer(db, {
+    nowFn: () => mockNowMs,
+    randomUnitFn: () => 0.6, // $5 Free Play
+    telegramFetchOverride,
+  });
+  t.after(() => server.close());
+
+  const player = await signUpAndCookie(baseUrl, 'rpc_parity@example.test', 'RPC Parity');
+  db.appConfig.set('main', {
+    telegram: {
+      enabled: true,
+      botToken: '123456:fake-test-token',
+      channelId: '-10099887766',
+    },
+  });
+
+  db.wallets.set(player.appUserId, {
+    customer_id: player.appUserId,
+    balance: '30.00',
+    referral_bonus_balance: '0.00',
+    free_play_balance: '10.00',
+    pending_withdrawal: '0.00',
+    pending_deposit: '0.00',
+    total_deposited: '30.00',
+    total_withdrawn: '0.00',
+    currency: 'USD',
+    updated_at: new Date(),
+  });
+  db.gameAccounts.set('ga_parity', {
+    id: 'ga_parity',
+    customer_id: player.appUserId,
+    game_id: 'game_orion',
+    game_title: 'Orion Stars',
+    username: 'os_parity',
+    status: 'active',
+    balance: '0.00',
+    free_play_balance: '0.00',
+    updated_at: new Date(),
+  });
+
+  // 1) Spin mid-transaction failure rolls back wheel_spins, wallets, and audit_logs
+  db.failNextTransactionInsert = true;
+  const failedSpin = await requestJson(baseUrl, '/api/wheel/spin', {
+    method: 'POST',
+    cookie: player.cookie,
+    body: { idempotencyKey: 'rollback_spin_key' },
+  });
+  assert.equal(failedSpin.status, 500);
+  assert.equal(db.wheelSpins.size, 0);
+  assert.equal(db.wallets.get(player.appUserId)!.free_play_balance, '10.00');
+  assert.equal(db.transactions.size, 0);
+
+  // Subsequent retry with the same idempotencyKey succeeds cleanly after rollback!
+  const recoveredSpin = await requestJson(baseUrl, '/api/wheel/spin', {
+    method: 'POST',
+    cookie: player.cookie,
+    body: { idempotencyKey: 'rollback_spin_key' },
+  });
+  assert.equal(recoveredSpin.status, 200);
+  assert.equal(db.wheelSpins.size, 1);
+  assert.equal(db.wallets.get(player.appUserId)!.free_play_balance, '15.00');
+
+  // 2) Transfer mid-transaction failure rolls back wallets & game_accounts without calling Telegram
+  const tgCountBeforeFail = telegramRequests.length;
+  db.failNextTransactionInsert = true;
+  const failedTransfer = await requestJson(baseUrl, '/api/game-accounts/transfer', {
+    method: 'POST',
+    cookie: player.cookie,
+    body: {
+      gameAccountId: 'ga_parity',
+      direction: 'load',
+      source: 'free_play',
+      amount: 10,
+    },
+  });
+  assert.equal(failedTransfer.status, 500);
+  assert.equal(db.wallets.get(player.appUserId)!.free_play_balance, '15.00');
+  assert.equal(db.gameAccounts.get('ga_parity')!.balance, '0.00');
+  assert.equal(telegramRequests.length, tgCountBeforeFail);
+
+  // 3) Successful free_play load locks wallets BEFORE game_accounts and dispatches post-commit Telegram alert
+  db.lockSequence = [];
+  const okBonusLoad = await requestJson(baseUrl, '/api/game-accounts/transfer', {
+    method: 'POST',
+    cookie: player.cookie,
+    body: {
+      gameAccountId: 'ga_parity',
+      direction: 'load',
+      source: 'free_play',
+      amount: 10,
+    },
+  });
+  assert.equal(okBonusLoad.status, 200);
+  assert.equal(okBonusLoad.json.telegramNotified, true);
+  assert.deepEqual(db.lockSequence, [
+    `wallets:${player.appUserId}`,
+    'game_accounts:ga_parity',
+  ]);
+  assert.equal(telegramRequests.length, tgCountBeforeFail + 1);
+  assert.match(telegramRequests[0]!.text, /Orion Stars/);
+
+  // 4) Non-fatal Telegram failure still commits DB transfer and returns telegramNotified=false
+  telegramFailNext = true;
+  const okWithTgDown = await requestJson(baseUrl, '/api/game-accounts/transfer', {
+    method: 'POST',
+    cookie: player.cookie,
+    body: {
+      gameAccountId: 'ga_parity',
+      direction: 'load',
+      source: 'free_play',
+      amount: 5,
+    },
+  });
+  assert.equal(okWithTgDown.status, 200);
+  assert.equal(okWithTgDown.json.telegramNotified, false);
+  assert.equal(db.wallets.get(player.appUserId)!.free_play_balance, '0.00');
+  assert.equal(db.gameAccounts.get('ga_parity')!.balance, '15.00');
+
+  // 5) Concurrent unload race: only ONE $15 unload succeeds; second gets 400 (cannot double-unload)
+  db.delayInsideTxMs = 20;
+  const [unloadA, unloadB] = await Promise.all([
+    requestJson(baseUrl, '/api/game-accounts/transfer', {
+      method: 'POST',
+      cookie: player.cookie,
+      body: {
+        gameAccountId: 'ga_parity',
+        direction: 'unload',
+        amount: 15,
+      },
+    }),
+    requestJson(baseUrl, '/api/game-accounts/transfer', {
+      method: 'POST',
+      cookie: player.cookie,
+      body: {
+        gameAccountId: 'ga_parity',
+        direction: 'unload',
+        amount: 15,
+      },
+    }),
+  ]);
+  db.delayInsideTxMs = 0;
+
+  assert.deepEqual([unloadA.status, unloadB.status].sort((a, b) => a - b), [200, 400]);
+  assert.equal(db.gameAccounts.get('ga_parity')!.balance, '0.00');
+  assert.equal(db.wallets.get(player.appUserId)!.free_play_balance, '15.00');
+});
+

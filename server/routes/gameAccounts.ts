@@ -21,11 +21,13 @@ import {
 } from '../gameAccounts/gameAccountRepo.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 
 export interface GameAccountRouterDeps {
   gameAccountRepo: GameAccountRepo;
   userRepo: UserDirectoryRepo;
   requireAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
 }
 
 const ID_REGEX = /^[a-zA-Z0-9_-]{1,120}$/;
@@ -641,6 +643,7 @@ export function createGameAccountRouter({
   gameAccountRepo,
   userRepo,
   requireAuth,
+  realtimeEvents,
 }: GameAccountRouterDeps): Router {
   const router = Router();
   const requireStaff = requireRole('admin', 'agent');
@@ -723,6 +726,13 @@ export function createGameAccountRouter({
           })
           .catch(mapRepoError);
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: actor.appUserId },
+          ['game_accounts', 'audit_logs'],
+          'game_account_requested',
+          actor.appUserId,
+        );
+
         res.status(201).json({
           success: true,
           account: toGameAccountDto(account),
@@ -769,6 +779,13 @@ export function createGameAccountRouter({
             actorRole: actor.role,
           })
           .catch(mapRepoError);
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: targetUser.appUserId },
+          ['game_accounts', 'audit_logs'],
+          'game_account_provisioned',
+          targetUser.appUserId,
+        );
 
         res.status(created ? 201 : 200).json({
           success: true,
@@ -838,6 +855,13 @@ export function createGameAccountRouter({
           })
           .catch(mapRepoError);
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: account.customerId },
+          ['game_accounts', 'audit_logs'],
+          'game_account_reset_requested',
+          account.customerId,
+        );
+
         res.status(200).json({
           success: true,
           account: toGameAccountDto(account),
@@ -874,6 +898,13 @@ export function createGameAccountRouter({
           })
           .catch(mapRepoError);
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: account.customerId },
+          ['game_accounts', 'audit_logs'],
+          'game_account_credentials_updated',
+          account.customerId,
+        );
+
         res.status(200).json({
           success: true,
           account: toGameAccountDto(account),
@@ -903,6 +934,13 @@ export function createGameAccountRouter({
             actorRole: actor.role,
           })
           .catch(mapRepoError);
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: deleted.customerId },
+          ['game_accounts', 'audit_logs'],
+          'game_account_deleted',
+          deleted.customerId,
+        );
 
         res.status(200).json({
           success: true,

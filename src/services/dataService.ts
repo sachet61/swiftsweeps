@@ -53,6 +53,7 @@ import { supabaseAuthService } from './supabaseAuthService';
 import { supabaseTokenManager } from './supabaseTokenManager';
 import { SESSION_EXPIRED_USER_MESSAGE } from './authTokenUtils';
 import { webPushClient } from './webPushClient';
+import { realtimeStreamClient } from './realtimeStreamClient';
 import {
   filterRealtimeRowsForUser,
   shouldAcceptIncomingChatMessage,
@@ -227,6 +228,9 @@ class DataService {
   private syncStatus: RealtimeSyncStatus = 'disconnected';
   private lastSyncTimestamp: string | null = null;
   private realtimeChannel: any = null;
+  private realtimeStreamUnsub: (() => void) | null = null;
+  private invalidationSyncTimer: number | null = null;
+  private pendingInvalidatedTables: Set<string> = new Set();
   private mutationQueue: Array<{ table: string; eventType: string; newRow: any; oldRow: any }> = [];
   private mutationDebounceTimer: number | null = null;
   private messageSaveDebounceTimer: any = null;
@@ -466,10 +470,15 @@ class DataService {
         void this.initialCompactLoad();
       }
     } else {
-      console.log('[SwiftSweeps] Supabase credentials pending in .env. Running in in-memory mode with LocalStorage persistence.');
-      void this.fetchGameCatalogFromServer();
-      void this.fetchAppConfigFromServer();
-      void this.fetchFakedCashoutsFromServer();
+      console.log('[SwiftSweeps] Self-hosted API mode active.');
+      const activeUser = this.getCurrentUser();
+      if (activeUser) {
+        this.initSelfHostedRealtimeSync();
+        void this.hydrateForSession(activeUser, { force: true });
+      } else {
+        this.clearUserScopedCache();
+        void this.initialCompactLoad();
+      }
     }
   }
 
@@ -478,7 +487,18 @@ class DataService {
       window.clearTimeout(this.mutationDebounceTimer);
       this.mutationDebounceTimer = null;
     }
+    if (this.invalidationSyncTimer !== null) {
+      window.clearTimeout(this.invalidationSyncTimer);
+      this.invalidationSyncTimer = null;
+    }
+    this.pendingInvalidatedTables.clear();
     this.mutationQueue = [];
+    if (this.realtimeStreamUnsub) {
+      try {
+        this.realtimeStreamUnsub();
+      } catch {}
+      this.realtimeStreamUnsub = null;
+    }
     if (this.realtimeChannel && supabase) {
       try {
         supabase.removeChannel(this.realtimeChannel);
@@ -489,6 +509,167 @@ class DataService {
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
     }
+  }
+
+  private scheduleInvalidationReconciliation(tables: string[]): void {
+    for (const table of tables) {
+      if (table) this.pendingInvalidatedTables.add(table);
+    }
+    if (this.invalidationSyncTimer !== null || typeof window === 'undefined') {
+      return;
+    }
+    this.invalidationSyncTimer = window.setTimeout(() => {
+      this.invalidationSyncTimer = null;
+      const queuedTables = new Set(this.pendingInvalidatedTables);
+      this.pendingInvalidatedTables.clear();
+      void this.reconcileInvalidatedTables(queuedTables);
+    }, 250);
+  }
+
+  private async reconcileInvalidatedTables(tables: Set<string>): Promise<void> {
+    if (tables.size === 0) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      // Defer full reconciliation until visibility restores
+      return;
+    }
+
+    const user = this.getCurrentUser();
+    if (!user?.id) return;
+    const isStaff = user.role === 'admin' || user.role === 'agent';
+    const tasks: Promise<unknown>[] = [];
+    let shouldReconcileWallet = false;
+
+    if (tables.has('app_config')) {
+      tasks.push(this.fetchAppConfigFromServer({ silentEvent: true }));
+    }
+    if (tables.has('faked_cashouts')) {
+      tasks.push(this.fetchFakedCashoutsFromServer({ limit: 25, silentEvent: true }));
+    }
+    if (tables.has('game_catalog')) {
+      tasks.push(this.fetchGameCatalogFromServer({ silentEvent: true }));
+    }
+    if (tables.has('official_partners')) {
+      tasks.push(this.fetchOfficialPartners());
+    }
+    if (tables.has('topups')) {
+      tasks.push(
+        this.fetchDepositsFromServer({
+          ...(isStaff ? { limit: 25 } : { customerId: user.id, limit: 20 }),
+          replaceAll: false,
+          silentEvent: true,
+        })
+      );
+      shouldReconcileWallet = true;
+    }
+    if (tables.has('withdrawals')) {
+      tasks.push(
+        this.fetchWithdrawalsFromServer({
+          ...(isStaff ? { limit: 25 } : { customerId: user.id, limit: 20 }),
+          replaceAll: false,
+          silentEvent: true,
+        })
+      );
+      shouldReconcileWallet = true;
+    }
+    if (tables.has('wallets') || tables.has('transactions') || tables.has('wheel_spins')) {
+      if (isStaff) {
+        tasks.push(this.fetchWalletsFromServer({ limit: 50, silentEvent: true }));
+      } else {
+        tasks.push(
+          this.fetchWalletFromServer({ customerId: user.id, silentEvent: true }),
+          this.fetchWalletTransactionsFromServer({
+            customerId: user.id,
+            limit: 30,
+            replaceAll: false,
+            silentEvent: true,
+          })
+        );
+      }
+      shouldReconcileWallet = true;
+    }
+    if (tables.has('game_accounts')) {
+      tasks.push(
+        this.fetchGameAccountsFromServer({
+          ...(isStaff ? { limit: 100 } : { customerId: user.id, limit: 50 }),
+          replaceAll: true,
+          silentEvent: true,
+        })
+      );
+    }
+    if (tables.has('audit_logs') && user.role === 'admin') {
+      tasks.push(this.fetchAuditLogsFromServer({ limit: 100 }));
+    }
+    if (tables.has('users') && isStaff) {
+      tasks.push(this.fetchLiveUsersDirectory(user));
+    }
+
+    if (tasks.length === 0) {
+      return;
+    }
+
+    await Promise.allSettled(tasks);
+    if (!isStaff && shouldReconcileWallet) {
+      this.reconcileCustomerWallet(user.id);
+    }
+    this.lastSyncTimestamp = new Date().toISOString();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'realtime_batch', tables: Array.from(tables) },
+        })
+      );
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() })
+      );
+    }
+  }
+
+  private initSelfHostedRealtimeSync(): void {
+    if (isSupabaseConfigured()) return;
+    if (!this.getCurrentUser()) return;
+    if (this.realtimeStreamUnsub) return;
+
+    this.syncStatus = 'syncing';
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+    }
+
+    this.realtimeStreamUnsub = realtimeStreamClient.subscribe({
+      onStatus: (status) => {
+        if (status === 'SUBSCRIBED') {
+          this.syncStatus = 'connected';
+        } else if (status === 'SUBSCRIBING') {
+          this.syncStatus = 'syncing';
+        } else if (status === 'CHANNEL_ERROR') {
+          this.syncStatus = 'reconnecting';
+        } else {
+          this.syncStatus = 'disconnected';
+        }
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+        }
+      },
+      onAuditLog: (event) => {
+        const activeUser = this.getCurrentUser();
+        if (!activeUser || activeUser.role !== 'admin') return;
+        this.queueRealtimeMutation('audit_logs', 'INSERT', event.log, null);
+      },
+      onDomainInvalidation: (event) => {
+        const activeUser = this.getCurrentUser();
+        if (!activeUser) return;
+        const isStaff = activeUser.role === 'admin' || activeUser.role === 'agent';
+        if (event.customerId && !isStaff && event.customerId !== activeUser.id) {
+          return;
+        }
+        this.scheduleInvalidationReconciliation(event.tables || []);
+      },
+      onReconnect: () => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          return;
+        }
+        void this.syncDelta().catch(() => {});
+      },
+    });
   }
 
   private initSupabaseRealtimeSync(): void {
@@ -789,56 +970,77 @@ class DataService {
 
   public async syncDelta(): Promise<void> {
     if (!supabase || !isSupabaseConfigured()) {
-      const user = this.getCurrentUser();
-      const isStaff = user?.role === 'admin' || user?.role === 'agent';
-      const selfHostedTasks: Promise<unknown>[] = [
-        this.fetchAppConfigFromServer({ silentEvent: true }),
-        this.fetchFakedCashoutsFromServer({ limit: 25, silentEvent: true }),
-        this.fetchGameCatalogFromServer(),
-      ];
-      if (user?.id) {
-        if (isStaff) {
-          selfHostedTasks.push(
-            this.fetchDepositsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
-            this.fetchWithdrawalsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
-            this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
-            this.fetchConversationsFromServer({ limit: 25, replaceAll: false, silentEvent: true }),
-          );
-        } else {
-          const querySince = this.lastSyncTimestamp
-            ? new Date(Math.max(0, Date.parse(this.lastSyncTimestamp) - 10000)).toISOString()
-            : undefined;
-          selfHostedTasks.push(
-            this.fetchWalletFromServer({ customerId: user.id }),
-            this.fetchWalletTransactionsFromServer({ customerId: user.id, limit: 25 }),
-            this.fetchDepositsFromServer({
-              customerId: user.id,
-              limit: 15,
-              replaceAll: false,
-              silentEvent: true,
-            }),
-            this.fetchWithdrawalsFromServer({
-              customerId: user.id,
-              limit: 15,
-              replaceAll: false,
-              silentEvent: true,
-            }),
-            this.fetchGameAccountsFromServer({
-              customerId: user.id,
-              limit: 50,
-              replaceAll: true,
-              silentEvent: true,
-            }),
-            this.fetchConversationsFromServer({ limit: 10, replaceAll: false, silentEvent: true }),
-            this.fetchMessagesForConversation(`conv_${user.id}`, {
-              ...(querySince ? { afterCreatedAt: querySince } : {}),
-              limit: 50,
-            }),
-          );
-        }
+      if (this.isSyncingDelta) return;
+      this.isSyncingDelta = true;
+      this.syncStatus = 'syncing';
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
       }
-      await Promise.allSettled(selfHostedTasks);
-      this.lastSyncTimestamp = new Date().toISOString();
+      try {
+        const user = this.getCurrentUser();
+        const isStaff = user?.role === 'admin' || user?.role === 'agent';
+        const selfHostedTasks: Promise<unknown>[] = [
+          this.fetchAppConfigFromServer({ silentEvent: true }),
+          this.fetchFakedCashoutsFromServer({ limit: 25, silentEvent: true }),
+          this.fetchGameCatalogFromServer({ silentEvent: true }),
+        ];
+        if (user?.id) {
+          if (isStaff) {
+            selfHostedTasks.push(
+              this.fetchDepositsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
+              this.fetchWithdrawalsFromServer({ limit: 15, replaceAll: false, silentEvent: true }),
+              this.fetchGameAccountsFromServer({ limit: 100, replaceAll: true, silentEvent: true }),
+              this.fetchConversationsFromServer({ limit: 25, replaceAll: false, silentEvent: true }),
+            );
+            if (user.role === 'admin') {
+              selfHostedTasks.push(this.fetchAuditLogsFromServer({ limit: 100 }));
+            }
+          } else {
+            const querySince = this.lastSyncTimestamp
+              ? new Date(Math.max(0, Date.parse(this.lastSyncTimestamp) - 10000)).toISOString()
+              : undefined;
+            selfHostedTasks.push(
+              this.fetchWalletFromServer({ customerId: user.id, silentEvent: true }),
+              this.fetchWalletTransactionsFromServer({ customerId: user.id, limit: 25, silentEvent: true }),
+              this.fetchDepositsFromServer({
+                customerId: user.id,
+                limit: 15,
+                replaceAll: false,
+                silentEvent: true,
+              }),
+              this.fetchWithdrawalsFromServer({
+                customerId: user.id,
+                limit: 15,
+                replaceAll: false,
+                silentEvent: true,
+              }),
+              this.fetchGameAccountsFromServer({
+                customerId: user.id,
+                limit: 50,
+                replaceAll: true,
+                silentEvent: true,
+              }),
+              this.fetchConversationsFromServer({ limit: 10, replaceAll: false, silentEvent: true }),
+              this.fetchMessagesForConversation(`conv_${user.id}`, {
+                ...(querySince ? { afterCreatedAt: querySince } : {}),
+                limit: 50,
+              }),
+            );
+          }
+        }
+        await Promise.allSettled(selfHostedTasks);
+        if (user?.id && !isStaff) {
+          this.reconcileCustomerWallet(user.id);
+        }
+        this.lastSyncTimestamp = new Date().toISOString();
+        this.syncStatus = 'connected';
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'delta_sync' } }));
+          window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+        }
+      } finally {
+        this.isSyncingDelta = false;
+      }
       return;
     }
     if (this.isSyncingDelta) return;
@@ -6336,8 +6538,12 @@ class DataService {
     this.currentUserId = target.id;
 
     // Ensure Realtime stream is active for this authenticated session
-    if (isSupabaseConfigured() && supabase && !this.realtimeChannel) {
-      this.initSupabaseRealtimeSync();
+    if (isSupabaseConfigured() && supabase) {
+      if (!this.realtimeChannel) {
+        this.initSupabaseRealtimeSync();
+      }
+    } else if (!this.realtimeStreamUnsub) {
+      this.initSelfHostedRealtimeSync();
     }
 
     // Rebind this device's push subscription strictly to the active logged-in user (all roles)
@@ -8999,15 +9205,29 @@ class DataService {
       const contentType = res ? (res.headers.get('content-type') || '').toLowerCase() : '';
       const isJson = contentType.includes('application/json');
 
-      // Explicit backend JSON 403/401 must never be bypassed by client fallback
-      if (res && (res.status === 403 || res.status === 401) && isJson && data?.error) {
+      // Explicit backend JSON 403/401/400 must never be bypassed by client fallback
+      if (
+        res &&
+        (res.status === 403 || res.status === 401 || res.status === 400) &&
+        isJson &&
+        data?.error
+      ) {
+        const errCode =
+          typeof data?.code === 'string'
+            ? data.code
+            : typeof data?.error === 'object' && typeof data.error?.code === 'string'
+              ? data.error.code
+              : undefined;
         return {
           logs: [],
           hasMore: false,
           nextCursor: null,
-          error: data.error,
-          code: data?.code,
-          requiresReauth: res.status === 401 && data?.code === 'TOKEN_EXPIRED',
+          error: extractServerApiError(
+            data,
+            `Failed to load audit logs (${res.status})`,
+          ),
+          code: errCode,
+          requiresReauth: res.status === 401 && errCode === 'TOKEN_EXPIRED',
         };
       }
 
@@ -9021,7 +9241,10 @@ class DataService {
         logs: [],
         hasMore: false,
         nextCursor: null,
-        error: data?.error || rlsResult.error || `Failed to load audit logs (${res?.status || 'network'})`,
+        error: extractServerApiError(
+          data,
+          rlsResult.error || `Failed to load audit logs (${res?.status || 'network'})`,
+        ),
       };
     } catch (err: any) {
       const rlsResult = await this.fetchAuditLogsDirectViaRls(options);
@@ -9070,7 +9293,10 @@ class DataService {
       const res = attempt.response;
       const data = attempt.json;
       if (!res?.ok) {
-        console.warn('[DataService] Server audit log write failed:', data?.error || res?.status);
+        console.warn(
+          '[DataService] Server audit log write failed:',
+          extractServerApiError(data, String(res?.status || 'unknown')),
+        );
         return;
       }
       const saved = data?.log ? normalizeAuditLogRow(data.log) : null;

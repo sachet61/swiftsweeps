@@ -5,10 +5,13 @@ import {
   type RequestHandler,
   type Response,
 } from 'express';
+import type { AppConfigRepo } from '../appConfig/appConfigRepo.js';
 import type { ChatEventBroker } from '../chat/chatEvents.js';
 import type { UserDirectoryRepo } from '../auth/userDirectoryRepo.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
+import type { TelegramFetchFn } from './appConfig.js';
 import {
   WheelConflictError,
   WheelCooldownError,
@@ -22,7 +25,10 @@ export interface WheelRouterDeps {
   wheelRepo: WheelRepo;
   userRepo: UserDirectoryRepo;
   requireAuth: RequestHandler;
+  appConfigRepo?: AppConfigRepo;
+  telegramFetch?: TelegramFetchFn;
   chatEvents?: ChatEventBroker;
+  realtimeEvents?: RealtimeEventBroker;
   nowFn?: () => number;
   randomUnitFn?: () => number;
 }
@@ -270,10 +276,63 @@ function mapRepoError(err: unknown): unknown {
   return err;
 }
 
+async function dispatchBonusLoadTelegramAlert(
+  appConfigRepo: AppConfigRepo | undefined,
+  telegramFetch: TelegramFetchFn | undefined,
+  text: string | null | undefined,
+): Promise<boolean> {
+  if (!appConfigRepo || !text) return false;
+  const fetchImpl: TelegramFetchFn | undefined =
+    telegramFetch ??
+    (typeof fetch === 'function'
+      ? (url, init) =>
+          fetch(url, init).then(async (r) => ({
+            ok: r.ok,
+            status: r.status,
+            json: () => r.json() as Promise<Record<string, unknown>>,
+          }))
+      : undefined);
+  if (!fetchImpl) return false;
+
+  try {
+    const cfg = await appConfigRepo.getTelegramInternalConfig();
+    if (!cfg.botToken || !cfg.channelId || !cfg.enabled) return false;
+
+    const sendReq = async (targetChatId: string) => {
+      const r = await fetchImpl(
+        `https://api.telegram.org/bot${cfg.botToken}/sendMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: targetChatId, text }),
+        },
+      );
+      return r.json();
+    };
+
+    let result = await sendReq(cfg.channelId);
+    const desc = typeof result?.description === 'string' ? result.description : '';
+    if (
+      !result?.ok &&
+      desc.toLowerCase().includes('chat not found') &&
+      cfg.channelId.startsWith('-') &&
+      !cfg.channelId.startsWith('-100')
+    ) {
+      result = await sendReq(`-100${cfg.channelId.replace(/^-/, '')}`);
+    }
+    return Boolean(result?.ok);
+  } catch {
+    return false;
+  }
+}
+
 export function createWheelRouter({
   wheelRepo,
   requireAuth,
+  appConfigRepo,
+  telegramFetch,
   chatEvents,
+  realtimeEvents,
   nowFn,
   randomUnitFn,
 }: WheelRouterDeps): Router {
@@ -343,6 +402,12 @@ export function createWheelRouter({
           nowMs: nowFn ? nowFn() : Date.now(),
           randomUnitFn,
         });
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: actor.appUserId },
+          ['wallets', 'transactions', 'wheel_spins', 'audit_logs'],
+          'wheel_spin',
+          actor.appUserId,
+        );
         res.status(200).json(result);
       } catch (err) {
         if (err instanceof WheelCooldownError) {
@@ -377,6 +442,11 @@ export function createWheelRouter({
           actorId: actor.appUserId,
           actorName: actor.displayName,
         });
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['app_config', 'audit_logs'],
+          'wheel_config_updated',
+        );
         res.status(200).json({
           success: true,
           wheelOfLuck,
@@ -408,7 +478,7 @@ export function createWheelRouter({
           );
         }
 
-        const result = await wheelRepo.transferGameCredits({
+        const { telegramText, ...publicResult } = await wheelRepo.transferGameCredits({
           gameAccountId: body.gameAccountId,
           gameCatalogId: body.gameCatalogId,
           customerIdOverride: body.customerId,
@@ -420,6 +490,15 @@ export function createWheelRouter({
           actorRole: actor.role,
           nowMs: nowFn ? nowFn() : Date.now(),
         });
+        const telegramNotified = await dispatchBonusLoadTelegramAlert(
+          appConfigRepo,
+          telegramFetch,
+          telegramText,
+        );
+        const result = {
+          ...publicResult,
+          telegramNotified,
+        };
         if (chatEvents && result.staffMessage && result.staffMessage.id) {
           const staffMsg = result.staffMessage as Record<string, unknown>;
           const convId = String(
@@ -450,6 +529,16 @@ export function createWheelRouter({
             },
           });
         }
+        const targetCid =
+          (result.wallet as { customerId?: string } | undefined)?.customerId ||
+          body.customerId ||
+          actor.appUserId;
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: targetCid },
+          ['wallets', 'transactions', 'game_accounts', 'audit_logs'],
+          'game_credit_transfer',
+          targetCid,
+        );
         res.status(200).json(result);
       } catch (err) {
         next(mapRepoError(err));

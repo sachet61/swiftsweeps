@@ -8,6 +8,7 @@ import {
 import type { UserDirectoryRepo } from '../auth/userDirectoryRepo.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 import {
   ReferralConflictError,
   ReferralForbiddenError,
@@ -24,6 +25,7 @@ export interface ReferralRouterDeps {
   referralRepo: ReferralRepo;
   userRepo: UserDirectoryRepo;
   requireAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
 }
 
 const ID_REGEX = /^[a-zA-Z0-9_-]{1,120}$/;
@@ -399,6 +401,7 @@ function mapRepoError(err: unknown): unknown {
 export function createReferralRouter({
   referralRepo,
   requireAuth,
+  realtimeEvents,
 }: ReferralRouterDeps): Router {
   const router = Router();
   const requireStaff = requireRole('admin', 'agent');
@@ -440,6 +443,13 @@ export function createReferralRouter({
           actorRole: actor.role,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: targetRefereeId },
+          ['users', 'audit_logs'],
+          'referral_attributed',
+          targetRefereeId,
+        );
+
         res.status(200).json(result);
       } catch (err) {
         next(mapRepoError(err));
@@ -476,6 +486,13 @@ export function createReferralRouter({
               ? fpHeader.trim().slice(0, 128)
               : null,
         });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: targetRefereeId },
+          ['wallets', 'transactions', 'audit_logs'],
+          'referral_evaluated',
+          targetRefereeId,
+        );
 
         res.status(200).json(result);
       } catch (err) {
@@ -555,6 +572,13 @@ export function createReferralRouter({
           actorName: actor.displayName,
           actorRole: actor.role,
         });
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: body.refereeId },
+          ['users', 'wallets', 'transactions', 'audit_logs'],
+          'referral_manual_assigned',
+          body.refereeId,
+        );
+
         res.status(200).json(result);
       } catch (err) {
         next(mapRepoError(err));
@@ -577,6 +601,13 @@ export function createReferralRouter({
           actorId: actor.appUserId,
           actorName: actor.displayName,
         });
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: body.userId },
+          ['users', 'audit_logs'],
+          'referral_vanity_code_updated',
+          body.userId,
+        );
+
         res.status(200).json(result);
       } catch (err) {
         next(mapRepoError(err));
@@ -599,6 +630,12 @@ export function createReferralRouter({
           actorId: actor.appUserId,
           actorName: actor.displayName,
         });
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'staff' },
+          ['wallets', 'transactions', 'audit_logs'],
+          'referral_reviewed',
+        );
+
         res.status(200).json(result);
       } catch (err) {
         next(mapRepoError(err));
@@ -622,6 +659,12 @@ export function createReferralRouter({
           actorName: actor.displayName,
           actorRole: actor.role,
         });
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'staff' },
+          ['wallets', 'transactions', 'audit_logs'],
+          'referral_reconciled',
+        );
+
         res.status(200).json(result);
       } catch (err) {
         next(mapRepoError(err));
@@ -644,6 +687,12 @@ export function createReferralRouter({
           actorId: actor.appUserId,
           actorName: actor.displayName,
         });
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['app_config', 'audit_logs'],
+          'referral_config_updated',
+        );
+
         res.status(200).json({
           success: true,
           referralProgram: saved,

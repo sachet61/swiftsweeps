@@ -16,12 +16,14 @@ import {
   type WithdrawalRepo,
   type WithdrawalStatusValue,
 } from '../withdrawals/withdrawalRepo.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 import type { WalletRecord } from '../wallet/walletRepo.js';
 
 export interface WithdrawalRouterDeps {
   withdrawalRepo: WithdrawalRepo;
   userRepo: UserDirectoryRepo;
   requireAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
 }
 
 const ID_REGEX = /^[a-zA-Z0-9_-]{1,120}$/;
@@ -658,6 +660,7 @@ export function createWithdrawalRouter({
   withdrawalRepo,
   userRepo,
   requireAuth,
+  realtimeEvents,
 }: WithdrawalRouterDeps): Router {
   const router = Router();
   const requireStaff = requireRole('admin', 'agent');
@@ -739,6 +742,13 @@ export function createWithdrawalRouter({
           payoutDetails: body.payoutDetails,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: actor.appUserId },
+          ['withdrawals', 'wallets', 'audit_logs'],
+          'withdrawal_created',
+          actor.appUserId,
+        );
+
         res.status(201).json({
           withdrawal: toWithdrawalDto(withdrawal),
           message:
@@ -789,6 +799,13 @@ export function createWithdrawalRouter({
             notes: body.notes,
             status: body.status,
           });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: targetUser.appUserId },
+          ['withdrawals', 'wallets', 'transactions', 'audit_logs'],
+          'staff_withdrawal_created',
+          targetUser.appUserId,
+        );
 
         const isCompleted = withdrawal.status === 'completed';
         res.status(201).json({
@@ -862,6 +879,13 @@ export function createWithdrawalRouter({
               note: body.note,
               payoutReference: body.payoutReference,
             });
+
+          realtimeEvents?.emitDomainInvalidation(
+            { scope: 'user_and_staff', customerId: withdrawal.customerId },
+            ['withdrawals', 'wallets', 'transactions', 'audit_logs'],
+            'withdrawal_status_updated',
+            withdrawal.customerId,
+          );
 
           res.status(200).json({
             withdrawal: toWithdrawalDto(withdrawal),

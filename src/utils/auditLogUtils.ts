@@ -37,7 +37,7 @@ export function normalizeAuditLogRow(raw: any): AuditLog | null {
   const actorRole = normalizeAuditActorRole(raw.actor_role ?? raw.actorRole ?? (actorId === 'system' ? 'admin' : 'customer'));
   const action = String(raw.action || 'UNKNOWN_ACTION').trim() || 'UNKNOWN_ACTION';
   const entityTypeRaw = String(raw.entity_type ?? raw.entityType ?? 'settings').trim().toLowerCase();
-  const allowedEntities = new Set(['topup', 'withdrawal', 'wallet', 'game_account', 'settings', 'user', 'chat', 'auth']);
+  const allowedEntities = new Set(['topup', 'withdrawal', 'wallet', 'game_account', 'settings', 'user', 'chat', 'auth', 'official_partner']);
   const entityType = (allowedEntities.has(entityTypeRaw) ? entityTypeRaw : 'settings') as AuditLog['entityType'];
   const entityId = String(raw.entity_id ?? raw.entityId ?? '').trim();
   const details = String(raw.details ?? '').trim();

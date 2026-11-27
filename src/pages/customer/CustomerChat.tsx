@@ -371,8 +371,25 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     window.addEventListener('aetherpay_state_changed', handleSync);
     window.addEventListener('storage', handleSync);
 
+    let lastCatchUpTime = 0;
+    const performCatchUp = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastCatchUpTime < 800) return;
+      lastCatchUpTime = now;
+      dataService.fetchMessagesForConversation(convId, { limit: 50 }).then((fresh) => {
+        if (isUnmounted) return;
+        if (fresh && fresh.length > 0) {
+          setMessages(filterVisibleMessagesForRole(fresh, 'customer'));
+        }
+      });
+    };
+
     const unsubRoom = chatStreamClient.subscribe({
       onStatus: (status) => setRealtimeStatus(status),
+      onReconnect: () => {
+        performCatchUp();
+      },
       onChatMessage: (event) => {
         if (!event?.message?.id) return;
         const incoming = mapDbMessageRowToChatMessage(event.message, convId);
@@ -397,20 +414,6 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         }
       },
     });
-
-    let lastCatchUpTime = 0;
-    const performCatchUp = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      const now = Date.now();
-      if (now - lastCatchUpTime < 800) return;
-      lastCatchUpTime = now;
-      dataService.fetchMessagesForConversation(convId, { limit: 50 }).then((fresh) => {
-        if (isUnmounted) return;
-        if (fresh && fresh.length > 0) {
-          setMessages(filterVisibleMessagesForRole(fresh, 'customer'));
-        }
-      });
-    };
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {

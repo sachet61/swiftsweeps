@@ -18,12 +18,14 @@ import {
 } from '../deposits/depositRepo.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 import type { WalletRecord } from '../wallet/walletRepo.js';
 
 export interface DepositRouterDeps {
   depositRepo: DepositRepo;
   userRepo: UserDirectoryRepo;
   requireAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
 }
 
 const ID_REGEX = /^[a-zA-Z0-9_-]{1,120}$/;
@@ -732,6 +734,7 @@ export function createDepositRouter({
   depositRepo,
   userRepo,
   requireAuth,
+  realtimeEvents,
 }: DepositRouterDeps): Router {
   const router = Router();
   const requireStaff = requireRole('admin', 'agent');
@@ -813,6 +816,13 @@ export function createDepositRouter({
           depositAddress: body.depositAddress,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: actor.appUserId },
+          ['topups', 'wallets', 'audit_logs'],
+          'deposit_created',
+          actor.appUserId,
+        );
+
         res.status(201).json({
           deposit: toDepositDto(deposit),
           wallet: toWalletDto(wallet),
@@ -864,6 +874,13 @@ export function createDepositRouter({
           notes: body.notes,
           status: body.status,
         });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: targetUser.appUserId },
+          ['topups', 'wallets', 'transactions', 'audit_logs'],
+          'staff_deposit_created',
+          targetUser.appUserId,
+        );
 
         const isCompleted = deposit.status === 'completed';
         res.status(201).json({
@@ -937,6 +954,13 @@ export function createDepositRouter({
             notes: body.notes,
           });
 
+          realtimeEvents?.emitDomainInvalidation(
+            { scope: 'user_and_staff', customerId: deposit.customerId },
+            ['topups', 'wallets', 'transactions', 'audit_logs'],
+            'deposit_approved',
+            deposit.customerId,
+          );
+
           res.status(200).json({
             deposit: toDepositDto(deposit),
             wallet: toWalletDto(wallet),
@@ -980,6 +1004,13 @@ export function createDepositRouter({
             actorRole: actor.role,
             reason: body.reason,
           });
+
+          realtimeEvents?.emitDomainInvalidation(
+            { scope: 'user_and_staff', customerId: deposit.customerId },
+            ['topups', 'wallets', 'audit_logs'],
+            'deposit_rejected',
+            deposit.customerId,
+          );
 
           res.status(200).json({
             deposit: toDepositDto(deposit),

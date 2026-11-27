@@ -17,12 +17,14 @@ import type {
 } from '../catalog/gameCatalogRepo.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 
 export interface GameCatalogRouterDeps {
   gameCatalogRepo: GameCatalogRepo;
   userRepo: UserDirectoryRepo;
   requireAuth: RequestHandler;
   optionalAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
 }
 
 const GAME_ID_REGEX = /^[a-zA-Z0-9_-]{1,80}$/;
@@ -1080,6 +1082,7 @@ export function createGameCatalogRouter({
   userRepo,
   requireAuth,
   optionalAuth,
+  realtimeEvents,
 }: GameCatalogRouterDeps): Router {
   const router = Router();
   const requireAdmin = requireRole('admin');
@@ -1167,6 +1170,12 @@ export function createGameCatalogRouter({
           details: `Admin saved master game catalog config (${saved.length} games, ${disabledTitles.length} disabled${disabledTitles.length > 0 ? `: ${disabledTitles.join(', ')}` : ''}).`,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['game_catalog', 'audit_logs'],
+          'game_catalog_config_saved',
+        );
+
         res.status(200).json({
           success: true,
           savedCount: saved.length,
@@ -1235,6 +1244,12 @@ export function createGameCatalogRouter({
             : `Admin updated game "${item.title}" (${item.enabled ? 'Active' : 'Disabled'}) in platform catalog.`,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['game_catalog', 'audit_logs'],
+          created ? 'game_catalog_created' : 'game_catalog_updated',
+        );
+
         res.status(created ? 201 : 200).json({
           success: true,
           created,
@@ -1281,6 +1296,12 @@ export function createGameCatalogRouter({
             ? `Admin added game "${item.title}" to platform catalog.`
             : `Admin updated game "${item.title}" (${item.enabled ? 'Active' : 'Disabled'}) in platform catalog.`,
         });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['game_catalog', 'audit_logs'],
+          created ? 'game_catalog_created' : 'game_catalog_updated',
+        );
 
         res.status(created ? 201 : 200).json({
           success: true,
@@ -1374,6 +1395,12 @@ export function createGameCatalogRouter({
           details: `Admin updated game "${item.title}" (${item.enabled ? 'Active' : 'Disabled'}) in platform catalog.`,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['game_catalog', 'audit_logs'],
+          'game_catalog_patched',
+        );
+
         res.status(200).json({
           success: true,
           game: toGameCatalogDto(item),
@@ -1408,6 +1435,12 @@ export function createGameCatalogRouter({
           entityId: deleted.id,
           details: `Admin removed game "${deleted.title}" from platform catalog.`,
         });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['game_catalog', 'audit_logs'],
+          'game_catalog_deleted',
+        );
 
         res.status(200).json({
           success: true,

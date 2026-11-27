@@ -20,11 +20,13 @@ import {
 } from '../auth/userDirectoryRepo.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 
 export interface AdminAuthRouterDeps {
   authRuntime: AuthRuntime;
   userRepo: UserDirectoryRepo;
   requireAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
 }
 
 const VALID_ROLES = new Set<AppUserRole>(['customer', 'agent', 'admin']);
@@ -505,6 +507,7 @@ export function createAdminAuthRouter({
   authRuntime,
   userRepo,
   requireAuth,
+  realtimeEvents,
 }: AdminAuthRouterDeps): Router {
   const router = Router();
 
@@ -634,6 +637,13 @@ export function createAdminAuthRouter({
           details: `Provisioned user with role ${created.role} and password_reset_required=true.`,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'staff' },
+          ['users', 'audit_logs'],
+          'admin_user_provisioned',
+          created.appUserId,
+        );
+
         res.status(201).json({
           success: true,
           user: toSafeUserResponse(created),
@@ -668,6 +678,13 @@ export function createAdminAuthRouter({
           const authCtx = await authRuntime.auth.$context;
           await authCtx.internalAdapter.deleteUserSessions(updated.authUserId);
         }
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: updated.appUserId },
+          ['users', 'audit_logs'],
+          'admin_user_role_updated',
+          updated.appUserId,
+        );
 
         res.status(200).json({
           success: true,
@@ -704,6 +721,13 @@ export function createAdminAuthRouter({
           const authCtx = await authRuntime.auth.$context;
           await authCtx.internalAdapter.deleteUserSessions(updated.authUserId);
         }
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: updated.appUserId },
+          ['users', 'audit_logs'],
+          'admin_user_status_updated',
+          updated.appUserId,
+        );
 
         res.status(200).json({
           success: true,
@@ -742,6 +766,13 @@ export function createAdminAuthRouter({
             .deleteUser(deleted.authUserId)
             .catch(() => {});
         }
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'staff' },
+          ['users', 'audit_logs'],
+          'admin_user_deleted',
+          deleted.appUserId,
+        );
 
         res.status(200).json({
           success: true,

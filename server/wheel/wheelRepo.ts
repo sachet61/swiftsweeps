@@ -168,6 +168,7 @@ export interface TransferGameCreditsResult {
   staffMessage: Record<string, unknown> | null;
   staffNotificationDelivered: boolean;
   telegramNotified: boolean;
+  telegramText?: string | null;
 }
 
 function roundMoney(value: unknown): number {
@@ -456,6 +457,7 @@ export class WheelRepo {
             selectedSegment: matchedSeg,
             segmentIndex: idx,
             rewardAmount: spin.rewardAmount,
+            actualRewardAmount: spin.rewardAmount,
             simulatedWinAmount: spin.simulatedWinAmount,
             simulatedWinDisplay: config.simulatedWinDisplay,
             freePlayBalance,
@@ -558,8 +560,8 @@ export class WheelRepo {
 
         await db.query(
           `INSERT INTO public.transactions (
-             id, customer_id, amount, type, status, description, reference_id, created_at
-           ) VALUES ($1, $2, $3, 'free_play_bonus', 'completed', $4, $5, $6)`,
+             id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+           ) VALUES ($1, $2, $3, 'free_play_bonus', 'completed', $4, $5, 'Wheel of Luck', $6)`,
           [
             txId,
             input.customerId,
@@ -575,8 +577,8 @@ export class WheelRepo {
           userId: input.customerId,
           title: 'Wheel of Luck Free-Play Credited!',
           message: `You spun "${selection.segment.label}" and received $${rewardAmount.toFixed(2)} in Free-Play credits.`,
-          type: 'system',
-          linkTab: 'wallet',
+          type: 'bonus',
+          linkTab: 'game_accounts',
           linkRequestId: spinId,
         });
       }
@@ -605,6 +607,7 @@ export class WheelRepo {
         selectedSegment: selection.segment,
         segmentIndex: selection.segmentIndexInAll,
         rewardAmount,
+        actualRewardAmount: rewardAmount,
         simulatedWinAmount,
         simulatedWinDisplay: config.simulatedWinDisplay,
         freePlayBalance,
@@ -668,55 +671,36 @@ export class WheelRepo {
     }
 
     return this.withTransaction(async (db) => {
-      let accountRow: RawGameAccountRow | undefined;
+      const isStaff = input.actorRole === 'admin' || input.actorRole === 'agent';
+      const targetCustomer =
+        isStaff && input.customerIdOverride
+          ? input.customerIdOverride
+          : input.actorId;
+
+      // Resolve target owner non-lockingly first so row locks always follow
+      // canonical DAG order (wallets -> game_accounts), matching transfer_game_credits_atomic.
+      let ownerId = targetCustomer;
       if (input.gameAccountId) {
-        const res = await db.query<RawGameAccountRow>(
-          `SELECT id, customer_id, game_id, game_title, username, status,
-                  balance, free_play_balance, updated_at
-           FROM public.game_accounts
-           WHERE id = $1
-           FOR UPDATE`,
+        const lookupRes = await db.query<{ customer_id: string }>(
+          `SELECT customer_id FROM public.game_accounts WHERE id = $1 LIMIT 1`,
           [input.gameAccountId],
         );
-        accountRow = res.rows[0];
-      } else if (input.gameCatalogId) {
-        const isStaff = input.actorRole === 'admin' || input.actorRole === 'agent';
-        const targetCustomer =
-          isStaff && input.customerIdOverride
-            ? input.customerIdOverride
-            : input.actorId;
-        const res = await db.query<RawGameAccountRow>(
-          `SELECT id, customer_id, game_id, game_title, username, status,
-                  balance, free_play_balance, updated_at
-           FROM public.game_accounts
-           WHERE customer_id = $1 AND game_id = $2
-           FOR UPDATE`,
-          [targetCustomer, input.gameCatalogId],
-        );
-        accountRow = res.rows[0];
+        const foundOwner = lookupRes.rows[0]?.customer_id;
+        if (!foundOwner) {
+          throw new WheelNotFoundError(
+            'Game account not found.',
+            'GAME_ACCOUNT_NOT_FOUND',
+          );
+        }
+        ownerId = foundOwner;
       }
 
-      if (!accountRow) {
-        throw new WheelNotFoundError(
-          'Game account not found.',
-          'GAME_ACCOUNT_NOT_FOUND',
-        );
-      }
-
-      const isStaff = input.actorRole === 'admin' || input.actorRole === 'agent';
-      if (accountRow.customer_id !== input.actorId && !isStaff) {
+      if (ownerId !== input.actorId && !isStaff) {
         throw new WheelForbiddenError(
           'Access Denied: You can only manage credits for your own game accounts.',
         );
       }
 
-      if (String(accountRow.status || '').toLowerCase() !== 'active') {
-        throw new WheelValidationError(
-          'Game account must be active before transferring credits.',
-        );
-      }
-
-      const ownerId = accountRow.customer_id;
       await db.query(
         `INSERT INTO public.wallets (
            customer_id, balance, referral_bonus_balance, free_play_balance,
@@ -735,6 +719,48 @@ export class WheelRepo {
         [ownerId],
       );
       const wallet = walletRes.rows[0]!;
+
+      let accountRow: RawGameAccountRow | undefined;
+      if (input.gameAccountId) {
+        const res = await db.query<RawGameAccountRow>(
+          `SELECT id, customer_id, game_id, game_title, username, status,
+                  balance, free_play_balance, updated_at
+           FROM public.game_accounts
+           WHERE id = $1
+           FOR UPDATE`,
+          [input.gameAccountId],
+        );
+        accountRow = res.rows[0];
+      } else if (input.gameCatalogId) {
+        const res = await db.query<RawGameAccountRow>(
+          `SELECT id, customer_id, game_id, game_title, username, status,
+                  balance, free_play_balance, updated_at
+           FROM public.game_accounts
+           WHERE customer_id = $1 AND game_id = $2
+           FOR UPDATE`,
+          [ownerId, input.gameCatalogId],
+        );
+        accountRow = res.rows[0];
+      }
+
+      if (!accountRow) {
+        throw new WheelNotFoundError(
+          'Game account not found.',
+          'GAME_ACCOUNT_NOT_FOUND',
+        );
+      }
+
+      if (accountRow.customer_id !== input.actorId && !isStaff) {
+        throw new WheelForbiddenError(
+          'Access Denied: You can only manage credits for your own game accounts.',
+        );
+      }
+
+      if (String(accountRow.status || '').toLowerCase() !== 'active') {
+        throw new WheelValidationError(
+          'Game account must be active before transferring credits.',
+        );
+      }
 
       let nextWalletCash = roundMoney(wallet.balance);
       let nextWalletRef = roundMoney(wallet.referral_bonus_balance);
@@ -973,6 +999,7 @@ export class WheelRepo {
         staffMessage,
         staffNotificationDelivered,
         telegramNotified: false,
+        telegramText: staffPayload?.telegramText ?? null,
       };
     });
   }

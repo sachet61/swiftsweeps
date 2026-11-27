@@ -16,6 +16,7 @@ import {
   type SendMessageInput,
 } from '../chat/chatRepo.js';
 import type { ChatEventBroker, ChatTicketStatus } from '../chat/chatEvents.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
 
@@ -23,6 +24,7 @@ export interface ChatRouterDeps {
   chatRepo: ChatRepo;
   chatEvents: ChatEventBroker;
   requireAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
 }
 
 const ID_REGEX = /^[a-zA-Z0-9_-]{1,140}$/;
@@ -553,6 +555,7 @@ export function createChatRouter({
   chatRepo,
   chatEvents,
   requireAuth,
+  realtimeEvents,
 }: ChatRouterDeps): Router {
   const router = Router();
 
@@ -717,6 +720,12 @@ export function createChatRouter({
         status: conversation.status,
         conversation,
       });
+      realtimeEvents?.emitDomainInvalidation(
+        { scope: 'admin' },
+        ['audit_logs'],
+        'chat_conversation_status_updated',
+        conversation.customer_id,
+      );
 
       res.json({
         success: true,
@@ -843,6 +852,14 @@ export function createChatRouter({
             isInternalNote: msg.is_internal_note,
             message: msg,
           });
+        }
+        if (updatedMessages.length > 0) {
+          realtimeEvents?.emitDomainInvalidation(
+            { scope: 'admin' },
+            ['audit_logs'],
+            'chat_transaction_status_updated',
+            body.customerId,
+          );
         }
 
         res.json({
@@ -1017,29 +1034,67 @@ export function createChatRouter({
       res.setHeader('X-Accel-Buffering', 'no');
       res.flushHeaders?.();
 
-      const writeEvent = (eventName: string, payload: unknown) => {
+      const writeEvent = (
+        eventName: string,
+        payload: unknown,
+        eventId?: string,
+      ) => {
         if (res.writableEnded) return;
-        res.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
+        const idLine = eventId ? `id: ${eventId}\n` : '';
+        res.write(`${idLine}event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
       };
+
+      const canReceiveChatEvent = (
+        event: Parameters<Parameters<ChatEventBroker['subscribe']>[0]>[0],
+      ): boolean => {
+        if (isStaff) return true;
+        if (event.customerId !== authUser.appUserId) {
+          return false;
+        }
+        if (
+          (event.type === 'chat_message' || event.type === 'message_updated') &&
+          event.isInternalNote
+        ) {
+          return false;
+        }
+        return true;
+      };
+
+      if (!res.writableEnded) {
+        res.write('retry: 3000\n\n');
+      }
 
       writeEvent('ready', {
         connectedAt: new Date().toISOString(),
         role: authUser.role,
+        streamEpoch: chatEvents.epoch,
+        latestEventId: chatEvents.latestEventId,
       });
 
-      const unsubscribe = chatEvents.subscribe((event) => {
-        if (!isStaff) {
-          if (event.customerId !== authUser.appUserId) {
-            return;
-          }
-          if (
-            (event.type === 'chat_message' || event.type === 'message_updated') &&
-            event.isInternalNote
-          ) {
-            return;
-          }
+      const headerCursor = req.get('last-event-id');
+      const queryCursor =
+        typeof req.query.lastEventId === 'string' ? req.query.lastEventId : undefined;
+      const replay = chatEvents.getReplaySince(
+        headerCursor?.trim() || queryCursor?.trim() || undefined,
+      );
+      if (replay.status === 'resync_required') {
+        writeEvent('resync_required', {
+          reason: replay.reason,
+          streamEpoch: chatEvents.epoch,
+          latestEventId: chatEvents.latestEventId,
+        });
+      } else if (replay.status === 'replay') {
+        for (const envelope of replay.events) {
+          if (!canReceiveChatEvent(envelope.event)) continue;
+          writeEvent(envelope.event.type, envelope.event, envelope.eventId);
         }
-        writeEvent(event.type, event);
+      }
+
+      const unsubscribe = chatEvents.subscribe((event, meta) => {
+        if (!canReceiveChatEvent(event)) {
+          return;
+        }
+        writeEvent(event.type, event, meta.eventId);
       });
 
       const heartbeat = setInterval(() => {
@@ -1049,7 +1104,10 @@ export function createChatRouter({
       }, 15_000);
       heartbeat.unref?.();
 
+      let cleanedUp = false;
       const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
         clearInterval(heartbeat);
         unsubscribe();
       };

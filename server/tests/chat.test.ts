@@ -1018,9 +1018,10 @@ async function createTestServer() {
     db,
     baseUrl,
     close: () =>
-      new Promise<void>((resolve, reject) =>
-        server.close((err) => (err ? reject(err) : resolve())),
-      ),
+      new Promise<void>((resolve, reject) => {
+        server.closeAllConnections?.();
+        server.close((err) => (err ? reject(err) : resolve()));
+      }),
   };
 }
 
@@ -1809,6 +1810,188 @@ test('Role-scoped SSE /api/chat/stream isolates customers and suppresses interna
     } finally {
       streamA.close();
       streamStaff.close();
+    }
+  } finally {
+    await srv.close();
+  }
+});
+
+test('SSE /api/chat/stream replays missed events by Last-Event-ID without leaking internal notes and signals resync_required on stale epoch', async () => {
+  const srv = await createTestServer();
+  try {
+    const custA = await signupAndSignIn(srv.baseUrl, srv.db, {
+      email: 'chat-replay-a@example.com',
+      name: 'Replay A',
+      role: 'customer',
+    });
+    const agent = await signupAndSignIn(srv.baseUrl, srv.db, {
+      email: 'chat-replay-agent@example.com',
+      name: 'Replay Agent',
+      role: 'agent',
+    });
+
+    // Establish initial cursor via live stream
+    const initialStream = await openSseStream(srv.baseUrl, custA.jar);
+    const readyEvent = initialStream.events.find((e) => e.event === 'ready');
+    assert.ok(readyEvent?.data?.latestEventId);
+    const cursorBeforeDisconnect = String(readyEvent.data.latestEventId);
+    initialStream.close();
+
+    // Send 1 internal note + 1 public reply while Customer A is disconnected
+    await httpRequest(srv.baseUrl, 'POST', '/api/chat/send', {
+      jar: agent.jar,
+      body: {
+        id: 'msg_replay_internal',
+        conversationId: `conv_${custA.appUserId}`,
+        text: 'Hidden staff note during disconnect',
+        isInternalNote: true,
+      },
+    });
+    await httpRequest(srv.baseUrl, 'POST', '/api/chat/send', {
+      jar: agent.jar,
+      body: {
+        id: 'msg_replay_public',
+        conversationId: `conv_${custA.appUserId}`,
+        text: 'Missed public reply',
+      },
+    });
+
+    // Reconnect with ?lastEventId=... -> receives public reply only (internal note suppressed)
+    const replayRes = await new Promise<{
+      events: Array<{ id?: string; event: string; data: any }>;
+      close: () => void;
+    }>((resolve, reject) => {
+      const url = new URL(
+        `/api/chat/stream?lastEventId=${encodeURIComponent(cursorBeforeDisconnect)}`,
+        srv.baseUrl,
+      );
+      const events: Array<{ id?: string; event: string; data: any }> = [];
+      let buffer = '';
+      const req = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: `${url.pathname}${url.search}`,
+          method: 'GET',
+          headers: {
+            Accept: 'text/event-stream',
+            Cookie: custA.jar.header(),
+          },
+        },
+        (res) => {
+          res.on('data', (chunk) => {
+            buffer += chunk.toString('utf8');
+            let sepIdx: number;
+            while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+              const block = buffer.slice(0, sepIdx);
+              buffer = buffer.slice(sepIdx + 2);
+              if (!block.trim() || block.startsWith(':')) continue;
+              let eventName = 'message';
+              let eventId: string | undefined;
+              const dataLines: string[] = [];
+              for (const line of block.split('\n')) {
+                if (line.startsWith('id:')) eventId = line.slice(3).trim();
+                else if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+              }
+              if (dataLines.length > 0) {
+                events.push({
+                  ...(eventId ? { id: eventId } : {}),
+                  event: eventName,
+                  data: JSON.parse(dataLines.join('\n')),
+                });
+              }
+            }
+          });
+          setTimeout(() => {
+            resolve({
+              events,
+              close: () => {
+                res.destroy();
+                req.destroy();
+              },
+            });
+          }, 80);
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    try {
+      const replayedMsgIds = replayRes.events
+        .filter((e) => e.event === 'chat_message')
+        .map((e) => e.data.message.id);
+      assert.deepEqual(replayedMsgIds, ['msg_replay_public']);
+      assert.ok(
+        replayRes.events.find((e) => e.event === 'chat_message')?.id?.includes(':'),
+      );
+    } finally {
+      replayRes.close();
+    }
+
+    // Stale server epoch emits resync_required
+    const resyncCheck = await new Promise<{
+      events: Array<{ event: string; data: any }>;
+      close: () => void;
+    }>((resolve, reject) => {
+      const url = new URL('/api/chat/stream?lastEventId=ce_stale000:5', srv.baseUrl);
+      const events: Array<{ event: string; data: any }> = [];
+      let buffer = '';
+      const req = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: `${url.pathname}${url.search}`,
+          method: 'GET',
+          headers: {
+            Accept: 'text/event-stream',
+            Cookie: custA.jar.header(),
+          },
+        },
+        (res) => {
+          res.on('data', (chunk) => {
+            buffer += chunk.toString('utf8');
+            let sepIdx: number;
+            while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+              const block = buffer.slice(0, sepIdx);
+              buffer = buffer.slice(sepIdx + 2);
+              if (!block.trim() || block.startsWith(':')) continue;
+              let eventName = 'message';
+              const dataLines: string[] = [];
+              for (const line of block.split('\n')) {
+                if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+              }
+              if (dataLines.length > 0) {
+                events.push({
+                  event: eventName,
+                  data: JSON.parse(dataLines.join('\n')),
+                });
+              }
+            }
+          });
+          setTimeout(() => {
+            resolve({
+              events,
+              close: () => {
+                res.destroy();
+                req.destroy();
+              },
+            });
+          }, 80);
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    try {
+      const resync = resyncCheck.events.find((e) => e.event === 'resync_required');
+      assert.ok(resync);
+      assert.equal(resync.data.reason, 'epoch_mismatch');
+    } finally {
+      resyncCheck.close();
     }
   } finally {
     await srv.close();

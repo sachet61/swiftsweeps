@@ -10,10 +10,12 @@ import type {
   UserDirectoryRepo,
 } from '../auth/userDirectoryRepo.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 
 export interface ProfileRouterDeps {
   userRepo: UserDirectoryRepo;
   requireAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
 }
 
 export interface ValidatedProfilePatchBody {
@@ -413,6 +415,7 @@ export function toSafeProfileResponse(
 export function createProfileRouter({
   userRepo,
   requireAuth,
+  realtimeEvents,
 }: ProfileRouterDeps): Router {
   const router = Router();
 
@@ -479,6 +482,13 @@ export function createProfileRouter({
           updated.referredBy,
         );
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: updated.appUserId },
+          ['users', 'audit_logs'],
+          'profile_updated',
+          updated.appUserId,
+        );
+
         res.status(200).json({
           user: toSafeProfileResponse(updated, referrerDisplayName),
         });
@@ -524,6 +534,13 @@ export function createProfileRouter({
           updated.referredBy,
         );
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: updated.appUserId },
+          ['users', 'audit_logs'],
+          'avatar_updated',
+          updated.appUserId,
+        );
+
         res.status(200).json({
           success: true,
           avatarUrl: updated.avatarUrl,
@@ -559,6 +576,13 @@ export function createProfileRouter({
 
         const referrerDisplayName = await userRepo.resolveReferrerDisplayName(
           updated.referredBy,
+        );
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'user_and_staff', customerId: updated.appUserId },
+          ['users', 'audit_logs'],
+          'avatar_cleared',
+          updated.appUserId,
         );
 
         res.status(200).json({

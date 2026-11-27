@@ -8,6 +8,7 @@ import {
 } from 'express';
 import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
+import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 import {
   OfficialPartnerNotFoundError,
   OfficialPartnerValidationError,
@@ -22,6 +23,7 @@ import {
 export interface OfficialPartnerRouterDeps {
   officialPartnerRepo: OfficialPartnerRepo;
   requireAuth: RequestHandler;
+  realtimeEvents?: RealtimeEventBroker;
 }
 
 const UUID_REGEX =
@@ -966,6 +968,7 @@ function toPartnerDto(partner: OfficialPartnerRecord) {
 export function createOfficialPartnerRouter({
   officialPartnerRepo,
   requireAuth,
+  realtimeEvents,
 }: OfficialPartnerRouterDeps): Router {
   const router = Router();
   const requireAdmin = requireRole('admin');
@@ -1093,6 +1096,12 @@ export function createOfficialPartnerRouter({
           role: actor.role,
         });
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['official_partners', 'audit_logs'],
+          'official_partners_reordered',
+        );
+
         res.status(200).json({
           success: true,
           partners: partners.map(toPartnerDto),
@@ -1156,6 +1165,12 @@ export function createOfficialPartnerRouter({
           displayName: actor.displayName,
           role: actor.role,
         });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['official_partners', 'audit_logs'],
+          'official_partner_created',
+        );
 
         res.status(201).json({
           success: true,
@@ -1222,6 +1237,12 @@ export function createOfficialPartnerRouter({
           },
         );
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['official_partners', 'audit_logs'],
+          'official_partner_updated',
+        );
+
         res.status(200).json({
           success: true,
           partner: toPartnerDto(updated),
@@ -1258,6 +1279,12 @@ export function createOfficialPartnerRouter({
           },
         );
 
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['official_partners', 'audit_logs'],
+          'official_partner_replaced',
+        );
+
         res.status(200).json({
           success: true,
           partner: toPartnerDto(updated),
@@ -1287,6 +1314,12 @@ export function createOfficialPartnerRouter({
           displayName: actor.displayName,
           role: actor.role,
         });
+
+        realtimeEvents?.emitDomainInvalidation(
+          { scope: 'authenticated' },
+          ['official_partners', 'audit_logs'],
+          'official_partner_deleted',
+        );
 
         res.status(200).json({
           success: true,

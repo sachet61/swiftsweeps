@@ -674,9 +674,15 @@ export class ReferralRepo {
       );
       await db.query(
         `INSERT INTO public.transactions (
-           id, customer_id, amount, type, status, description, reference_id, created_at
-         ) VALUES ($1, $2, $3, 'referral_reward', 'completed', $4, $5, timezone('utc'::text, now()))
-         ON CONFLICT (id) DO NOTHING`,
+           id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+         ) VALUES ($1, $2, $3, 'referral_reward', 'completed', $4, $5, 'Swift Sweeps Referral', timezone('utc'::text, now()))
+         ON CONFLICT (id) DO UPDATE SET
+           amount = EXCLUDED.amount,
+           status = 'completed',
+           description = EXCLUDED.description,
+           reference_id = EXCLUDED.reference_id,
+           game_name = EXCLUDED.game_name,
+           created_at = EXCLUDED.created_at`,
         [refTxId, params.referrerId, refAmt, params.referrerDescription, params.awardId],
       );
       await this.maybeInsertNotification(db, {
@@ -700,9 +706,15 @@ export class ReferralRepo {
       );
       await db.query(
         `INSERT INTO public.transactions (
-           id, customer_id, amount, type, status, description, reference_id, created_at
-         ) VALUES ($1, $2, $3, 'referral_reward', 'completed', $4, $5, timezone('utc'::text, now()))
-         ON CONFLICT (id) DO NOTHING`,
+           id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+         ) VALUES ($1, $2, $3, 'referral_reward', 'completed', $4, $5, 'Swift Sweeps Referral', timezone('utc'::text, now()))
+         ON CONFLICT (id) DO UPDATE SET
+           amount = EXCLUDED.amount,
+           status = 'completed',
+           description = EXCLUDED.description,
+           reference_id = EXCLUDED.reference_id,
+           game_name = EXCLUDED.game_name,
+           created_at = EXCLUDED.created_at`,
         [eeTxId, params.refereeId, eeAmt, params.refereeDescription, params.awardId],
       );
       await this.maybeInsertNotification(db, {
@@ -2647,9 +2659,15 @@ export class ReferralRepo {
           );
           await db.query(
             `INSERT INTO public.transactions (
-               id, customer_id, amount, type, status, description, reference_id, created_at
-             ) VALUES ($1, $2, $3, 'referral_reward', 'completed', $4, $5, timezone('utc'::text, now()))
-             ON CONFLICT (id) DO NOTHING`,
+               id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+             ) VALUES ($1, $2, $3, 'referral_reward', 'completed', $4, $5, 'Swift Sweeps Referral', timezone('utc'::text, now()))
+             ON CONFLICT (id) DO UPDATE SET
+               amount = EXCLUDED.amount,
+               status = 'completed',
+               description = EXCLUDED.description,
+               reference_id = EXCLUDED.reference_id,
+               game_name = EXCLUDED.game_name,
+               created_at = EXCLUDED.created_at`,
             [
               refTxId,
               award.referrer_id,
@@ -2680,9 +2698,15 @@ export class ReferralRepo {
           );
           await db.query(
             `INSERT INTO public.transactions (
-               id, customer_id, amount, type, status, description, reference_id, created_at
-             ) VALUES ($1, $2, $3, 'referral_reward', 'completed', $4, $5, timezone('utc'::text, now()))
-             ON CONFLICT (id) DO NOTHING`,
+               id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+             ) VALUES ($1, $2, $3, 'referral_reward', 'completed', $4, $5, 'Swift Sweeps Referral', timezone('utc'::text, now()))
+             ON CONFLICT (id) DO UPDATE SET
+               amount = EXCLUDED.amount,
+               status = 'completed',
+               description = EXCLUDED.description,
+               reference_id = EXCLUDED.reference_id,
+               game_name = EXCLUDED.game_name,
+               created_at = EXCLUDED.created_at`,
             [
               eeTxId,
               award.referee_id,

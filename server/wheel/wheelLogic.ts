@@ -61,6 +61,7 @@ export interface ServerWheelSpinResponse {
   selectedSegment: WheelSegment;
   segmentIndex: number;
   rewardAmount: number;
+  actualRewardAmount: number;
   simulatedWinAmount: number;
   simulatedWinDisplay: WheelSimulatedWinDisplay;
   freePlayBalance: number;

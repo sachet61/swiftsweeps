@@ -127,6 +127,8 @@ class InMemoryReferralDatabase
   public auditLogs: InMemoryAuditLogRow[] = [];
 
   public failNextReferralQuery = false;
+  public failNextAwardFinalize = false;
+  public walletLockOrder: string[] = [];
   public delayInsideTxMs = 0;
 
   private lockQueue: Promise<void> = Promise.resolve();
@@ -500,7 +502,11 @@ class InMemoryReferralDatabase
       normalized.includes('FROM public.wallets') &&
       normalized.includes('WHERE customer_id = $1')
     ) {
-      const w = this.wallets.get(String(values[0] ?? ''));
+      const cid = String(values[0] ?? '');
+      if (normalized.includes('FOR UPDATE')) {
+        this.walletLockOrder.push(cid);
+      }
+      const w = this.wallets.get(cid);
       return { rows: w ? [{ ...w }] : [] };
     }
 
@@ -613,7 +619,7 @@ class InMemoryReferralDatabase
         string,
         string,
       ];
-      if (!this.transactions.has(id)) {
+      if (!this.transactions.has(id) || normalized.includes('ON CONFLICT (id) DO UPDATE')) {
         this.transactions.set(id, {
           id,
           customer_id,
@@ -622,7 +628,7 @@ class InMemoryReferralDatabase
           status: 'completed',
           description,
           reference_id,
-          game_name: null,
+          game_name: 'Swift Sweeps Referral',
           created_at: new Date(),
         });
       }
@@ -779,6 +785,10 @@ class InMemoryReferralDatabase
 
       // creditReferralAwardInTx (values length 18)
       if (values.length === 18 && normalized.includes("'rewarded'")) {
+        if (this.failNextAwardFinalize) {
+          this.failNextAwardFinalize = false;
+          throw new Error('pg_referral_finalize_error: simulated mid-transaction failure');
+        }
         const [
           id,
           referrer_id,
@@ -1781,3 +1791,106 @@ test('referral RBAC, admin-ledger pagination, manual-assign, vanity-code, review
   assert.equal(errRes.json.error.code, 'INTERNAL_SERVER_ERROR');
   assert.ok(!JSON.stringify(errRes.json).includes('pg_referral_error'));
 });
+
+test('credit_referral_award_atomic replacement: rollback safety, deterministic dual-wallet lock order, game_name metadata, and stub tx recovery', async (t) => {
+  const db = new InMemoryReferralDatabase();
+  const { server, baseUrl } = await startTestServer(db);
+  t.after(() => server.close());
+
+  const admin = await signUpAndCookie(baseUrl, 'rpc_ref_admin@example.test', 'RPC Admin');
+  const userA = await signUpAndCookie(baseUrl, 'rpc_ref_a@example.test', 'User A');
+  const userB = await signUpAndCookie(baseUrl, 'rpc_ref_b@example.test', 'User B');
+  db.users.get(admin.appUserId)!.role = 'admin';
+
+  // Ensure referrerId > refereeId lexicographically to verify LEAST/GREATEST wallet locking order
+  const sortedIds = [userA.appUserId, userB.appUserId].sort();
+  const referee = sortedIds[0] === userA.appUserId ? userA : userB;
+  const referrer = sortedIds[0] === userA.appUserId ? userB : userA;
+  assert.ok(referrer.appUserId > referee.appUserId);
+  db.users.get(referrer.appUserId)!.referral_code = 'SORTEDREF';
+
+  // Configure deterministic referral rule
+  await requestJson(baseUrl, '/api/admin/referral-config', {
+    method: 'POST',
+    cookie: admin.cookie,
+    body: {
+      referralProgram: {
+        enabled: true,
+        rewardMode: 'flat',
+        referrerRewardValue: 20,
+        refereeRewardValue: 10,
+        qualificationDepositMin: 50,
+        payoutTarget: 'referral_bonus',
+        holdFlaggedForReview: false,
+      },
+    },
+  });
+
+  // Attribute & add qualifying deposit
+  const attrRes = await requestJson(baseUrl, '/api/referrals/attribute', {
+    method: 'POST',
+    cookie: referee.cookie,
+    body: { referralCode: 'SORTEDREF' },
+  });
+  assert.equal(attrRes.status, 200);
+
+  db.topups.set('top_rpc_qual', {
+    id: 'top_rpc_qual',
+    customer_id: referee.appUserId,
+    amount: '75.00',
+    status: 'completed',
+    payment_method_id: 'card',
+    created_at: new Date(),
+  });
+
+  // Plant a non-completed stub tx for referrer with the deterministic tx_ref_r_<awardId> id
+  const awardId = `refaw_${referee.appUserId}`;
+  const refTxId = `tx_ref_r_${awardId}`;
+  db.transactions.set(refTxId, {
+    id: refTxId,
+    customer_id: referrer.appUserId,
+    amount: '0.00',
+    type: 'referral_reward',
+    status: 'pending',
+    description: 'Interrupted pending stub',
+    reference_id: awardId,
+    game_name: null,
+    created_at: new Date(),
+  });
+
+  // 1) Mid-transaction failure during final referral_awards UPDATE must roll back wallets & txs!
+  db.failNextAwardFinalize = true;
+  const failedEval = await requestJson(baseUrl, '/api/referrals/evaluate', {
+    method: 'POST',
+    cookie: referee.cookie,
+    body: {},
+  });
+  assert.equal(failedEval.status, 500);
+  assert.equal(db.wallets.get(referrer.appUserId)?.referral_bonus_balance ?? '0.00', '0.00');
+  assert.equal(db.wallets.get(referee.appUserId)?.referral_bonus_balance ?? '0.00', '0.00');
+  assert.equal(db.transactions.get(refTxId)?.status, 'pending');
+  assert.equal(db.referralAwards.get(awardId)?.status, 'registered');
+
+  // 2) Retry evaluate -> succeeds, locks wallets in ascending customer_id order, updates stub tx via ON CONFLICT DO UPDATE, and sets game_name
+  db.walletLockOrder = [];
+  const okEval = await requestJson(baseUrl, '/api/referrals/evaluate', {
+    method: 'POST',
+    cookie: referee.cookie,
+    body: {},
+  });
+  assert.equal(okEval.status, 200);
+  assert.equal(okEval.json.status, 'rewarded');
+  assert.deepEqual(db.walletLockOrder, [referee.appUserId, referrer.appUserId]);
+  assert.equal(db.wallets.get(referrer.appUserId)!.referral_bonus_balance, '20.00');
+  assert.equal(db.wallets.get(referee.appUserId)!.referral_bonus_balance, '10.00');
+
+  const refTx = db.transactions.get(refTxId)!;
+  const eeTx = db.transactions.get(`tx_ref_f_${awardId}`)!;
+  assert.equal(refTx.status, 'completed');
+  assert.equal(refTx.amount, '20.00');
+  assert.equal(refTx.game_name, 'Swift Sweeps Referral');
+  assert.equal(eeTx.status, 'completed');
+  assert.equal(eeTx.amount, '10.00');
+  assert.equal(eeTx.game_name, 'Swift Sweeps Referral');
+});
+
