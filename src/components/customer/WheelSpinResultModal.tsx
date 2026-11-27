@@ -1,15 +1,10 @@
 import React from 'react';
 import { WheelSpinResponse } from '../../types';
 import {
-  buildLatestSpinCardViewModel,
-  buildWheelWinPresentation,
-} from '../../utils/wheelOfLuckUtils';
-import {
   CheckCircle2,
   Gamepad2,
   Gift,
   PartyPopper,
-  Trophy,
   X,
 } from 'lucide-react';
 
@@ -31,23 +26,6 @@ export const WheelSpinResultModal: React.FC<WheelSpinResultModalProps> = ({
   const actualReward = Number(spinResult.actualRewardAmount ?? spinResult.spin?.rewardAmount ?? 0);
   const isWin = actualReward > 0;
   const freePlayBalance = Number(spinResult.freePlayBalance ?? 0);
-
-  const presentation = buildWheelWinPresentation({
-    actualRewardAmount: actualReward,
-    simulatedWinEnabled: Boolean(spinResult.simulatedWinDisplay?.enabled),
-    simulatedWinAmount: Number(spinResult.simulatedWinDisplay?.amount ?? 0),
-    simulatedWinLabel: spinResult.simulatedWinDisplay?.label,
-  });
-
-  const resultVm = buildLatestSpinCardViewModel({
-    spin: {
-      segmentLabel: spinResult.spin?.segmentLabel,
-      rewardAmount: actualReward,
-      simulatedWinAmount: Number(spinResult.simulatedWinDisplay?.amount ?? spinResult.spin?.simulatedWinAmount ?? 0),
-      createdAt: spinResult.spin?.createdAt,
-    },
-    simulatedWinDisplay: spinResult.simulatedWinDisplay,
-  });
 
   return (
     <div
@@ -80,11 +58,8 @@ export const WheelSpinResultModal: React.FC<WheelSpinResultModalProps> = ({
                 id="wheel-spin-result-modal-title"
                 className="text-base sm:text-lg font-extrabold text-white leading-snug"
               >
-                {isWin ? 'Free-Play Reward Credited!' : 'Daily Spin Complete'}
+                {isWin ? 'Free-Play Won!' : 'Daily Spin Complete'}
               </h3>
-              <p className="text-xs text-slate-400 mt-0.5 break-words">
-                Backend Selected Slice: <span className="font-semibold text-amber-300">{resultVm.segmentLabel}</span>
-              </p>
             </div>
           </div>
 
@@ -98,7 +73,7 @@ export const WheelSpinResultModal: React.FC<WheelSpinResultModalProps> = ({
           </button>
         </div>
 
-        {/* Confirmed Actual Reward Body */}
+        {/* Won Amount Body */}
         <div className="p-4 sm:p-5 space-y-4">
           <div
             className={`p-4 rounded-xl border space-y-3 ${
@@ -107,71 +82,22 @@ export const WheelSpinResultModal: React.FC<WheelSpinResultModalProps> = ({
                 : 'bg-[#0A0F1D] border-slate-800'
             }`}
           >
-            <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-800/90">
-              <span className="text-xs font-medium text-slate-400">Actual Reward Selected</span>
+            <div className="flex items-center justify-between gap-2 pb-1">
+              <span className="text-xs font-medium text-slate-400">Won Amount</span>
               <span className="text-2xl font-extrabold font-mono text-amber-300 tabular-nums">
                 ${actualReward.toFixed(2)}
               </span>
             </div>
 
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="text-slate-400">Reward Type</span>
-              <span className="font-semibold text-slate-200 text-right">{resultVm.rewardTypeLabel}</span>
-            </div>
-
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="text-slate-400">Credited to Free-Play</span>
-              <span
-                className={`font-mono font-bold tabular-nums text-right ${
-                  isWin ? 'text-emerald-400' : 'text-slate-300'
-                }`}
-              >
-                {isWin ? `+$${actualReward.toFixed(2)} Confirmed` : '$0.00 Confirmed'}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-2 pt-2.5 border-t border-slate-800/90 text-xs">
-              <span className="text-slate-300 font-semibold">Updated Free-Play Balance</span>
-              <span className="text-base font-extrabold font-mono text-emerald-400 tabular-nums">
-                ${freePlayBalance.toFixed(2)}
-              </span>
-            </div>
-
-            <div className="flex items-start gap-2 pt-1 text-[11px] text-emerald-300/90 leading-snug">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+            <div className="flex items-start gap-2 pt-1 text-xs text-emerald-300 leading-snug">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <span>
                 {isWin
-                  ? `$${actualReward.toFixed(2)} has been verified and credited to your Free-Play Balance.`
-                  : `This spin landed on ${resultVm.segmentLabel}. No Free-Play credits were added; your Free-Play Balance remains $${freePlayBalance.toFixed(2)}.`}
+                  ? `Successfully credited $${actualReward.toFixed(2)} to your Free-Play Balance.`
+                  : `No Free-Play credits were added; your Free-Play Balance is $${freePlayBalance.toFixed(2)}.`}
               </span>
             </div>
           </div>
-
-          {/* Strictly Separated Simulated Display Block */}
-          {presentation.promotionalDisplay.visible && (
-            <div className="p-3.5 rounded-xl bg-slate-950/90 border border-amber-500/25 space-y-2">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-amber-200">
-                  <Trophy className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span>Promotional Showcase</span>
-                </div>
-                <span className="text-[10px] font-mono font-extrabold tracking-wide text-amber-300 uppercase">
-                  SIMULATED — NOT CREDITED
-                </span>
-              </div>
-              <div className="flex items-baseline justify-between gap-2 text-xs">
-                <span className="text-slate-400 break-words">
-                  {presentation.promotionalDisplay.label}
-                </span>
-                <span className="font-mono font-bold text-slate-300 tabular-nums shrink-0">
-                  ${presentation.promotionalDisplay.amount.toFixed(2)}
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400 leading-snug">
-                Simulated promotional display only — never credited to your Free-Play or cash balance ($0.00 balance impact).
-              </p>
-            </div>
-          )}
 
           {/* Actions */}
           <div className="space-y-2 pt-1">

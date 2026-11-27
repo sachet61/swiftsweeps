@@ -719,9 +719,6 @@ export const WheelOfLuckModal: React.FC<WheelOfLuckModalProps> = ({
                     <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 text-amber-400 animate-spin shrink-0" />
                     <div className="min-w-0">
                       <div className="text-xs sm:text-sm font-bold text-amber-200">Spinning the Wheel of Luck...</div>
-                      <div className="text-[11px] sm:text-xs text-slate-300">
-                        Crediting your server-selected Free-Play slice.
-                      </div>
                     </div>
                   </div>
                 )}
