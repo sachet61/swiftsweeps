@@ -99,7 +99,7 @@ export const SwiftSweepsLogo: React.FC<SwiftSweepsLogoProps> = ({
             </span>
           </div>
           <span className={`font-mono tracking-wider uppercase text-amber-400/80 mt-0.5 ${subtextSizeClasses}`}>
-            Social Casino &amp; Wallet
+            Social Casino
           </span>
         </div>
       )}
