@@ -1,7 +1,7 @@
 # Graph Report - swiftsweeps  (2026-11-27)
 
 ## Corpus Check
-- 258 files · ~432,260 words
+- 258 files · ~432,403 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 6 file(s) not represented in the graph (top: .example 1, (none) 1, .lock 1)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `25f03d4b`
+- Built from commit: `e7915024`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -523,7 +523,7 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `dataService.ts` be split into smaller, more focused modules?**
   _Cohesion score 0.06041986687147977 - nodes in this community are weakly interconnected._
 - **Why does `express` connect `app.ts` to `package.json`, `officialPartners.ts`, `appConfigRepo.ts`, `deposits.ts`, `env.ts`, `gameAccounts.ts`, `tests/auditLogs.test.ts`, `storage.ts`, `HttpError`, `dependencies`, `notifications.ts`, `adminAuth.ts`, `chat.ts`, `withdrawals.ts`, `referrals.ts`, `validateRequestBody`, `wheel.ts`, `wallet.ts`, `realtime.test.ts`?**
-  _High betweenness centrality (0.060) - this node is a cross-community bridge._
+  _High betweenness centrality (0.059) - this node is a cross-community bridge._
 - **Should `package.json` be split into smaller, more focused modules?**
   _Cohesion score 0.0620782726045884 - nodes in this community are weakly interconnected._
 - **Should `App.tsx` be split into smaller, more focused modules?**
