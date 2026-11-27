@@ -17,6 +17,10 @@
     "db:migrate:check": "tsx server/db/migrate.ts check",
     "db:migrate:status": "tsx server/db/migrate.ts status",
     "db:migrate:up": "tsx server/db/migrate.ts up",
+    "db:data:preflight": "tsx server/db/dataMigration.ts preflight",
+    "db:data:export": "tsx server/db/dataMigration.ts export",
+    "db:data:import": "tsx server/db/dataMigration.ts import",
+    "db:data:validate": "tsx server/db/dataMigration.ts validate",
     "auth:migrate:status": "tsx server/db/authMigrate.ts status",
     "auth:migrate:sql": "tsx server/db/authMigrate.ts sql",
     "auth:migrate:up": "tsx server/db/authMigrate.ts up"

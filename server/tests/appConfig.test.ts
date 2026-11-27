@@ -1561,3 +1561,100 @@ test('telegram: admin config/status/test protect botToken and authenticated aler
     assert.equal(telegramCalls.length, beforeCount + 1);
   });
 });
+
+test('app-config & telegram: reject XSS bypass vectors in policies/platformRules and scrub botToken from telegram status errors', async () => {
+  await withAppConfigServer(
+    async ({ baseUrl, db, otps, setTelegramResponder }) => {
+      seedConfiguredAppConfig(db);
+
+      const admin = await signupAndSignIn(baseUrl, otps, {
+        name: 'Security Admin',
+        email: 'sec-admin@example.com',
+        password: 'Password!123',
+      });
+      db.users.get(admin.userId)!.role = 'admin';
+
+      // 1. Disallowed tags / attributes in policies.cashoutPolicyHtml rejected with 400
+      for (const badHtml of [
+        '<svg/onload=alert(1)>',
+        '<p><img src=x onerror=alert(1)></p>',
+        '<p onclick="alert(1)">Click</p>',
+        '<p>data:text/html,<script>alert(1)</script></p>',
+      ]) {
+        const res = await fetch(`${baseUrl}/api/admin/app-config/policies`, {
+          method: 'PATCH',
+          headers: {
+            Origin: TRUSTED_ORIGIN,
+            Cookie: admin.cookie,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ cashoutPolicyHtml: badHtml }),
+        });
+        assert.equal(res.status, 400, `Expected 400 for ${badHtml}`);
+      }
+
+      // 2. Disallowed HTML constructs in platformRules rejected with 400, while plain comparisons and safe formatting pass
+      const badRuleRes = await fetch(`${baseUrl}/api/admin/app-config`, {
+        method: 'PUT',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: admin.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          platformRules: {
+            depositTerms: '<p><img src=x onerror=alert(1)></p>',
+          },
+        }),
+      });
+      assert.equal(badRuleRes.status, 400);
+
+      const safeRuleRes = await fetch(`${baseUrl}/api/admin/app-config`, {
+        method: 'PUT',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: admin.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          platformRules: {
+            depositTerms: 'Deposits < $50 require verification.',
+            withdrawalPolicy: '<p>Processed within <strong>15 minutes</strong>.</p>',
+          },
+        }),
+      });
+      assert.equal(safeRuleRes.status, 200);
+
+      // 3. Telegram status redacts botToken even if fetch throws a URL-annotated error
+      const tgSecret = '9876543210:AAHiddenSecretToken12345';
+      await fetch(`${baseUrl}/api/telegram/config`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: admin.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          botToken: tgSecret,
+          channelId: '-100444555666',
+          enabled: true,
+        }),
+      });
+
+      setTelegramResponder((url) => {
+        throw new Error(`request to ${url} failed, reason: ECONNREFUSED`);
+      });
+
+      const statusErrRes = await fetch(`${baseUrl}/api/telegram/status`, {
+        headers: { Cookie: admin.cookie },
+      });
+      assert.equal(statusErrRes.status, 200);
+      const rawStatusErr = await statusErrRes.text();
+      assert.ok(!rawStatusErr.includes(tgSecret));
+      assert.ok(!rawStatusErr.includes('AAHiddenSecretToken12345'));
+      const parsedErr = JSON.parse(rawStatusErr) as { lastError?: string };
+      assert.match(parsedErr.lastError || '', /\[REDACTED\]/);
+    },
+  );
+});
+

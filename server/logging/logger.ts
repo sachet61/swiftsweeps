@@ -15,6 +15,7 @@ const REDACTED = '[REDACTED]';
 export function redactString(input: string): string {
   return input
     .replace(/postgres(?:ql)?:\/\/[^\s'"]+/gi, 'postgres://[REDACTED]')
+    .replace(/\/bot\d*:[^\s/'"]+/gi, '/bot[REDACTED]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [REDACTED]')
     .replace(/\bBasic\s+[A-Za-z0-9+/=]+/gi, 'Basic [REDACTED]')
     .replace(

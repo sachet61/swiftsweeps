@@ -1,0 +1,66 @@
+# ==============================================================================
+# SwiftSweeps API Systemd Service Unit
+# ==============================================================================
+# Architecture note:
+# - Runs a SINGLE persistent Node.js v22 LTS API process (`npm run start:api`).
+# - Do NOT run multiple clustered workers unless SSE event brokers (`ChatEventBroker`
+#   and `RealtimeEventBroker`) are backed by a shared external pub/sub broker.
+# - No separate background worker unit is required by the current codebase.
+#
+# Install path on VPS: /etc/systemd/system/swiftsweeps-api.service
+# ==============================================================================
+
+[Unit]
+Description=SwiftSweeps Self-Hosted Node API
+Documentation=file:///var/www/swiftsweeps/current/deploy/VPS_DEPLOYMENT_RUNBOOK.md
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=swiftsweeps
+Group=swiftsweeps
+WorkingDirectory=/var/www/swiftsweeps/current
+
+# External runtime secrets file (chmod 0640, owned by root:swiftsweeps)
+EnvironmentFile=/etc/swiftsweeps/api.env
+
+# Compiled TypeScript entrypoint (`npm run build` -> dist-server/index.js)
+ExecStart=/usr/bin/node /var/www/swiftsweeps/current/dist-server/index.js
+
+# Graceful shutdown matching SHUTDOWN_TIMEOUT_MS=10000 in server/config/env.ts
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Structured JSON logs go to systemd journald (secrets redacted by server/logging/logger.ts)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=swiftsweeps-api
+
+# Least-privilege systemd sandboxing (runtime uploads store in PostgreSQL, not local disk)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+ProtectClock=yes
+ProtectHostname=yes
+MemoryDenyWriteExecute=no
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

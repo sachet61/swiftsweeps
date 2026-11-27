@@ -71,6 +71,153 @@ export function htmlToPlainEditorText(html: string | null | undefined): string {
     .trim();
 }
 
+export type SafeFormattedInline =
+  | { type: 'text'; text: string }
+  | { type: 'strong'; text: string }
+  | { type: 'em'; text: string }
+  | { type: 'br' };
+
+export type SafeFormattedBlock =
+  | { type: 'heading'; inlines: SafeFormattedInline[] }
+  | { type: 'paragraph'; inlines: SafeFormattedInline[] }
+  | { type: 'list'; ordered: boolean; items: SafeFormattedInline[][] };
+
+function parseInlineSafeHtml(fragment: string): SafeFormattedInline[] {
+  const cleaned = fragment
+    .replace(/<(script|style|svg|iframe|object|embed)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(?!\/?(?:strong|b|em|i|br)\b)[^>]+>/gi, '');
+
+  const tokens = cleaned.split(/(<\/?(?:strong|b|em|i)\b[^>]*>|<br\s*\/?>)/gi);
+  const out: SafeFormattedInline[] = [];
+  let boldDepth = 0;
+  let italicDepth = 0;
+
+  for (const token of tokens) {
+    if (!token) continue;
+    if (/^<br\s*\/?>$/i.test(token)) {
+      out.push({ type: 'br' });
+      continue;
+    }
+    if (/^<(strong|b)\b[^>]*>$/i.test(token)) {
+      boldDepth += 1;
+      continue;
+    }
+    if (/^<\/(strong|b)>$/i.test(token)) {
+      boldDepth = Math.max(0, boldDepth - 1);
+      continue;
+    }
+    if (/^<(em|i)\b[^>]*>$/i.test(token)) {
+      italicDepth += 1;
+      continue;
+    }
+    if (/^<\/(em|i)>$/i.test(token)) {
+      italicDepth = Math.max(0, italicDepth - 1);
+      continue;
+    }
+
+    const decoded = decodeBasicHtmlEntities(token);
+    if (!decoded) continue;
+
+    if (boldDepth > 0) {
+      out.push({ type: 'strong', text: decoded });
+    } else if (italicDepth > 0) {
+      out.push({ type: 'em', text: decoded });
+    } else {
+      out.push({ type: 'text', text: decoded });
+    }
+  }
+
+  return out;
+}
+
+export function parseSafeFormattedBlocks(
+  input: string | null | undefined,
+): SafeFormattedBlock[] {
+  const raw = (input || '').replace(/\r\n/g, '\n').trim();
+  if (!raw) return [];
+
+  const sanitized = raw
+    .replace(/<(script|style|svg|iframe|object|embed)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(script|style|svg|iframe|object|embed|img|link|meta|base|form)\b[^>]*\/?>/gi, '');
+
+  const hasBlockHtml = /<\/?(?:h[1-6]|p|ul|ol|li)\b/i.test(sanitized);
+  if (!hasBlockHtml) {
+    const blocks: SafeFormattedBlock[] = [];
+    const paragraphs = sanitized.split(/\n{2,}/);
+    for (const para of paragraphs) {
+      const trimmed = para.trim();
+      if (!trimmed) continue;
+      const lines = trimmed.split('\n');
+      const inlines: SafeFormattedInline[] = [];
+      lines.forEach((line, idx) => {
+        if (idx > 0) inlines.push({ type: 'br' });
+        inlines.push(...parseInlineSafeHtml(line));
+      });
+      if (inlines.length > 0) {
+        blocks.push({ type: 'paragraph', inlines });
+      }
+    }
+    return blocks;
+  }
+
+  const blocks: SafeFormattedBlock[] = [];
+  const blockRegex =
+    /<(h[1-6]|p|ul|ol)\b[^>]*>([\s\S]*?)<\/\1>|([^<]+|<[^>]+>)/gi;
+
+  let pendingInlineBuffer = '';
+  const flushPendingParagraph = () => {
+    const cleanText = pendingInlineBuffer.trim();
+    pendingInlineBuffer = '';
+    if (!cleanText) return;
+    const inlines = parseInlineSafeHtml(cleanText);
+    if (inlines.length > 0) {
+      blocks.push({ type: 'paragraph', inlines });
+    }
+  };
+
+  let match: RegExpExecArray | null;
+  while ((match = blockRegex.exec(sanitized)) !== null) {
+    const tag = match[1]?.toLowerCase();
+    const inner = match[2] ?? '';
+    const loose = match[3] ?? '';
+
+    if (!tag) {
+      pendingInlineBuffer += loose;
+      continue;
+    }
+
+    flushPendingParagraph();
+
+    if (/^h[1-6]$/.test(tag)) {
+      const inlines = parseInlineSafeHtml(inner.trim());
+      if (inlines.length > 0) {
+        blocks.push({ type: 'heading', inlines });
+      }
+    } else if (tag === 'p') {
+      const inlines = parseInlineSafeHtml(inner.trim());
+      if (inlines.length > 0) {
+        blocks.push({ type: 'paragraph', inlines });
+      }
+    } else if (tag === 'ul' || tag === 'ol') {
+      const items: SafeFormattedInline[][] = [];
+      const liRegex = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+      let liMatch: RegExpExecArray | null;
+      while ((liMatch = liRegex.exec(inner)) !== null) {
+        const itemInlines = parseInlineSafeHtml(liMatch[1].trim());
+        if (itemInlines.length > 0) {
+          items.push(itemInlines);
+        }
+      }
+      if (items.length > 0) {
+        blocks.push({ type: 'list', ordered: tag === 'ol', items });
+      }
+    }
+  }
+
+  flushPendingParagraph();
+  return blocks;
+}
+
 export function plainEditorTextToHtml(plainText: string | null | undefined): string {
   const normalized = (plainText || '').replace(/\r\n/g, '\n').trim();
   if (!normalized) return '';

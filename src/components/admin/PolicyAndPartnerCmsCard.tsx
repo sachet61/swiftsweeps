@@ -10,6 +10,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { htmlToPlainEditorText, plainEditorTextToHtml } from '../../utils/uiCopyUtils';
+import { SafeFormattedText } from '../common/SafeFormattedText';
 
 export const PolicyAndPartnerCmsCard: React.FC = () => {
   const initial = dataService.getCmsPolicies();
@@ -156,9 +157,9 @@ export const PolicyAndPartnerCmsCard: React.FC = () => {
           </div>
 
           {previewMode ? (
-            <div
-              className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 space-y-2 leading-relaxed min-h-[160px] prose prose-invert max-w-none"
-              dangerouslySetInnerHTML={{ __html: plainEditorTextToHtml(cashoutPolicyText) }}
+            <SafeFormattedText
+              content={plainEditorTextToHtml(cashoutPolicyText)}
+              className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 space-y-2 leading-relaxed min-h-[160px] max-w-none"
             />
           ) : (
             <textarea
@@ -184,9 +185,9 @@ export const PolicyAndPartnerCmsCard: React.FC = () => {
           </div>
 
           {previewMode ? (
-            <div
-              className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 space-y-2 leading-relaxed min-h-[160px] prose prose-invert max-w-none"
-              dangerouslySetInnerHTML={{ __html: plainEditorTextToHtml(privacyPolicyText) }}
+            <SafeFormattedText
+              content={plainEditorTextToHtml(privacyPolicyText)}
+              className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 space-y-2 leading-relaxed min-h-[160px] max-w-none"
             />
           ) : (
             <textarea
@@ -212,9 +213,9 @@ export const PolicyAndPartnerCmsCard: React.FC = () => {
           </div>
 
           {previewMode ? (
-            <div
-              className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 space-y-2 leading-relaxed min-h-[160px] prose prose-invert max-w-none"
-              dangerouslySetInnerHTML={{ __html: plainEditorTextToHtml(termsPolicyText) }}
+            <SafeFormattedText
+              content={plainEditorTextToHtml(termsPolicyText)}
+              className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 space-y-2 leading-relaxed min-h-[160px] max-w-none"
             />
           ) : (
             <textarea

@@ -173,6 +173,33 @@ function validateSafeText(
   return trimmed;
 }
 
+const ALLOWED_POLICY_TAG_REGEX =
+  /^<\/?(?:p|h[1-6]|ul|ol|li|strong|b|em|i)\s*>$|^<br\s*\/?>$/i;
+const DISALLOWED_URI_SCHEME_REGEX =
+  /(?:javascript|vbscript):|data:text\/html/i;
+
+function assertSafeLimitedHtmlTags(value: string, label: string): void {
+  if (DISALLOWED_URI_SCHEME_REGEX.test(value)) {
+    throw new HttpError(
+      400,
+      'VALIDATION_ERROR',
+      `${label} contains disallowed HTML constructs.`,
+    );
+  }
+  const tagMatches = value.match(/<\/?[a-z][^>]*>?/gi);
+  if (tagMatches) {
+    for (const tag of tagMatches) {
+      if (!ALLOWED_POLICY_TAG_REGEX.test(tag.trim())) {
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          `${label} contains disallowed HTML constructs.`,
+        );
+      }
+    }
+  }
+}
+
 function validatePolicyHtmlField(raw: unknown, label: string): string {
   if (typeof raw !== 'string') {
     throw new HttpError(400, 'VALIDATION_ERROR', `${label} must be a string.`);
@@ -185,17 +212,7 @@ function validatePolicyHtmlField(raw: unknown, label: string): string {
       `${label} exceeds 32000 characters or contains invalid control characters.`,
     );
   }
-  if (
-    /<script\b|<iframe\b|<object\b|<embed\b|javascript:|on[a-z]+\s*=/i.test(
-      trimmed,
-    )
-  ) {
-    throw new HttpError(
-      400,
-      'VALIDATION_ERROR',
-      `${label} contains disallowed HTML constructs.`,
-    );
-  }
+  assertSafeLimitedHtmlTags(trimmed, label);
   return trimmed;
 }
 
@@ -608,11 +625,13 @@ function validatePlatformRules(raw: unknown): Record<string, unknown> {
     'cryptoRiskWarning',
   ]) {
     if (obj[key] !== undefined) {
-      out[key] =
+      const cleaned =
         validateSafeText(obj[key], `platformRules.${key}`, {
           maxLen: 4000,
           allowNewlines: true,
         }) ?? '';
+      assertSafeLimitedHtmlTags(cleaned, `platformRules.${key}`);
+      out[key] = cleaned;
     }
   }
   return out;
@@ -1334,10 +1353,14 @@ export function createAppConfigRouter({
               lastError = meData.description;
             }
           } catch (err) {
-            lastError =
+            const rawMsg =
               err instanceof Error
                 ? err.message
                 : 'Failed to contact Telegram API';
+            lastError = rawMsg
+              .split(cfg.botToken)
+              .join('[REDACTED]')
+              .replace(/\/bot\d*:[^\s/'"]+/gi, '/bot[REDACTED]');
           }
         }
 

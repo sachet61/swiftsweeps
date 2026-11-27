@@ -130,6 +130,7 @@ class InMemoryChatDatabase
   public readonly chatAttachments = new Map<string, InMemoryChatAttachmentRow>();
   public readonly topups = new Map<string, InMemoryTopupRow>();
   public readonly auditLogs: InMemoryAuditLogRow[] = [];
+  public failNextConversationsQueryError: Error | null = null;
 
   public async connect(): Promise<DatabaseClient> {
     return {
@@ -143,6 +144,15 @@ class InMemoryChatDatabase
     values: unknown[] = [],
   ): Promise<{ rows: unknown[]; rowCount?: number }> {
     const normalized = sql.replace(/\s+/g, ' ').trim();
+
+    if (
+      this.failNextConversationsQueryError &&
+      normalized.includes('FROM public.conversations')
+    ) {
+      const err = this.failNextConversationsQueryError;
+      this.failNextConversationsQueryError = null;
+      throw err;
+    }
 
     if (
       normalized === 'BEGIN' ||
@@ -1993,6 +2003,33 @@ test('SSE /api/chat/stream replays missed events by Last-Event-ID without leakin
     } finally {
       resyncCheck.close();
     }
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Unexpected chat database failure returns masked 500 error without leaking raw DB message or URI', async () => {
+  const srv = await createTestServer();
+  try {
+    const cust = await signupAndSignIn(srv.baseUrl, srv.db, {
+      email: 'chat-err@example.com',
+      name: 'Chat Err User',
+      role: 'customer',
+    });
+
+    srv.db.failNextConversationsQueryError = new Error(
+      'relation "public.conversations" failed on postgres://dbuser:supersecret@10.0.0.5:5432/prod',
+    );
+
+    const res = await httpRequest(srv.baseUrl, 'GET', '/api/chat/conversations', {
+      jar: cust.jar,
+    });
+    assert.equal(res.status, 500);
+    const rawText = res.buffer.toString('utf8');
+    assert.ok(!rawText.includes('relation "public.conversations"'));
+    assert.ok(!rawText.includes('postgres://'));
+    assert.ok(!rawText.includes('supersecret'));
+    assert.equal(res.json.error?.code, 'INTERNAL_SERVER_ERROR');
   } finally {
     await srv.close();
   }

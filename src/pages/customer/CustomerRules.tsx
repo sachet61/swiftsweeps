@@ -3,6 +3,7 @@ import { dataService } from '../../services/dataService';
 import { OfficialPartner } from '../../types';
 import { getMessageLink, sortOfficialPartners } from '../../utils/officialPartnersUtils';
 import { PartnerIcon, PlatformGlyph, getPlatformDisplayName } from '../../components/common/PartnerVisuals';
+import { SafeFormattedText } from '../../components/common/SafeFormattedText';
 import {
   FileText,
   ShieldCheck,
@@ -78,7 +79,6 @@ export const CustomerRules: React.FC<CustomerRulesProps> = ({ onNavigateTab }) =
           const isOpen = openIndex === idx;
           const headerId = `rule-accordion-btn-${idx}`;
           const panelId = `rule-accordion-panel-${idx}`;
-          const isHtml = sec.text && (sec.text.includes('<p>') || sec.text.includes('<h3>') || sec.text.includes('<ul>') || sec.text.includes('<strong>'));
           return (
             <div
               key={idx}
@@ -111,16 +111,10 @@ export const CustomerRules: React.FC<CustomerRulesProps> = ({ onNavigateTab }) =
                 hidden={!isOpen}
                 className="px-5 pb-5 pt-1 border-t border-slate-800/70"
               >
-                {isHtml ? (
-                  <div
-                    className="text-xs text-slate-300 leading-relaxed pl-6 space-y-2 prose prose-invert max-w-none"
-                    dangerouslySetInnerHTML={{ __html: sec.text }}
-                  />
-                ) : (
-                  <p className="text-xs text-slate-300 leading-relaxed pl-6 whitespace-pre-line">
-                    {sec.text}
-                  </p>
-                )}
+                <SafeFormattedText
+                  content={sec.text}
+                  className="text-xs text-slate-300 leading-relaxed pl-6 space-y-2 max-w-none"
+                />
               </div>
             </div>
           );

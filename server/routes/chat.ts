@@ -343,7 +343,7 @@ function mimeToExtension(
   }
 }
 
-function mapRepoErrorToHttp(err: unknown): HttpError {
+function mapRepoErrorToHttp(err: unknown): unknown {
   if (err instanceof HttpError) return err;
   if (err instanceof ChatForbiddenError) {
     return new HttpError(403, err.code, err.message);
@@ -357,9 +357,7 @@ function mapRepoErrorToHttp(err: unknown): HttpError {
   if (err instanceof ChatValidationError) {
     return new HttpError(err.statusCode, err.code, err.message);
   }
-  return err instanceof Error
-    ? new HttpError(500, 'INTERNAL_ERROR', err.message)
-    : new HttpError(500, 'INTERNAL_ERROR', 'Chat service failure.');
+  return err;
 }
 
 function validateListConversationsQuery(req: Request): Omit<ListConversationsOptions, 'actorId' | 'actorRole'> {
