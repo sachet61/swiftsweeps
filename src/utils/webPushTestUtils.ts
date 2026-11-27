@@ -37,6 +37,19 @@ export interface SendTestAlertResult {
   sentCount?: number;
 }
 
+function extractApiError(payload: any, fallback: string): string {
+  if (typeof payload?.error === 'string' && payload.error.trim()) {
+    return payload.error.trim();
+  }
+  if (typeof payload?.error?.message === 'string' && payload.error.message.trim()) {
+    return payload.error.message.trim();
+  }
+  if (typeof payload?.message === 'string' && payload.message.trim()) {
+    return payload.message.trim();
+  }
+  return fallback;
+}
+
 /**
  * Truthful end-to-end Web Push test runner.
  * Never returns `success: true` unless the device subscription is synced AND the backend
@@ -74,14 +87,18 @@ export async function executeSendTestAlertFlow(env: SendTestAlertEnv): Promise<S
 
   // Self-heal missing push subscription if browser permission is already granted
   if (!localSub) {
-    const vapidRes = await env.fetchFn('/api/push/vapid-public-key', { cache: 'no-store' });
+    const vapidRes = await env.fetchFn('/api/push/vapid-public-key', {
+      credentials: 'include',
+      cache: 'no-store',
+    });
     const vapidData = await vapidRes.json().catch(() => ({}));
     if (!vapidRes.ok || !vapidData?.publicKey) {
       return {
         success: false,
-        message:
-          vapidData?.error ||
+        message: extractApiError(
+          vapidData,
           `Failed to retrieve push encryption credentials from server (HTTP ${vapidRes.status}).`,
+        ),
       };
     }
 
@@ -118,12 +135,12 @@ export async function executeSendTestAlertFlow(env: SendTestAlertEnv): Promise<S
   const authHeaders = await env.buildAuthHeaders();
   const subRes = await env.fetchFn('/api/push/subscribe', {
     method: 'POST',
+    credentials: 'include',
+    cache: 'no-store',
     headers: authHeaders,
     body: JSON.stringify({
       subscription: normalized,
       userId: env.user.id,
-      userRole: env.user.role,
-      userEmail: env.user.email,
       platform: env.platform,
       browser: env.browserName,
     }),
@@ -133,23 +150,26 @@ export async function executeSendTestAlertFlow(env: SendTestAlertEnv): Promise<S
   if (!subRes.ok || subData?.success === false) {
     return {
       success: false,
-      message:
-        subData?.error ||
+      message: extractApiError(
+        subData,
         `Failed to register device push subscription with server (HTTP ${subRes.status}).`,
+      ),
     };
   }
 
   const notifyRes = await env.fetchFn('/api/push/notify', {
     method: 'POST',
+    credentials: 'include',
+    cache: 'no-store',
     headers: authHeaders,
     body: JSON.stringify({
       recipientId: env.user.id,
-      recipientRole: env.user.role,
       senderId: env.user.id,
       title: 'Swift Sweeps Support',
       body: 'Test alert: Background notification received with sound & vibration!',
       url: env.user.role === 'customer' ? '/#chat' : '/#ops_chat',
       tag: `test_${Date.now()}`,
+      actionType: 'test',
     }),
   });
 
@@ -161,7 +181,10 @@ export async function executeSendTestAlertFlow(env: SendTestAlertEnv): Promise<S
     return {
       success: false,
       sentCount: 0,
-      message: notifyData?.error || `Push server failed to dispatch alert (HTTP ${notifyRes.status}).`,
+      message: extractApiError(
+        notifyData,
+        `Push server failed to dispatch alert (HTTP ${notifyRes.status}).`,
+      ),
     };
   }
 

@@ -202,6 +202,7 @@ const STORAGE_KEYS = {
 
 class DataService {
   private isDemoMode = false;
+  private inFlightUserLookups = new Set<string>();
   private cache: Record<string, any> = {
     [STORAGE_KEYS.USERS]: [],
     [STORAGE_KEYS.WALLETS]: {},
@@ -506,9 +507,6 @@ class DataService {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, (p) => {
         this.queueRealtimeMutation('conversations', p.eventType, p.new, p.old);
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, (p) => {
-        this.queueRealtimeMutation('users', p.eventType, p.new, p.old);
-      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'faked_cashouts' }, (p) => {
         this.queueRealtimeMutation('faked_cashouts', p.eventType, p.new, p.old);
       })
@@ -517,9 +515,6 @@ class DataService {
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'audit_logs' }, (p) => {
         this.queueRealtimeMutation('audit_logs', p.eventType, p.new, p.old);
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'official_partners' }, (p) => {
-        this.queueRealtimeMutation('official_partners', p.eventType, p.new, p.old);
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
@@ -563,7 +558,6 @@ class DataService {
 
     const messageRows = filterRealtimeRowsForUser('messages', rowsByTable['messages'], activeUser);
     const conversationRows = filterRealtimeRowsForUser('conversations', rowsByTable['conversations'], activeUser);
-    const userRows = filterRealtimeRowsForUser('users', rowsByTable['users'], activeUser);
     const cashoutRows = filterRealtimeRowsForUser('faked_cashouts', rowsByTable['faked_cashouts'], activeUser);
     const appConfigRows = filterRealtimeRowsForUser('app_config', rowsByTable['app_config'], activeUser);
     const auditLogRows = filterRealtimeRowsForUser('audit_logs', rowsByTable['audit_logs'], activeUser);
@@ -575,10 +569,6 @@ class DataService {
     if (conversationRows.length) {
       this.applyConversationRows(conversationRows, false);
       tablesModified.add('conversations');
-    }
-    if (userRows.length) {
-      this.applyUserRows(userRows);
-      tablesModified.add('users');
     }
     if (cashoutRows.length) {
       this.applyCashoutRows(cashoutRows, false);
@@ -602,11 +592,6 @@ class DataService {
         this.cache[STORAGE_KEYS.AUDIT_LOGS] = mergeAuditLogs(existing, normalizedLogs, { maxItems: 100 });
         tablesModified.add('audit_logs');
       }
-    }
-    const hasPartnerEvent = queued.some((item) => item.table === 'official_partners');
-    if (hasPartnerEvent && activeUser) {
-      this.officialPartnersCache = null;
-      tablesModified.add('official_partners');
     }
 
     if (tablesModified.size > 0) {
@@ -664,6 +649,10 @@ class DataService {
             }),
           );
         }
+        selfHostedTasks.push(
+          this.fetchOfficialPartners(),
+          this.fetchNotificationsFromServer({ limit: 50, silentEvent: true }),
+        );
       }
       await Promise.allSettled(selfHostedTasks);
       if (typeof window !== 'undefined') {
@@ -720,6 +709,7 @@ class DataService {
         } else {
           this.cache[STORAGE_KEYS.AUDIT_LOGS] = [];
         }
+        void this.fetchNotificationsFromServer({ limit: 50, silentEvent: true });
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
         const [
@@ -770,6 +760,7 @@ class DataService {
             .order('created_at', { ascending: true })
             .limit(10),
         ]);
+        void this.fetchNotificationsFromServer({ limit: 50, silentEvent: true });
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
         if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
@@ -2066,31 +2057,8 @@ class DataService {
     try {
       if (key === STORAGE_KEYS.CONFIG) {
         await supabase.from('app_config').upsert({ id: 'main', data: value });
-      } else if (key === STORAGE_KEYS.USERS && Array.isArray(value) && value.length > 0) {
-        const currentUser = this.getCurrentUser();
-        const target = currentUser ? (value.find((u: UserProfile) => u.id === currentUser.id) || value[0]) : value[0];
-        if (target && target.id) {
-          let safeRole = target.role;
-          try {
-            const { data: dbUser } = await supabase.from('users').select('role').eq('id', target.id).maybeSingle();
-            if (dbUser?.role) {
-              safeRole = dbUser.role;
-            }
-          } catch {}
-
-          await supabase.from('users').upsert({
-            id: target.id,
-            email: target.email,
-            display_name: target.displayName,
-            role: safeRole,
-            phone: target.phone || null,
-            avatar_url: target.avatarUrl || null,
-            status: target.status || 'active',
-            email_verified: Boolean(target.emailVerified),
-            referred_by: target.referredBy || null,
-            created_at: target.createdAt || new Date().toISOString(),
-          });
-        }
+      } else if (key === STORAGE_KEYS.USERS) {
+        // Users & admin directory migrated to self-hosted /api/profile and /api/admin/users
       } else if (key === STORAGE_KEYS.WALLETS && typeof value === 'object' && value !== null) {
         const currentUserId = this.getCurrentUser()?.id;
         const allWallets = Object.values(value as Record<string, UserWallet>);
@@ -2219,24 +2187,7 @@ class DataService {
     try {
       const counts: Record<string, number> = {};
 
-      // 1. Users
-      const users = this.getUsers();
-      if (users.length > 0) {
-        const rows = users.map((u) => ({
-          id: u.id,
-          email: u.email,
-          display_name: u.displayName,
-          role: u.role,
-          phone: u.phone || null,
-          avatar_url: u.avatarUrl || null,
-          status: u.status || 'active',
-          email_verified: Boolean(u.emailVerified),
-          referred_by: u.referredBy || null,
-          created_at: u.createdAt || new Date().toISOString(),
-        }));
-        const { error } = await supabase.from('users').upsert(rows);
-        if (!error) counts['users'] = rows.length;
-      }
+      // 1. Users migrated to self-hosted /api/profile and /api/admin/users
 
       // 2 & 3. Wallets & Transactions migrated to self-hosted /api/wallet and /api/wallet/transactions
 
@@ -2551,11 +2502,12 @@ class DataService {
   public logout(reason: 'manual' | 'inactivity' | 'session_expired' = 'manual'): void {
     const prevUser = this.getCurrentUser();
     const dispatchServerLogout = async () => {
+      // Unsubscribe Web Push BEFORE Better Auth revokes the session cookie
+      await webPushClient.unsubscribeFromPushNotifications(prevUser).catch(() => {});
       await Promise.allSettled([
-        webPushClient.unsubscribeFromPushNotifications(prevUser),
         selfHostedAuthService.logout(reason),
+        supabaseAuthService.logout(),
       ]);
-      supabaseAuthService.logout().catch(() => {});
     };
 
     this.teardownRealtimeSync();
@@ -2895,121 +2847,76 @@ class DataService {
   }
 
   // Pure on-demand database fetch for Users & Staff Governance (0 local storage caching)
-  public async fetchLiveUsersDirectory(actingUser?: UserProfile | null): Promise<{
+  public async fetchLiveUsersDirectory(
+    _actingUser?: UserProfile | null,
+    options?: {
+      limit?: number;
+      offset?: number;
+      search?: string;
+      role?: 'all' | UserRole;
+      status?: 'all' | 'active' | 'suspended' | 'pending';
+      sortBy?: 'createdAt' | 'updatedAt' | 'displayName' | 'email' | 'role' | 'status';
+      sortOrder?: 'asc' | 'desc';
+    }
+  ): Promise<{
     success: boolean;
     users: UserProfile[];
+    total?: number;
+    pagination?: { limit: number; offset: number; total: number; hasMore: boolean };
     error?: string;
   }> {
     try {
-      const activeUser = actingUser || this.getCurrentUser();
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
-      if (activeUser) {
-        headers['x-user-id'] = activeUser.id;
-        headers['x-user-role'] = activeUser.role;
-      }
-      const resp = await fetch('/api/admin/users', {
+      const params = new URLSearchParams();
+      if (options?.limit !== undefined) params.set('limit', String(options.limit));
+      if (options?.offset !== undefined) params.set('offset', String(options.offset));
+      if (options?.search && options.search.trim()) params.set('search', options.search.trim());
+      if (options?.role && options.role !== 'all') params.set('role', options.role);
+      if (options?.status && options.status !== 'all') params.set('status', options.status);
+      if (options?.sortBy) params.set('sortBy', options.sortBy);
+      if (options?.sortOrder) params.set('sortOrder', options.sortOrder);
+
+      const queryStr = params.toString();
+      const url = queryStr ? `/api/admin/users?${queryStr}` : '/api/admin/users';
+
+      const resp = await fetch(url, {
         method: 'GET',
-        headers,
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+        },
       });
 
+      const data = await resp.json().catch(() => null);
       if (!resp.ok) {
-        // If API route fails or is unavailable on Vercel (e.g. 500, 404, or serverless cold-start timeout),
-        // query live Supabase PostgreSQL directly to ensure the user directory is always available
-        if (isSupabaseConfigured() && supabase) {
-          try {
-            const { data: dbUsers, error: dbErr } = await supabase
-              .from('users')
-              .select('*')
-              .order('created_at', { ascending: false })
-              .limit(100);
-
-            if (!dbErr && dbUsers && dbUsers.length > 0) {
-              const userIds = dbUsers.map((u: any) => u.id);
-              const [walletsApiRes, gameAccountsApiRes] = await Promise.all([
-                this.fetchWalletsFromServer({ customerIds: userIds, limit: 100, silentEvent: true }),
-                this.fetchGameAccountsFromServer({ customerIds: userIds, limit: 100, silentEvent: true }),
-              ]);
-
-              const walletsMap: Record<string, any> = {};
-              (walletsApiRes.wallets || []).forEach((w) => {
-                walletsMap[w.customerId] = w;
-              });
-
-              const gameAccountsMap: Record<string, GameAccount[]> = {};
-              const loadedAccounts = gameAccountsApiRes.success
-                ? gameAccountsApiRes.accounts
-                : this.getGameAccounts();
-              loadedAccounts.forEach((g) => {
-                if (!gameAccountsMap[g.customerId]) gameAccountsMap[g.customerId] = [];
-                gameAccountsMap[g.customerId].push(g);
-              });
-
-              const aggregated = dbUsers.map((u: any) => ({
-                id: u.id,
-                email: u.email,
-                displayName: u.display_name || u.email?.split('@')[0] || 'User',
-                phone: u.phone,
-                role: u.role || 'customer',
-                status: u.status || 'active',
-                emailVerified: Boolean(u.email_verified),
-                avatarUrl: u.avatar_url,
-                referralCode: u.referral_code,
-                referredBy: u.referred_by,
-                registeredPaymentMethod: u.registered_payment_method,
-                registeredPaymentDetails: u.registered_payment_details,
-                isParentAdmin: u.email?.toLowerCase() === 'sachet61@gmail.com' || Boolean(u.is_parent_admin),
-                promotedBy: u.promoted_by,
-                promotedByName: u.promoted_by_name,
-                promotedAt: u.promoted_at,
-                createdAt: u.created_at,
-                lastLoginAt: u.last_login_at || u.updated_at,
-                wallet: walletsMap[u.id] || {
-                  customerId: u.id,
-                  currency: 'USD',
-                  availableBalance: 0,
-                  referralBonusBalance: 0,
-                  reservedBalance: 0,
-                  pendingDepositBalance: 0,
-                },
-                gameAccounts: gameAccountsMap[u.id] || [],
-                gameAccountsCount: (gameAccountsMap[u.id] || []).length,
-              }));
-
-              this.cache[STORAGE_KEYS.USERS] = aggregated;
-              return { success: true, users: aggregated };
-            }
-          } catch (directErr: any) {
-            console.warn('[Direct Supabase Query Notice]:', directErr);
-          }
-        }
-
-        const errData = await resp.json().catch(() => ({}));
         return {
           success: false,
           users: [],
-          error: errData.error || `Server returned HTTP ${resp.status}`,
+          error: extractServerApiError(data, `Server returned HTTP ${resp.status}`),
         };
       }
 
-      const data = await resp.json();
-      if (data.success && Array.isArray(data.users)) {
+      if (data?.success && Array.isArray(data.users)) {
         // Keep in-memory cache updated strictly for current active session; NEVER write to localStorage
         this.cache[STORAGE_KEYS.USERS] = data.users;
-        return { success: true, users: data.users };
+        return {
+          success: true,
+          users: data.users,
+          total: typeof data.total === 'number' ? data.total : data.users.length,
+          pagination: data.pagination,
+        };
       }
 
       return {
         success: false,
         users: [],
-        error: data.error || 'Failed to parse user directory response from server.',
+        error: extractServerApiError(data, 'Failed to parse user directory response from server.'),
       };
     } catch (err: any) {
       return {
         success: false,
         users: [],
-        error: err.message || 'Network error fetching user directory.',
+        error: err?.message || 'Network error fetching user directory.',
       };
     }
   }
@@ -3020,39 +2927,36 @@ class DataService {
     const found = users.find((u) => u.id === userId || u.email?.toLowerCase() === userId.toLowerCase());
     if (found) return found;
 
-    // Try fetching from Supabase if not in cache yet
-    if (supabase && isSupabaseConfigured()) {
+    // Fetch from self-hosted admin user endpoint if staff and not yet cached
+    const currentUser = this.getCurrentUser();
+    const isStaff = currentUser?.role === 'admin' || currentUser?.role === 'agent';
+    if (
+      isStaff &&
+      !userId.includes('@') &&
+      !this.inFlightUserLookups.has(userId)
+    ) {
+      this.inFlightUserLookups.add(userId);
       (async () => {
         try {
-          const { data } = await supabase
-            .from('users')
-            .select('*')
-            .or(`id.eq.${userId},email.ilike.${userId}`)
-            .maybeSingle();
-
-          if (data) {
-            const u: UserProfile = {
-              id: data.id,
-              email: data.email,
-              displayName: data.display_name || data.email?.split('@')[0] || 'Player',
-              role: data.role || 'customer',
-              phone: data.phone,
-              avatarUrl: data.avatar_url,
-              status: data.status || 'active',
-              emailVerified: Boolean(data.email_verified),
-              referralCode: `REF_${data.id.slice(-5).toUpperCase()}`,
-              referredBy: data.referred_by,
-              createdAt: data.created_at || new Date().toISOString(),
-              lastLoginAt: new Date().toISOString(),
-            };
+          const resp = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+            method: 'GET',
+            credentials: 'include',
+            cache: 'no-store',
+            headers: { Accept: 'application/json' },
+          });
+          if (!resp.ok) return;
+          const data = await resp.json().catch(() => null);
+          if (data?.success && data?.user) {
             const cur = this.getUsers();
-            if (!cur.some((x) => x.id === u.id)) {
-              this.cache[STORAGE_KEYS.USERS] = [...cur, u];
+            if (!cur.some((x) => x.id === data.user.id)) {
+              this.cache[STORAGE_KEYS.USERS] = [...cur, data.user];
               window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'users' } }));
             }
           }
         } catch {
-          // Ignore background fetch error
+          // Ignore background lookup error
+        } finally {
+          this.inFlightUserLookups.delete(userId);
         }
       })();
     }
@@ -3100,91 +3004,94 @@ class DataService {
     }
 
     const targetUser = this.getUserById(targetUserId) || this.getUserByEmail(targetUserId);
-    if (!targetUser) {
-      return { success: false, message: 'User not found in system directory.' };
-    }
+    const resolvedTargetId = targetUser?.id || targetUserId;
 
-    const isParentAdmin =
-      this.isProtectedParentAdmin(targetUser.email, targetUser) ||
-      this.isProtectedParentAdmin(targetUser.id, targetUser) ||
-      targetUser.isParentAdmin;
+    if (targetUser) {
+      const isParentAdmin =
+        this.isProtectedParentAdmin(targetUser.email, targetUser) ||
+        this.isProtectedParentAdmin(targetUser.id, targetUser) ||
+        targetUser.isParentAdmin;
 
-    if (isParentAdmin) {
-      if (newRole !== 'admin') {
+      if (isParentAdmin && newRole !== 'admin') {
         return {
           success: false,
           message: 'Security Guard: Newly appointed administrators cannot demote the Parent Admin. The primary platform administrator role is permanently protected.',
         };
       }
+
+      if (actingUser.id === targetUser.id && newRole !== 'admin') {
+        return {
+          success: false,
+          message: 'Self-Demotion Guard: You cannot demote your own administrator account. Another admin must perform this action.',
+        };
+      }
     }
 
-    if (actingUser.id === targetUser.id && newRole !== 'admin') {
+    let data: any = null;
+    try {
+      const resp = await fetch(`/api/admin/users/${encodeURIComponent(resolvedTargetId)}/role`, {
+        method: 'PATCH',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ newRole }),
+      });
+
+      data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success || !data?.user) {
+        return {
+          success: false,
+          message: extractServerApiError(data, `Failed to update user role (HTTP ${resp.status}).`),
+        };
+      }
+    } catch (e: any) {
       return {
         success: false,
-        message: 'Self-Demotion Guard: You cannot demote your own administrator account. Another admin must perform this action.',
+        message: e?.message || 'Network error while updating user role.',
       };
     }
 
-    try {
-      // 1. Synchronize to server API and Supabase
-      const resp = await fetch(`/api/admin/users/${targetUser.id}/role`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          newRole,
-          actingUserId: actingUser.id,
-          actingUserRole: actingUser.role,
-        }),
-      });
+    const updatedUser: UserProfile = {
+      ...(targetUser || {}),
+      ...data.user,
+      promotedBy: actingUser.id,
+      promotedByName: actingUser.displayName,
+      promotedAt: new Date().toISOString(),
+    };
 
-      if (!resp.ok) {
-        const errorData = await resp.json().catch(() => ({}));
-        if (resp.status === 403) {
-          return {
-            success: false,
-            message: errorData.error || 'Security Guard: Newly appointed administrators cannot demote the Parent Admin.',
-          };
-        }
-      }
-    } catch (e) {
-      console.warn('Server role sync notice:', e);
-    }
-
-    targetUser.role = newRole;
-    targetUser.promotedBy = actingUser.id;
-    targetUser.promotedByName = actingUser.displayName;
-    targetUser.promotedAt = new Date().toISOString();
-
-    const allUsers = this.getUsers().map((u) =>
-      u.id === targetUser.id ? { ...u, role: newRole, promotedBy: actingUser.id, promotedByName: actingUser.displayName, promotedAt: targetUser.promotedAt } : u
-    );
+    const existingUsers = this.getUsers();
+    const hasExisting = existingUsers.some((u) => u.id === updatedUser.id);
+    const allUsers = hasExisting
+      ? existingUsers.map((u) => (u.id === updatedUser.id ? { ...u, ...updatedUser } : u))
+      : [...existingUsers, updatedUser];
     this.cache[STORAGE_KEYS.USERS] = allUsers;
-
-    if (supabase && isSupabaseConfigured()) {
-      await supabase.from('users').update({ role: newRole, updated_at: new Date().toISOString() }).eq('id', targetUser.id);
-    }
 
     if (newRole === 'agent' || newRole === 'admin') {
       // Purge any customer support conversation belonging to this newly elevated staff member
       const convs = (this.cache[STORAGE_KEYS.CONVERSATIONS] as SupportConversation[] || []).filter(
-        (c) => c.customerId !== targetUser.id && (!c.customerEmail || c.customerEmail.toLowerCase() !== targetUser.email.toLowerCase())
+        (c) =>
+          c.customerId !== updatedUser.id &&
+          (!c.customerEmail || c.customerEmail.toLowerCase() !== updatedUser.email.toLowerCase())
       );
       this.cache[STORAGE_KEYS.CONVERSATIONS] = convs;
       this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, convs);
 
-      // Clean up from Supabase PostgreSQL
+      // Clean up unmigrated customer conversations in Supabase PostgreSQL until conversations domain migrates
       if (supabase && isSupabaseConfigured()) {
         (async () => {
           try {
             const { data: userConvs } = await supabase
               .from('conversations')
               .select('id')
-              .or(`customer_id.eq.${targetUser.id},customer_email.eq.${targetUser.email}`);
+              .or(`customer_id.eq.${updatedUser.id},customer_email.eq.${updatedUser.email}`);
             if (userConvs && userConvs.length > 0) {
               const ids = userConvs.map((c: any) => c.id);
               await supabase.from('messages').delete().in('conversation_id', ids);
               await supabase.from('conversations').delete().in('id', ids);
-              console.log(`[Staff Inbox Guard] Purged customer conversation for elevated user ${targetUser.email}`);
+              console.log(`[Staff Inbox Guard] Purged customer conversation for elevated user ${updatedUser.email}`);
             }
           } catch (e) {
             console.warn('Supabase conversation purge error:', e);
@@ -3193,24 +3100,83 @@ class DataService {
       }
     }
 
-    authSessionService.updateUserProfile(targetUser);
+    if (updatedUser.id === this.getCurrentUser()?.id) {
+      authSessionService.updateUserProfile(updatedUser);
+    }
 
-    this.logAudit({
-      actorId: actingUser.id,
-      actorName: actingUser.displayName,
-      actorRole: actingUser.role,
-      action: 'USER_ROLE_UPDATED',
-      entityType: 'user',
-      entityId: targetUser.id,
-      details: `Role for ${targetUser.displayName} (${targetUser.email}) changed to ${newRole.toUpperCase()} by ${actingUser.displayName}.`,
-    });
-
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_role_updated', userId: targetUser.id, newRole } }));
+    window.dispatchEvent(
+      new CustomEvent('aetherpay_state_changed', {
+        detail: { key: 'user_role_updated', userId: updatedUser.id, newRole: updatedUser.role },
+      })
+    );
     return {
       success: true,
-      message: `Role successfully updated to ${newRole.toUpperCase()} for ${targetUser.displayName}.`,
-      user: targetUser,
+      message: data.message || `Role successfully updated to ${updatedUser.role.toUpperCase()} for ${updatedUser.displayName}.`,
+      user: updatedUser,
     };
+  }
+
+  public async updateUserStatus(
+    targetUserId: string,
+    status: 'active' | 'suspended',
+    actingUser: UserProfile
+  ): Promise<{ success: boolean; message: string; user?: UserProfile }> {
+    if (actingUser.role !== 'admin') {
+      return {
+        success: false,
+        message: 'Access Denied: Only administrators can update user status.',
+      };
+    }
+
+    const targetUser = this.getUserById(targetUserId) || this.getUserByEmail(targetUserId);
+    const resolvedTargetId = targetUser?.id || targetUserId;
+
+    try {
+      const resp = await fetch(`/api/admin/users/${encodeURIComponent(resolvedTargetId)}/status`, {
+        method: 'PATCH',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ status }),
+      });
+
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success || !data?.user) {
+        return {
+          success: false,
+          message: extractServerApiError(data, `Failed to update user status (HTTP ${resp.status}).`),
+        };
+      }
+
+      const updatedUser: UserProfile = {
+        ...(targetUser || {}),
+        ...data.user,
+      };
+      const existingUsers = this.getUsers();
+      this.cache[STORAGE_KEYS.USERS] = existingUsers.some((u) => u.id === updatedUser.id)
+        ? existingUsers.map((u) => (u.id === updatedUser.id ? { ...u, ...updatedUser } : u))
+        : [...existingUsers, updatedUser];
+
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'users', userId: updatedUser.id, status: updatedUser.status },
+        })
+      );
+
+      return {
+        success: true,
+        message: data.message || `Status updated to ${updatedUser.status} for ${updatedUser.displayName}.`,
+        user: updatedUser,
+      };
+    } catch (e: any) {
+      return {
+        success: false,
+        message: e?.message || 'Network error while updating user status.',
+      };
+    }
   }
 
   public async deleteUserCompletely(
@@ -3231,20 +3197,26 @@ class DataService {
     }
 
     try {
-      // 1. Call server API to delete from Supabase Auth and all SQL tables
-      const resp = await fetch(`/api/admin/users/${targetUser.id}`, {
+      const resp = await fetch(`/api/admin/users/${encodeURIComponent(targetUser.id)}`, {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
       });
-      const data = await resp.json();
-      if (!resp.ok) {
-        return { success: false, message: data.error || 'Failed to delete user on server.' };
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        return {
+          success: false,
+          message: extractServerApiError(data, `Failed to delete user on server (HTTP ${resp.status}).`),
+        };
       }
 
-      // 2. Remove from local caches
+      // Remove from in-memory session caches (never cache users directory in localStorage)
       const users = this.getUsers().filter((u) => u.id !== targetUser.id && u.email !== targetUser.email);
       this.cache[STORAGE_KEYS.USERS] = users;
-      this.saveToLocalStorage(STORAGE_KEYS.USERS, users);
 
       // Clean wallets
       const wallets = { ...this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, {}) };
@@ -3271,20 +3243,13 @@ class DataService {
       this.cache[STORAGE_KEYS.CONVERSATIONS] = convs;
       this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, convs);
 
-      this.logAudit({
-        actorId: actingUser.id,
-        actorName: actingUser.displayName,
-        actorRole: actingUser.role,
-        action: 'USER_DELETED',
-        entityType: 'user',
-        entityId: targetUser.id,
-        details: `Administrator ${actingUser.displayName} permanently deleted user ${targetUser.email} (${targetUser.displayName}) and purged all related records.`,
-      });
-
       window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_deleted' } }));
-      return { success: true, message: `User ${targetUser.displayName} (${targetUser.email}) and all associated records have been completely purged.` };
+      return {
+        success: true,
+        message: `User ${targetUser.displayName} (${targetUser.email}) and all associated records have been completely purged.`,
+      };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Error executing complete user deletion.' };
+      return { success: false, message: err?.message || 'Error executing complete user deletion.' };
     }
   }
 
@@ -7150,7 +7115,11 @@ class DataService {
       }
 
       // Instant Web Push Notification
-      if (!updated.isInternalNote && typeof window !== 'undefined') {
+      if (
+        !updated.isInternalNote &&
+        updated.senderRole !== 'system' &&
+        typeof window !== 'undefined'
+      ) {
         try {
           const isFromCustomer = updated.senderRole === 'customer';
           const recipientRole = isFromCustomer ? 'agent' : 'customer';
@@ -7645,12 +7614,144 @@ class DataService {
   }
 
   // Notifications
-  public getNotifications(userId: string): AppNotification[] {
-    const list = this.load<AppNotification[]>(STORAGE_KEYS.NOTIFICATIONS, INITIAL_NOTIFICATIONS);
-    return list.filter((n) => n.userId === userId).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  private applyNotificationRows(rows: unknown[], replaceForUserId?: string): void {
+    const incoming: AppNotification[] = [];
+    for (const raw of rows) {
+      if (!raw || typeof raw !== 'object') continue;
+      const r = raw as Record<string, unknown>;
+      const id = String(r.id ?? '').trim();
+      const userId = String(r.userId ?? r.user_id ?? '').trim();
+      if (!id || !userId) continue;
+      incoming.push({
+        id,
+        userId,
+        title: String(r.title ?? ''),
+        message: String(r.message ?? ''),
+        type: String(r.type ?? 'system') as AppNotification['type'],
+        isRead: Boolean(r.isRead ?? r.is_read ?? r.read ?? false),
+        linkTab: r.linkTab ? String(r.linkTab) : r.link_tab ? String(r.link_tab) : undefined,
+        linkRequestId: r.linkRequestId
+          ? String(r.linkRequestId)
+          : r.link_request_id
+            ? String(r.link_request_id)
+            : undefined,
+        createdAt: String(r.createdAt ?? r.created_at ?? new Date().toISOString()),
+      });
+    }
+
+    const existing = this.load<AppNotification[]>(STORAGE_KEYS.NOTIFICATIONS, INITIAL_NOTIFICATIONS);
+    const base = replaceForUserId
+      ? existing.filter((n) => n.userId !== replaceForUserId)
+      : existing;
+    const byId = new Map<string, AppNotification>();
+    for (const item of base) {
+      byId.set(item.id, item);
+    }
+    for (const item of incoming) {
+      byId.set(item.id, item);
+    }
+    const merged = Array.from(byId.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
+    this.save(STORAGE_KEYS.NOTIFICATIONS, merged);
   }
 
-  public createNotification(params: Omit<AppNotification, 'id' | 'createdAt' | 'isRead'>): AppNotification {
+  public async fetchNotificationsFromServer(options?: {
+    unreadOnly?: boolean;
+    limit?: number;
+    offset?: number;
+    silentEvent?: boolean;
+  }): Promise<{
+    success: boolean;
+    notifications: AppNotification[];
+    total: number;
+    unreadCount: number;
+    error?: string;
+  }> {
+    const activeUser = this.getCurrentUser();
+    if (!activeUser?.id || typeof fetch !== 'function') {
+      return { success: false, notifications: [], total: 0, unreadCount: 0 };
+    }
+
+    try {
+      const params = new URLSearchParams();
+      if (options?.unreadOnly) params.set('unreadOnly', 'true');
+      if (options?.limit !== undefined) params.set('limit', String(options.limit));
+      if (options?.offset !== undefined) params.set('offset', String(options.offset));
+      const query = params.toString();
+      const url = query ? `/api/notifications?${query}` : '/api/notifications';
+
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        let errMsg = `Failed to load notifications (HTTP ${res.status}).`;
+        try {
+          const errJson = JSON.parse(rawText);
+          errMsg = errJson?.error?.message || errJson?.error || errMsg;
+        } catch {}
+        return {
+          success: false,
+          notifications: this.getNotifications(activeUser.id),
+          total: 0,
+          unreadCount: 0,
+          error: errMsg,
+        };
+      }
+
+      const payload = rawText ? (JSON.parse(rawText) as {
+        notifications?: unknown[];
+        total?: number;
+        unreadCount?: number;
+      }) : {};
+      const rows = Array.isArray(payload.notifications) ? payload.notifications : [];
+      this.applyNotificationRows(
+        rows,
+        (options?.offset ?? 0) === 0 && !options?.unreadOnly ? activeUser.id : undefined,
+      );
+
+      if (!options?.silentEvent && typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: STORAGE_KEYS.NOTIFICATIONS },
+          }),
+        );
+      }
+
+      const list = this.getNotifications(activeUser.id);
+      return {
+        success: true,
+        notifications: list,
+        total: Number(payload.total ?? list.length),
+        unreadCount: Number(
+          payload.unreadCount ?? list.filter((n) => !n.isRead).length,
+        ),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        notifications: this.getNotifications(activeUser.id),
+        total: 0,
+        unreadCount: 0,
+        error: err?.message || 'Unable to load notifications.',
+      };
+    }
+  }
+
+  public getNotifications(userId: string): AppNotification[] {
+    const list = this.load<AppNotification[]>(STORAGE_KEYS.NOTIFICATIONS, INITIAL_NOTIFICATIONS);
+    return list
+      .filter((n) => n.userId === userId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  public createNotification(
+    params: Omit<AppNotification, 'id' | 'createdAt' | 'isRead'>,
+  ): AppNotification {
     const list = this.load<AppNotification[]>(STORAGE_KEYS.NOTIFICATIONS, INITIAL_NOTIFICATIONS);
     const nowMs = Date.now();
     const existing = list.find(
@@ -7661,19 +7762,64 @@ class DataService {
         ((params.linkRequestId && n.linkRequestId === params.linkRequestId) ||
           (!params.linkRequestId &&
             n.message === params.message &&
-            Math.abs(nowMs - Date.parse(n.createdAt || '')) < 15000))
+            Math.abs(nowMs - Date.parse(n.createdAt || '')) < 15000)),
     );
     if (existing) {
       return existing;
     }
+    const optimisticId = `notif_${nowMs}_${Math.random().toString(36).substring(2, 6)}`;
     const newNotif: AppNotification = {
       ...params,
-      id: `notif_${nowMs}_${Math.random().toString(36).substring(2, 6)}`,
+      id: optimisticId,
       createdAt: new Date(nowMs).toISOString(),
       isRead: false,
     };
     list.unshift(newNotif);
     this.save(STORAGE_KEYS.NOTIFICATIONS, list);
+
+    if (typeof fetch === 'function' && selfHostedAuthService.getCurrentUser()?.id) {
+      void fetch('/api/notifications', {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          userId: params.userId,
+          title: params.title,
+          message: params.message,
+          type: params.type,
+          linkTab: params.linkTab,
+          linkRequestId: params.linkRequestId,
+        }),
+      })
+        .then(async (res) => {
+          if (!res.ok) return;
+          const json = (await res.json().catch(() => null)) as {
+            notification?: Record<string, unknown>;
+          } | null;
+          const serverNotif = json?.notification;
+          if (!serverNotif?.id) return;
+          const current = this.load<AppNotification[]>(
+            STORAGE_KEYS.NOTIFICATIONS,
+            INITIAL_NOTIFICATIONS,
+          );
+          const filtered = current.filter((item) => item.id !== optimisticId);
+          this.save(STORAGE_KEYS.NOTIFICATIONS, filtered);
+          this.applyNotificationRows([serverNotif]);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('aetherpay_state_changed', {
+                detail: { key: STORAGE_KEYS.NOTIFICATIONS },
+              }),
+            );
+          }
+        })
+        .catch(() => {});
+    }
+
     return newNotif;
   }
 
@@ -7683,6 +7829,26 @@ class DataService {
     if (item) {
       item.isRead = true;
       this.save(STORAGE_KEYS.NOTIFICATIONS, list);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: STORAGE_KEYS.NOTIFICATIONS },
+          }),
+        );
+      }
+    }
+
+    if (typeof fetch === 'function' && notifId && selfHostedAuthService.getCurrentUser()?.id) {
+      void fetch(`/api/notifications/${encodeURIComponent(notifId)}/read`, {
+        method: 'PATCH',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({}),
+      }).catch(() => {});
     }
   }
 
@@ -7692,6 +7858,27 @@ class DataService {
       if (n.userId === userId) n.isRead = true;
     });
     this.save(STORAGE_KEYS.NOTIFICATIONS, list);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: STORAGE_KEYS.NOTIFICATIONS },
+        }),
+      );
+    }
+
+    const activeUser = selfHostedAuthService.getCurrentUser();
+    if (typeof fetch === 'function' && activeUser?.id && activeUser.id === userId) {
+      void fetch('/api/notifications/read-all', {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ userId }),
+      }).catch(() => {});
+    }
   }
 
   // Referral Program & Server-Enforced Referral Engine
@@ -9492,7 +9679,7 @@ class DataService {
   }
 
   // =========================================================================
-  // OFFICIAL PARTNERS DIRECTORY (Supabase + Admin RBAC Serverless APIs)
+  // OFFICIAL PARTNERS DIRECTORY (Self-Hosted Node API + Admin RBAC)
   // =========================================================================
 
   public getCachedOfficialPartners(): OfficialPartner[] {
@@ -9507,6 +9694,30 @@ class DataService {
         })
       );
     }
+  }
+
+  private parseOfficialPartnerApiError(
+    status: number,
+    json: any,
+    fallback: string
+  ): { message: string; code?: string; requiresReauth: boolean } {
+    const code =
+      typeof json?.code === 'string'
+        ? json.code
+        : typeof json?.error?.code === 'string'
+          ? json.error.code
+          : undefined;
+    const message =
+      typeof json?.error === 'string'
+        ? json.error
+        : typeof json?.error?.message === 'string'
+          ? json.error.message
+          : typeof json?.message === 'string'
+            ? json.message
+            : `${fallback} (${status || 'network error'}).`;
+    const requiresReauth =
+      status === 401 || code === 'UNAUTHENTICATED' || code === 'TOKEN_EXPIRED';
+    return { message, code, requiresReauth };
   }
 
   public async fetchOfficialPartners(options?: {
@@ -9524,39 +9735,37 @@ class DataService {
         ? '/api/admin/official-partners?includeHidden=1'
         : '/api/official-partners';
 
-      let attempt = await this.fetchWithAuthTokenRetry(baseRoute, (headers) => ({
+      const res = await fetch(baseRoute, {
         method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
         headers: {
-          ...headers,
-          'x-api-route': baseRoute,
+          Accept: 'application/json',
         },
-      }));
+      });
 
-      if (
-        !attempt.requiresReauth &&
-        !attempt.isTransientError &&
-        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
-      ) {
-        const fallbackUrl = `/api/index?__api_path=${encodeURIComponent(baseRoute)}`;
-        attempt = await this.fetchWithAuthTokenRetry(fallbackUrl, (headers) => ({
-          method: 'GET',
-          headers: {
-            ...headers,
-            'x-api-route': baseRoute,
-          },
-        }));
+      const rawText = await res.text().catch(() => '');
+      let json: any = {};
+      if (rawText && rawText.trim()) {
+        try {
+          json = JSON.parse(rawText);
+        } catch {
+          json = {};
+        }
       }
 
-      const json = attempt.json || {};
-      if (!attempt.response?.ok || !json?.success) {
+      if (!res.ok || !json?.success) {
+        const parsed = this.parseOfficialPartnerApiError(
+          res.status,
+          json,
+          'Unable to load official partners'
+        );
         return {
           success: false,
           partners: [],
-          error:
-            json?.error ||
-            `Unable to load official partners (${attempt.response?.status || 'network error'}).`,
-          code: json?.code,
-          requiresReauth: attempt.requiresReauth,
+          error: parsed.message,
+          code: parsed.code,
+          requiresReauth: parsed.requiresReauth,
         };
       }
 
@@ -9568,12 +9777,7 @@ class DataService {
           )
         : [];
 
-      if (!includeHidden) {
-        this.officialPartnersCache = rows.filter((p) => p.isVisible);
-      } else {
-        this.officialPartnersCache = rows.filter((p) => p.isVisible);
-      }
-
+      this.officialPartnersCache = rows.filter((p) => p.isVisible);
       return { success: true, partners: rows };
     } catch (err: any) {
       return {
@@ -9592,42 +9796,29 @@ class DataService {
     requiresReauth?: boolean;
   }> {
     try {
-      const route = '/api/admin/official-partners';
-      const payload = JSON.stringify(input);
-      let attempt = await this.fetchWithAuthTokenRetry(route, (headers) => ({
+      const res = await fetch('/api/admin/official-partners', {
         method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
         headers: {
-          ...headers,
-          'x-api-route': route,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
         },
-        body: payload,
-      }));
+        body: JSON.stringify(input),
+      });
 
-      if (
-        !attempt.requiresReauth &&
-        !attempt.isTransientError &&
-        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
-      ) {
-        attempt = await this.fetchWithAuthTokenRetry(
-          `/api/index?__api_path=${encodeURIComponent(route)}`,
-          (headers) => ({
-            method: 'POST',
-            headers: {
-              ...headers,
-              'x-api-route': route,
-            },
-            body: payload,
-          })
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.success || !json?.partner) {
+        const parsed = this.parseOfficialPartnerApiError(
+          res.status,
+          json,
+          'Failed to create official partner'
         );
-      }
-
-      const json = attempt.json || {};
-      if (!attempt.response?.ok || !json?.success || !json?.partner) {
         return {
           success: false,
-          error: json?.error || `Failed to create official partner (${attempt.response?.status || 500}).`,
-          code: json?.code,
-          requiresReauth: attempt.requiresReauth,
+          error: parsed.message,
+          code: parsed.code,
+          requiresReauth: parsed.requiresReauth,
         };
       }
 
@@ -9666,42 +9857,29 @@ class DataService {
     requiresReauth?: boolean;
   }> {
     try {
-      const route = `/api/admin/official-partners/${encodeURIComponent(id)}`;
-      const payload = JSON.stringify(patch);
-      let attempt = await this.fetchWithAuthTokenRetry(route, (headers) => ({
+      const res = await fetch(`/api/admin/official-partners/${encodeURIComponent(id)}`, {
         method: 'PATCH',
+        credentials: 'include',
+        cache: 'no-store',
         headers: {
-          ...headers,
-          'x-api-route': route,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
         },
-        body: payload,
-      }));
+        body: JSON.stringify(patch),
+      });
 
-      if (
-        !attempt.requiresReauth &&
-        !attempt.isTransientError &&
-        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
-      ) {
-        attempt = await this.fetchWithAuthTokenRetry(
-          `/api/index?__api_path=${encodeURIComponent(route)}`,
-          (headers) => ({
-            method: 'PATCH',
-            headers: {
-              ...headers,
-              'x-api-route': route,
-            },
-            body: payload,
-          })
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.success || !json?.partner) {
+        const parsed = this.parseOfficialPartnerApiError(
+          res.status,
+          json,
+          'Failed to update official partner'
         );
-      }
-
-      const json = attempt.json || {};
-      if (!attempt.response?.ok || !json?.success || !json?.partner) {
         return {
           success: false,
-          error: json?.error || `Failed to update official partner (${attempt.response?.status || 500}).`,
-          code: json?.code,
-          requiresReauth: attempt.requiresReauth,
+          error: parsed.message,
+          code: parsed.code,
+          requiresReauth: parsed.requiresReauth,
         };
       }
 
@@ -9737,42 +9915,29 @@ class DataService {
     requiresReauth?: boolean;
   }> {
     try {
-      const route = '/api/admin/official-partners/reorder';
-      const payload = JSON.stringify({ orderedIds });
-      let attempt = await this.fetchWithAuthTokenRetry(route, (headers) => ({
+      const res = await fetch('/api/admin/official-partners/reorder', {
         method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
         headers: {
-          ...headers,
-          'x-api-route': route,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
         },
-        body: payload,
-      }));
+        body: JSON.stringify({ orderedIds }),
+      });
 
-      if (
-        !attempt.requiresReauth &&
-        !attempt.isTransientError &&
-        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
-      ) {
-        attempt = await this.fetchWithAuthTokenRetry(
-          `/api/index?__api_path=${encodeURIComponent(route)}`,
-          (headers) => ({
-            method: 'POST',
-            headers: {
-              ...headers,
-              'x-api-route': route,
-            },
-            body: payload,
-          })
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.success) {
+        const parsed = this.parseOfficialPartnerApiError(
+          res.status,
+          json,
+          'Failed to save partner order'
         );
-      }
-
-      const json = attempt.json || {};
-      if (!attempt.response?.ok || !json?.success) {
         return {
           success: false,
-          error: json?.error || `Failed to save partner order (${attempt.response?.status || 500}).`,
-          code: json?.code,
-          requiresReauth: attempt.requiresReauth,
+          error: parsed.message,
+          code: parsed.code,
+          requiresReauth: parsed.requiresReauth,
         };
       }
 
@@ -9803,39 +9968,27 @@ class DataService {
     requiresReauth?: boolean;
   }> {
     try {
-      const route = `/api/admin/official-partners/${encodeURIComponent(id)}`;
-      let attempt = await this.fetchWithAuthTokenRetry(route, (headers) => ({
+      const res = await fetch(`/api/admin/official-partners/${encodeURIComponent(id)}`, {
         method: 'DELETE',
+        credentials: 'include',
+        cache: 'no-store',
         headers: {
-          ...headers,
-          'x-api-route': route,
+          Accept: 'application/json',
         },
-      }));
+      });
 
-      if (
-        !attempt.requiresReauth &&
-        !attempt.isTransientError &&
-        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
-      ) {
-        attempt = await this.fetchWithAuthTokenRetry(
-          `/api/index?__api_path=${encodeURIComponent(route)}`,
-          (headers) => ({
-            method: 'DELETE',
-            headers: {
-              ...headers,
-              'x-api-route': route,
-            },
-          })
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.success) {
+        const parsed = this.parseOfficialPartnerApiError(
+          res.status,
+          json,
+          'Failed to delete official partner'
         );
-      }
-
-      const json = attempt.json || {};
-      if (!attempt.response?.ok || !json?.success) {
         return {
           success: false,
-          error: json?.error || `Failed to delete official partner (${attempt.response?.status || 500}).`,
-          code: json?.code,
-          requiresReauth: attempt.requiresReauth,
+          error: parsed.message,
+          code: parsed.code,
+          requiresReauth: parsed.requiresReauth,
         };
       }
 
@@ -9857,24 +10010,7 @@ class DataService {
     url?: string;
     error?: string;
   }> {
-    const tokenMeta = await supabaseTokenManager.getAccessToken({ forceRefresh: false });
-    if (tokenMeta.requiresReauth || !tokenMeta.token) {
-      return {
-        success: false,
-        error: tokenMeta.error || SESSION_EXPIRED_USER_MESSAGE,
-      };
-    }
-    let res = await storageService.uploadPartnerIcon(file, tokenMeta.token);
-    if (!res.success && /unauthorized|expired|session/i.test(res.error || '')) {
-      const refreshed = await supabaseTokenManager.getAccessToken({
-        forceRefresh: true,
-        rejectedToken: tokenMeta.token,
-      });
-      if (refreshed.token) {
-        res = await storageService.uploadPartnerIcon(file, refreshed.token);
-      }
-    }
-    return res;
+    return storageService.uploadPartnerIcon(file);
   }
 }
 

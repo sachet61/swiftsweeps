@@ -30,6 +30,16 @@ function isSelfHostedAuthPath(url: string | undefined): boolean {
     pathname.startsWith('/api/withdrawals/') ||
     pathname === '/api/deposits' ||
     pathname.startsWith('/api/deposits/') ||
+    pathname === '/api/official-partners' ||
+    pathname.startsWith('/api/official-partners/') ||
+    pathname === '/api/push' ||
+    pathname.startsWith('/api/push/') ||
+    pathname === '/api/notifications' ||
+    pathname.startsWith('/api/notifications/') ||
+    pathname === '/api/admin/users' ||
+    pathname.startsWith('/api/admin/users/') ||
+    pathname === '/api/admin/official-partners' ||
+    pathname.startsWith('/api/admin/official-partners/') ||
     pathname === '/api/healthz' ||
     pathname === '/api/readyz'
   );

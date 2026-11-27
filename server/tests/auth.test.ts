@@ -99,6 +99,18 @@ class InMemoryAppDatabase implements Pick<DatabasePool, 'query'> {
       return { rows: [] };
     }
 
+    if (normalized.startsWith('SELECT COUNT(*)::int AS total FROM public.users')) {
+      return { rows: [{ total: this.users.size }] };
+    }
+
+    if (normalized.includes('FROM public.wallets') && normalized.includes('customer_id = ANY')) {
+      return { rows: [] };
+    }
+
+    if (normalized.includes('FROM public.game_accounts') && normalized.includes('customer_id = ANY')) {
+      return { rows: [] };
+    }
+
     if (normalized.includes('FROM public.users u LEFT JOIN public.auth_user_links l') && normalized.includes('ORDER BY u.created_at DESC')) {
       const limit = Number(values[0] ?? 50);
       const offset = Number(values[1] ?? 0);
@@ -108,6 +120,13 @@ class InMemoryAppDatabase implements Pick<DatabasePool, 'query'> {
       });
       const sliced = sorted.slice(offset, offset + limit).map((u) => this.toJoinedRow(u, this.authLinks.get(u.id)));
       return { rows: sliced };
+    }
+
+    if (normalized.startsWith('DELETE FROM public.users WHERE id = $1')) {
+      const id = String(values[0] ?? '');
+      const existed = this.users.delete(id);
+      this.authLinks.delete(id);
+      return { rows: [], rowCount: existed ? 1 : 0 };
     }
 
     if (normalized.startsWith('INSERT INTO public.users')) {

@@ -32,11 +32,19 @@ import { createDepositRouter } from './routes/deposits.js';
 import { createGameAccountRouter } from './routes/gameAccounts.js';
 import { createGameCatalogRouter } from './routes/gameCatalog.js';
 import { createHealthRouter } from './routes/health.js';
+import { createNotificationRouter } from './routes/notifications.js';
+import { createOfficialPartnerRouter } from './routes/officialPartners.js';
 import { createProfileRouter } from './routes/profile.js';
 import { createReferralRouter } from './routes/referrals.js';
 import { createWalletRouter } from './routes/wallet.js';
 import { createWheelRouter } from './routes/wheel.js';
 import { createWithdrawalRouter } from './routes/withdrawals.js';
+import { NotificationRepo } from './notifications/notificationRepo.js';
+import {
+  createWebPushSender,
+  type WebPushSender,
+} from './notifications/webPushSender.js';
+import { OfficialPartnerRepo } from './officialPartners/officialPartnerRepo.js';
 import { ReferralRepo } from './referrals/referralRepo.js';
 import { WalletRepo } from './wallet/walletRepo.js';
 import { WheelRepo } from './wheel/wheelRepo.js';
@@ -53,6 +61,7 @@ export interface ApiAppDependencies {
    */
   authDatabaseOverride?: BetterAuthOptions['database'];
   emailDeliveryOverride?: EmailDeliveryAdapter;
+  webPushSenderOverride?: WebPushSender;
   wheelNowFnOverride?: () => number;
   wheelRandomUnitOverride?: () => number;
 }
@@ -64,6 +73,7 @@ export function createApiApp({
   isShuttingDown = () => false,
   authDatabaseOverride,
   emailDeliveryOverride,
+  webPushSenderOverride,
   wheelNowFnOverride,
   wheelRandomUnitOverride,
 }: ApiAppDependencies): Express {
@@ -80,12 +90,16 @@ export function createApiApp({
   const gameCatalogRepo = new GameCatalogRepo(pool);
   const gameAccountRepo = new GameAccountRepo(pool);
   const depositRepo = new DepositRepo(pool);
+  const notificationRepo = new NotificationRepo(pool);
+  const officialPartnerRepo = new OfficialPartnerRepo(pool);
   const referralRepo = new ReferralRepo(pool);
   const walletRepo = new WalletRepo(pool);
   const wheelRepo = new WheelRepo(pool);
   const withdrawalRepo = new WithdrawalRepo(pool);
   const emailDelivery =
     emailDeliveryOverride ?? createEmailDeliveryAdapter(config, logger);
+  const webPushSender =
+    webPushSenderOverride ?? createWebPushSender(config, logger);
   const authRuntime = createAuthInstance({
     config,
     logger,
@@ -195,6 +209,23 @@ export function createApiApp({
       requireAuth,
       nowFn: wheelNowFnOverride,
       randomUnitFn: wheelRandomUnitOverride,
+    }),
+  );
+  app.use(
+    '/api',
+    createOfficialPartnerRouter({
+      officialPartnerRepo,
+      requireAuth,
+    }),
+  );
+  app.use(
+    '/api',
+    createNotificationRouter({
+      config,
+      notificationRepo,
+      webPushSender,
+      requireAuth,
+      optionalAuth,
     }),
   );
 

@@ -437,42 +437,25 @@ class StorageService {
   }
 
   /**
-   * Uploads Official Partner icon to dedicated 'partner-icons' bucket.
+   * Uploads Official Partner icon to self-hosted /api/admin/official-partners/icon endpoint.
    * Enforces PNG/JPG/WebP only (no SVG) and 512 KB max size both client- and server-side.
    */
-  public async uploadPartnerIcon(
-    file: File,
-    accessToken?: string | null
-  ): Promise<StorageUploadResult> {
+  public async uploadPartnerIcon(file: File): Promise<StorageUploadResult> {
     try {
       const validation = validatePartnerIconFile(file);
       if (!validation.valid || !validation.mimeType) {
         return { success: false, error: validation.error };
       }
 
-      let token = accessToken ? accessToken.trim() : '';
-      if (!token) {
-        try {
-          const { data } = await supabase.auth.getSession();
-          token = data?.session?.access_token || '';
-        } catch {
-          token = '';
-        }
-      }
-
       const fileBase64 = await fileToBase64(file);
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      };
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
-        headers['x-supabase-token'] = token;
-      }
-
       const res = await fetch('/api/admin/official-partners/icon', {
         method: 'POST',
-        headers,
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
         body: JSON.stringify({
           fileName: file.name,
           contentType: validation.mimeType,
@@ -481,10 +464,17 @@ class StorageService {
       });
 
       const data = await res.json().catch(() => ({}));
+      const errorMessage =
+        typeof data?.error === 'string'
+          ? data.error
+          : typeof data?.error?.message === 'string'
+            ? data.error.message
+            : undefined;
+
       if (!res.ok || !data?.success || !data?.url) {
         return {
           success: false,
-          error: data?.error || `Partner icon upload failed (${res.status}).`,
+          error: errorMessage || `Partner icon upload failed (${res.status}).`,
         };
       }
 

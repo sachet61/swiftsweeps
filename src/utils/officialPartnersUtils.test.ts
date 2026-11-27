@@ -45,6 +45,11 @@ test('validatePartnerUrl enforces strict https and exact allowed hosts per platf
 test('validatePartnerIconUrl and validatePartnerIconFile reject SVG and enforce 512KB PNG/JPG/WebP', () => {
   assert.equal(validatePartnerIconUrl('').valid, true);
   assert.equal(validatePartnerIconUrl('https://cdn.example.com/icon.webp').valid, true);
+  assert.equal(validatePartnerIconUrl('/api/official-partners/icons/vip_123.png').valid, true);
+  assert.equal(validatePartnerIconUrl('/api/official-partners/icons/vip-123.webp').valid, true);
+  assert.equal(validatePartnerIconUrl('/api/official-partners/icons/../secret.png').valid, false);
+  assert.equal(validatePartnerIconUrl('/api/official-partners/icons/icon.svg').valid, false);
+  assert.equal(validatePartnerIconUrl('/api/official-partners/icons/icon.png?x=1').valid, false);
   assert.equal(validatePartnerIconUrl('http://cdn.example.com/icon.png').valid, false);
   assert.equal(validatePartnerIconUrl('https://cdn.example.com/icon.svg').valid, false);
   assert.equal(validatePartnerIconUrl('javascript:alert(1)').valid, false);

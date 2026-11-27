@@ -1,7 +1,6 @@
 // Client Web Push & Service Worker Registration Manager
 import { UserProfile } from '../types';
 import { selfHostedAuthService } from './selfHostedAuthService';
-import { supabaseTokenManager } from './supabaseTokenManager';
 import { executeSendTestAlertFlow } from '../utils/webPushTestUtils';
 
 const LAST_ENDPOINT_STORAGE_KEY = 'swiftsweeps_push_endpoint';
@@ -55,24 +54,24 @@ class WebPushClient {
     } catch {}
   }
 
-  private async buildPushAuthHeaders(
-    explicitUser?: Pick<UserProfile, 'id' | 'role'> | null
-  ): Promise<Record<string, string>> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    const authUser = selfHostedAuthService.getCurrentUser();
-    const uid = explicitUser?.id || authUser?.id;
-    const role = explicitUser?.role || authUser?.role;
-    if (uid) headers['x-user-id'] = uid;
-    if (role) headers['x-user-role'] = role;
+  private async buildPushAuthHeaders(): Promise<Record<string, string>> {
+    return {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+  }
 
-    try {
-      const { token } = await supabaseTokenManager.getAccessToken();
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-        headers['x-supabase-token'] = token;
-      }
-    } catch {}
-    return headers;
+  private extractPushApiError(payload: any, fallback: string): string {
+    if (typeof payload?.error === 'string' && payload.error.trim()) {
+      return payload.error.trim();
+    }
+    if (typeof payload?.error?.message === 'string' && payload.error.message.trim()) {
+      return payload.error.message.trim();
+    }
+    if (typeof payload?.message === 'string' && payload.message.trim()) {
+      return payload.message.trim();
+    }
+    return fallback;
   }
 
   public getDevicePlatform(): DevicePlatform {
@@ -258,15 +257,20 @@ class WebPushClient {
       }
 
       // 3. Fetch VAPID public key from backend (bypass caches to avoid stale error responses)
-      const res = await fetch('/api/push/vapid-public-key', { cache: 'no-store' });
+      const res = await fetch('/api/push/vapid-public-key', {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
       const keyData = await res.json().catch(() => ({}));
       if (!res.ok) {
         this.isSubscribing = false;
         return {
           success: false,
-          error:
-            keyData?.error ||
+          error: this.extractPushApiError(
+            keyData,
             `Failed to retrieve push encryption credentials (HTTP ${res.status}).`,
+          ),
         };
       }
       const { publicKey } = keyData || {};
@@ -327,16 +331,16 @@ class WebPushClient {
       }
       this.setCachedEndpoint(normalizedSubscription.endpoint);
 
-      // 6. Send subscription to backend API with verified auth headers
-      const authHeaders = await this.buildPushAuthHeaders(currentUser);
+      // 6. Send subscription to backend API using authenticated same-origin cookie session
+      const authHeaders = await this.buildPushAuthHeaders();
       const subResponse = await fetch('/api/push/subscribe', {
         method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
         headers: authHeaders,
         body: JSON.stringify({
           subscription: normalizedSubscription,
           userId: currentUser.id,
-          userRole: currentUser.role,
-          userEmail: currentUser.email,
           platform: this.getDevicePlatform(),
           browser: this.getBrowserName(),
         }),
@@ -352,9 +356,10 @@ class WebPushClient {
       this.isSubscribing = false;
       return {
         success: false,
-        error:
-          subData?.error ||
+        error: this.extractPushApiError(
+          subData,
           `Failed to register push subscription with server (HTTP ${subResponse.status}).`,
+        ),
       };
     } catch (err: any) {
       this.isSubscribing = false;
@@ -378,7 +383,11 @@ class WebPushClient {
       // silently establish a fresh PushSubscription for the newly logged-in user.
       if (!sub) {
         try {
-          const vapidRes = await fetch('/api/push/vapid-public-key', { cache: 'no-store' });
+          const vapidRes = await fetch('/api/push/vapid-public-key', {
+            credentials: 'include',
+            cache: 'no-store',
+            headers: { Accept: 'application/json' },
+          });
           if (vapidRes.ok) {
             const { publicKey } = await vapidRes.json();
             if (publicKey) {
@@ -402,15 +411,15 @@ class WebPushClient {
         return true;
       }
 
-      const authHeaders = await this.buildPushAuthHeaders(currentUser);
+      const authHeaders = await this.buildPushAuthHeaders();
       const res = await fetch('/api/push/subscribe', {
         method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
         headers: authHeaders,
         body: JSON.stringify({
           subscription: normalized,
           userId: currentUser.id,
-          userRole: currentUser.role,
-          userEmail: currentUser.email,
           platform: this.getDevicePlatform(),
           browser: this.getBrowserName(),
         }),
@@ -431,7 +440,7 @@ class WebPushClient {
     const cachedEndpoint = this.getCachedEndpoint();
     this.setCachedEndpoint(null);
 
-    const authHeaders = await this.buildPushAuthHeaders(prevUser);
+    const authHeaders = await this.buildPushAuthHeaders();
 
     let liveEndpoint = cachedEndpoint;
     let activeSub: PushSubscription | null = null;
@@ -451,7 +460,9 @@ class WebPushClient {
       try {
         await fetch('/api/push/unsubscribe', {
           method: 'POST',
+          credentials: 'include',
           keepalive: true,
+          cache: 'no-store',
           headers: authHeaders,
           body: JSON.stringify({
             endpoint: liveEndpoint || undefined,
@@ -490,6 +501,8 @@ class WebPushClient {
       const authHeaders = await this.buildPushAuthHeaders();
       await fetch('/api/push/notify', {
         method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
         headers: authHeaders,
         body: JSON.stringify({
           recipientId: params.recipientId,
@@ -554,7 +567,7 @@ class WebPushClient {
         },
         getRegistration: () => this.getRegistration(),
         formatSubscription: (sub) => this.formatSubscriptionPayload(sub),
-        buildAuthHeaders: () => this.buildPushAuthHeaders(currentUser),
+        buildAuthHeaders: () => this.buildPushAuthHeaders(),
         fetchFn: (input, init) => fetch(input, init),
         urlBase64ToUint8Array: (b64) => urlBase64ToUint8Array(b64),
         onEndpointCached: (endpoint) => this.setCachedEndpoint(endpoint),

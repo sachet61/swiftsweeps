@@ -147,6 +147,9 @@ export function validatePartnerUrl(
   };
 }
 
+export const SAFE_RELATIVE_PARTNER_ICON_PATH_REGEX =
+  /^\/api\/official-partners\/icons\/[a-zA-Z0-9_-]+\.(png|jpg|webp)$/;
+
 export function validatePartnerIconUrl(rawUrl: unknown): PartnerUrlValidationResult {
   const trimmed = typeof rawUrl === 'string' ? rawUrl.trim() : '';
   if (!trimmed) {
@@ -155,6 +158,13 @@ export function validatePartnerIconUrl(rawUrl: unknown): PartnerUrlValidationRes
 
   if (/\s/.test(trimmed)) {
     return { valid: false, normalizedUrl: null, error: 'Icon URL cannot contain spaces.' };
+  }
+
+  if (SAFE_RELATIVE_PARTNER_ICON_PATH_REGEX.test(trimmed)) {
+    return {
+      valid: true,
+      normalizedUrl: trimmed,
+    };
   }
 
   if (/^(javascript|data|vbscript|file):/i.test(trimmed)) {

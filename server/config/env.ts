@@ -45,6 +45,9 @@ export interface ServerConfig {
   smtpPass?: string;
   emailFromAddress?: string;
   emailFromName: string;
+  vapidPublicKey?: string;
+  vapidPrivateKey?: string;
+  vapidSubject?: string;
 }
 
 export class ConfigValidationError extends Error {
@@ -529,6 +532,38 @@ export function loadServerConfig(
     }
   }
 
+  const vapidPublicKey = envSource.VAPID_PUBLIC_KEY?.trim() || undefined;
+  const vapidPrivateKey = envSource.VAPID_PRIVATE_KEY?.trim() || undefined;
+  const rawVapidSubject = envSource.VAPID_SUBJECT?.trim() || undefined;
+
+  if (Boolean(vapidPublicKey) !== Boolean(vapidPrivateKey)) {
+    issues.push(
+      'VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must both be set when configuring Web Push',
+    );
+  }
+  if (vapidPublicKey && /\s/.test(vapidPublicKey)) {
+    issues.push('VAPID_PUBLIC_KEY must not contain whitespace');
+  }
+  if (vapidPrivateKey && /\s/.test(vapidPrivateKey)) {
+    issues.push('VAPID_PRIVATE_KEY must not contain whitespace');
+  }
+  if (rawVapidSubject) {
+    if (
+      /\s/.test(rawVapidSubject) ||
+      (!rawVapidSubject.startsWith('mailto:') &&
+        !rawVapidSubject.startsWith('https://'))
+    ) {
+      issues.push(
+        'VAPID_SUBJECT must start with mailto: or https:// and contain no whitespace',
+      );
+    }
+  }
+  const vapidSubject =
+    rawVapidSubject ??
+    (vapidPublicKey && vapidPrivateKey
+      ? 'mailto:support@swiftsweeps.com'
+      : undefined);
+
   if (issues.length > 0) {
     throw new ConfigValidationError(issues);
   }
@@ -569,5 +604,8 @@ export function loadServerConfig(
     smtpPass,
     emailFromAddress,
     emailFromName,
+    vapidPublicKey,
+    vapidPrivateKey,
+    vapidSubject,
   };
 }
