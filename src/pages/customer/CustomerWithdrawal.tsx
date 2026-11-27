@@ -478,7 +478,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
                       ? 'Confirm'
                       : isSubmitting
                       ? 'Initiating Support Cashout...'
-                      : `Request Cashout ($${parsedAmount.toFixed(2)}) & Open Support Chat`}
+                      : 'Cashout'}
                   </span>
                 </>
               )}
