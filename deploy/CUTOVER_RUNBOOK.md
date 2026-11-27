@@ -15,14 +15,14 @@ All 10 items below must be verified on an isolated staging VPS matching producti
 |---|---|---|---|
 | 1 | Nginx serves `dist/` SPA and proxies `/api/` & `/webhooks/` | `curl` SPA routes, missing `/assets/*`, `/.env`, `/api/healthz`, `/api/chat/stream`, `/webhooks/test` | SPA routes return `200` `index.html`; missing `/assets/*` & `/.env` return `404`; `/api/*` & `/webhooks/*` proxy to `127.0.0.1:4000` (never fall back to `index.html`) |
 | 2 | HTTPS & `Secure` cookie behavior | Inspect `Set-Cookie` on `POST /api/auth/sign-in/email` over `https://<staging-domain>` (`NODE_ENV=production`) and verify HTTP -> HTTPS `301` | Cookie includes `HttpOnly; Secure; SameSite=Lax`; cross-origin `POST` returns `403 ORIGIN_FORBIDDEN`; plain HTTP returns `301` |
-| 3 | API process restart & graceful shutdown (no separate worker required) | `kill -KILL` PID to test `systemd` `Restart=on-failure`, then `systemctl stop swiftsweeps-api` (`SIGTERM`) | `systemd` restarts failed API within 5s; `SIGTERM` marks `/api/readyz` `503`, drains HTTP, closes PG pool, and exits `0` within `TimeoutStopSec=15` |
+| 3 | API process restart & graceful shutdown (no separate worker required) | `kill -KILL` PID to test `systemd` `Restart=on-failure`, then `systemctl stop myapp-api` (`SIGTERM`) | `systemd` restarts failed API within 5s; `SIGTERM` marks `/api/readyz` `503`, drains HTTP, closes PG pool, and exits `0` within `TimeoutStopSec=15` |
 | 4 | Private PostgreSQL & least-privilege runtime role | `ss -tlnp \| grep 5432`, external port scan on `5432`/`4000`, and `psql` DDL attempt as `swiftsweeps_app` | PG listens on `127.0.0.1`/private IP only; external `5432`/`4000` blocked; `CREATE TABLE` as `swiftsweeps_app` fails with permission denied |
 | 5 | End-to-end login, session, logout & password recovery | Register -> verify OTP email -> sign in -> reload `/api/auth/me` -> sign out -> forgot-password OTP -> reset password (incl. `password_reset_required=true` account) | All flows succeed over HTTPS; old sessions revoke on password reset; unverified users cannot bypass `email_verified` gate |
 | 6 | Feature-parity & negative authorization tests across all domains | Run `npm run test:server` + staging smoke checks across profile, catalog, wallet, deposits, withdrawals, game accounts, wheel, referrals, chat/SSE, partners, storage, notifications, appConfig, auditLogs, adminUsers | `100%` pass (`401` anon, `403` wrong-owner/non-admin, `400`/`409` invalid/duplicate financial transitions) |
 | 7 | Inbound webhooks signature & duplicate-event checks | Repository audit (`server/`, `api/`) | **N/A** at initial cutover (zero inbound `/webhooks/*` endpoints exist; Nginx `/webhooks/` block returns Express `404`) |
 | 8 | Data import counts, FKs, unique constraints, timestamps & money proofs | Run `npm run db:data:preflight`, `export`, `import`, `validate` against staging Supabase -> staging Postgres | `passed: true`, `readyForHumanReview: true`, `discrepancies: []`, `financialReconciliation.matched: true` |
 | 9 | Backup & restore verification in separate DB | Run `pg_dump -Fc`, restore into throwaway `swiftsweeps_restore_verify`, verify counts/money totals, then drop throwaway DB | Restore completes with zero errors and matching row/ledger totals |
-| 10 | Logs, monitoring, disk, memory & PG connection observability | Inspect `journalctl -u swiftsweeps-api`, `df -h`, `free -m`, `pg_stat_activity` under staging load | JSON logs show redacted metadata only; bounded disk/memory; active PG connections stay within `PG_POOL_MAX` |
+| 10 | Logs, monitoring, disk, memory & PG connection observability | Inspect `journalctl -u myapp-api`, `df -h`, `free -m`, `pg_stat_activity` under staging load | JSON logs show redacted metadata only; bounded disk/memory; active PG connections stay within `PG_POOL_MAX` |
 
 ---
 
@@ -32,8 +32,8 @@ Because Supabase PostgreSQL and self-hosted PostgreSQL must never perform uncoor
 
 1. **T-24h Notice**: Announce scheduled maintenance window to players and desk operators (recommended low-traffic window, 30–60 minutes budgeted).
 2. **T-15m Pre-Freeze Preparation**:
-   - Confirm staging dry-run report, target VPS hardware/disk capacity, TLS cert readiness, and production `/etc/swiftsweeps/api.env` (`NODE_ENV=production`, fresh `AUTH_SECRET`, live `EMAIL_PROVIDER` credentials, `swiftsweeps_app` DB URI).
-   - Keep `swiftsweeps-api.service` **stopped** (or not yet receiving public traffic).
+   - Confirm staging dry-run report, target VPS hardware/disk capacity, TLS cert readiness, and production `/var/www/myapp/.env` (`NODE_ENV=production`, `APP_ORIGIN=https://swiftsweeps.net`, fresh `AUTH_SECRET`, live `EMAIL_PROVIDER` credentials, `swiftsweeps_app` DB URI).
+   - Keep `myapp-api.service` **stopped** (or not yet receiving public traffic).
 3. **T-0 Enter Maintenance / Write-Freeze Mode (Human Checkpoint 1)**:
    - Place the active Vercel/Supabase entry behind a static maintenance response (or disable mutating operations/logins cleanly) so **zero** new deposits, withdrawals, game transfers, spins, referrals, signups, or admin approvals can modify Supabase.
    - Verify no active transactions remain open in Supabase (`SELECT pid, state, query_start FROM pg_stat_activity WHERE state <> 'idle' AND datname = current_database();`).
@@ -86,13 +86,13 @@ Each step requires verifying the **Expected Result** before advancing. If any **
 ### Step 4 — Start Self-Hosted API & Validate Loopback Before DNS Flip (Human Checkpoint 5)
 - **Action**:
   ```bash
-  sudo systemctl start swiftsweeps-api
-  sudo systemctl status swiftsweeps-api --no-pager
+  sudo systemctl start myapp-api
+  sudo systemctl status myapp-api --no-pager
   curl -fsS http://127.0.0.1:4000/api/healthz
   curl -fsS http://127.0.0.1:4000/api/readyz
   sudo nginx -t && sudo systemctl reload nginx
   ```
-- **Expected Result**: `swiftsweeps-api` active; `/api/healthz` returns `{"status":"ok"}`; `/api/readyz` returns `{"status":"ready"}`; `journalctl -u swiftsweeps-api` shows zero fatal/config errors; port `4000` & `5432` remain unreachable externally.
+- **Expected Result**: `myapp-api` active; `/api/healthz` returns `{"status":"ok"}`; `/api/readyz` returns `{"status":"ready"}`; `journalctl -u myapp-api` shows zero fatal/config errors; port `4000` & `5432` remain unreachable externally.
 - **Abort Condition**: Service crash loop, `/api/readyz` returning `503`, or unexpected public listening socket.
 
 ### Step 5 — DNS Cutover & Post-Cutover Live Smoke Verification (Human Checkpoint 6)
@@ -104,7 +104,7 @@ Each step requires verifying the **Expected Result** before advancing. If any **
 - **Abort Condition**: 5xx spike, TLS failure, broken email OTP/reset delivery, broken cookie persistence, or data discrepancy.
 
 ### Step 6 — Post-Cutover Observation & Legacy Decommissioning Policy
-- **Action**: Monitor `journalctl -u swiftsweeps-api`, Nginx access/error logs, and `pg_stat_activity` for **at least 48–72 hours** of clean live operation.
+- **Action**: Monitor `journalctl -u myapp-api`, Nginx access/error logs, and `pg_stat_activity` for **at least 48–72 hours** of clean live operation.
 - **Retention**: **Do NOT delete Supabase data, Vercel projects, `api/`, `supabase/`, or `vercel.json`** until explicit human approval is granted after the observation window closes.
 - **Cleanup**: Once approved, securely shred `/var/backups/swiftsweeps/prod-snapshot` (which contains exported `game_accounts` credentials).
 
@@ -115,13 +115,13 @@ Each step requires verifying the **Expected Result** before advancing. If any **
 ### Case A — Abort BEFORE DNS Cutover or BEFORE Accepting New Writes
 *(Lossless)*
 1. Keep DNS pointed to the prior Vercel deployment (or revert DNS immediately if zero post-cutover writes occurred).
-2. Stop `swiftsweeps-api.service` (`sudo systemctl stop swiftsweeps-api`).
+2. Stop `myapp-api.service` (`sudo systemctl stop myapp-api`).
 3. Leave Supabase PostgreSQL untouched (it remained frozen since Step 2). Lift the Vercel/Supabase maintenance freeze so traffic resumes on the legacy stack cleanly.
 4. Restore target PostgreSQL from `pg-pre-cutover-*.dump` before retrying any future cutover attempt.
 
 ### Case B — Rollback AFTER the New System Has Accepted Live Writes
 *(**NOT automatically lossless** — requires mandatory delta reconciliation)*
-1. **Immediately Freeze New Writes**: Put Nginx into maintenance/503 mode for mutating `/api/` routes (or stop `swiftsweeps-api.service` after capturing the exact abort timestamp `T_ABORT`) so neither system mutates financial state simultaneously.
+1. **Immediately Freeze New Writes**: Put Nginx into maintenance/503 mode for mutating `/api/` routes (or stop `myapp-api.service` after capturing the exact abort timestamp `T_ABORT`) so neither system mutates financial state simultaneously.
 2. **Revert Traffic**: Switch DNS back to the legacy Vercel/Supabase endpoint **only in maintenance/read-only mode** until Section 5 reconciliation finishes—or keep maintenance banner up if active wallet/deposit/withdrawal mutations occurred on the new system.
 3. **Preserve Evidence**: Take an immediate snapshot of the new PostgreSQL database **before** resetting or wiping anything:
    ```bash

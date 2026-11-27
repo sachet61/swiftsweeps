@@ -7,7 +7,7 @@
 -- Separation of duties:
 -- 1. `swiftsweeps_migrator`: Owns the database and schema; used ONLY during
 --    maintenance runs of `npm run db:migrate:up` and `npm run auth:migrate:up`.
--- 2. `swiftsweeps_app`: Runtime role used by `swiftsweeps-api.service`. Has DML
+-- 2. `swiftsweeps_app`: Runtime role used by `myapp-api.service`. Has DML
 --    access only (SELECT, INSERT, UPDATE, DELETE) — NO DDL, NO SUPERUSER,
 --    NO CREATEDB, NO CREATEROLE.
 -- 3. `swiftsweeps_backup`: Read-only role for automated `pg_dump` backups.

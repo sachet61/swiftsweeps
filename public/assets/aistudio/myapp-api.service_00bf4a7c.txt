@@ -1,0 +1,14 @@
+[Unit]
+Description=Swift Sweeps API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=serveradmin
+WorkingDirectory=/var/www/myapp
+ExecStart=/home/serveradmin/.nvm/versions/node/v24.22.3/bin/node --env-file=/var/www/myapp/.env /var/www/myapp/dist-server/index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

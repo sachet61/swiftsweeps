@@ -1,0 +1,75 @@
+server {
+
+    server_name swiftsweeps.net www.swiftsweeps.net;
+
+    root /var/www/myapp/dist;
+    index index.html;
+
+    client_max_body_size 10m;
+
+    # Node.js API
+    location /api/ {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    # Webhooks, if used by the application
+    location /webhooks/ {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    # Do not serve hidden files
+    location ~ /\.(?!well-known).* {
+        deny all;
+    }
+
+    # React/Vite frontend and client-side routes
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    listen [::]:443 ssl ipv6only=on; # managed by Certbot
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/swiftsweeps.net/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/swiftsweeps.net/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+
+}
+server {
+    if ($host = www.swiftsweeps.net) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    if ($host = swiftsweeps.net) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen 80 default_server;
+    listen [::]:80 default_server;
+
+    server_name swiftsweeps.net www.swiftsweeps.net;
+    return 404; # managed by Certbot
+
+
+
+
+}

@@ -1,0 +1,60 @@
+# ==============================================================================
+# SwiftSweeps API Systemd Service Unit (`myapp-api.service`)
+# ==============================================================================
+# Architecture note:
+# - Runs a SINGLE persistent Node.js API process (`dist-server/index.js`).
+# - Do NOT run multiple clustered workers unless SSE event brokers (`ChatEventBroker`
+#   and `RealtimeEventBroker`) are backed by a shared external pub/sub broker.
+# - No separate background worker unit is required by the current codebase.
+# - Keep `/var/www/myapp/.env` owned by `serveradmin:serveradmin` (`chmod 0600`)
+#   and outside `/var/www/myapp/dist` so Nginx never serves runtime secrets.
+#
+# Install path on VPS: /etc/systemd/system/myapp-api.service
+# ==============================================================================
+
+[Unit]
+Description=Swift Sweeps API
+Documentation=file:///var/www/myapp/deploy/VPS_DEPLOYMENT_RUNBOOK.md
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=serveradmin
+Group=serveradmin
+WorkingDirectory=/var/www/myapp
+
+# Compiled TypeScript entrypoint (`npm run build` -> dist-server/index.js)
+ExecStart=/home/serveradmin/.nvm/versions/node/v24.22.3/bin/node --env-file=/var/www/myapp/.env /var/www/myapp/dist-server/index.js
+
+# Graceful shutdown matching SHUTDOWN_TIMEOUT_MS=10000 in server/config/env.ts
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Structured JSON logs go to systemd journald (secrets redacted by server/logging/logger.ts)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=myapp-api
+
+# Sandboxing compatible with NVM binary under /home/serveradmin/.nvm and /var/www/myapp/.env
+# (Do NOT enable ProtectHome=yes while ExecStart points inside /home/serveradmin/.nvm)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
