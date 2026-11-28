@@ -1,6 +1,7 @@
 import {createRoot} from 'react-dom/client';
 import './services/pwaInstallService';
 import App from './App.tsx';
+import { AppErrorBoundary } from './components/common/AppErrorBoundary';
 import { PWAInstallModalHost } from './components/common/PWAInstallModal';
 import './index.css';
 
@@ -18,8 +19,8 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
 }
 
 createRoot(document.getElementById('root')!).render(
-  <>
+  <AppErrorBoundary>
     <App />
     <PWAInstallModalHost />
-  </>
+  </AppErrorBoundary>
 );

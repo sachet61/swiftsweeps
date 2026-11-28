@@ -1,3 +1,8 @@
+import {
+  extractTelegramApiError,
+  parseSuppressionWindowInput,
+} from './telegramServiceUtils';
+
 export interface TelegramStatus {
   running: boolean;
   botUsername?: string;
@@ -10,7 +15,7 @@ export interface TelegramStatus {
   suppressionWindowMinutes?: number;
 }
 
-class TelegramService {
+export class TelegramService {
   public async getStatus(): Promise<TelegramStatus> {
     try {
       const resp = await fetch('/api/telegram/status', {
@@ -24,14 +29,24 @@ class TelegramService {
       } catch {
         data = null;
       }
-      if (resp.ok && data) {
-        return data;
+      if (resp.ok && data && typeof data === 'object') {
+        const sanitized: TelegramStatus = { ...data };
+        if (sanitized.lastError !== undefined) {
+          sanitized.lastError = extractTelegramApiError(
+            { lastError: sanitized.lastError },
+            'Telegram status reported an error.',
+          );
+        }
+        return sanitized;
       }
-      if (data && (data.error || data.message || data.lastError)) {
+      if (data) {
         return {
           running: false,
           updatesReceived: 0,
-          lastError: data.lastError || data.error || data.message,
+          lastError: extractTelegramApiError(
+            data,
+            `Telegram status unavailable (${resp.status})`,
+          ),
         };
       }
       return {
@@ -67,16 +82,25 @@ class TelegramService {
         cache: 'no-store',
       });
       const data = await resp.json().catch(() => ({}));
-      if (resp.ok) {
+      if (resp.ok && data && typeof data === 'object') {
         return data;
       }
       return {
         success: false,
-        error: data?.error || data?.message || `Failed to load config (${resp.status})`,
+        error: extractTelegramApiError(
+          data,
+          `Failed to load config (${resp.status})`,
+        ),
       };
     } catch (e: any) {
       console.warn('[TelegramService] getConfig error:', e);
-      return { success: false, error: e?.message || 'Unable to load Telegram config' };
+      return {
+        success: false,
+        error:
+          typeof e?.message === 'string' && e.message.trim()
+            ? e.message
+            : 'Unable to load Telegram config',
+      };
     }
   }
 
@@ -84,7 +108,7 @@ class TelegramService {
     botToken: string,
     channelId: string,
     enabled: boolean = true,
-    suppressionWindowMinutes?: number
+    suppressionWindowMinutes?: number,
   ): Promise<{ success: boolean; status?: TelegramStatus; config?: any; error?: string }> {
     const cleanToken = botToken.trim();
     const cleanChatId = channelId.trim();
@@ -97,12 +121,12 @@ class TelegramService {
       if (cleanToken) {
         payload.botToken = cleanToken;
       }
-      if (
-        typeof suppressionWindowMinutes === 'number' &&
-        Number.isInteger(suppressionWindowMinutes) &&
-        suppressionWindowMinutes >= 0
-      ) {
-        payload.suppressionWindowMinutes = suppressionWindowMinutes;
+      if (suppressionWindowMinutes !== undefined) {
+        const parsedWindow = parseSuppressionWindowInput(suppressionWindowMinutes);
+        if (!parsedWindow.valid) {
+          return { success: false, error: parsedWindow.error };
+        }
+        payload.suppressionWindowMinutes = parsedWindow.value;
       }
 
       const resp = await fetch('/api/telegram/config', {
@@ -115,24 +139,39 @@ class TelegramService {
       const text = await resp.text();
       let data: any = {};
       try {
-        data = JSON.parse(text);
+        data = text ? JSON.parse(text) : {};
       } catch {
-        data = { success: false, error: 'Server returned non-JSON response. Please verify server connection.' };
+        data = {
+          success: false,
+          error: 'Server returned non-JSON response. Please verify server connection.',
+        };
       }
 
-      if (resp.ok && data.success) {
+      if (resp.ok && data?.success) {
         return { success: true, status: data.status, config: data.config };
       }
-      return { success: false, error: data.error || data.message || `Failed to update configuration (${resp.status})` };
+      return {
+        success: false,
+        error: extractTelegramApiError(
+          data,
+          `Failed to update configuration (${resp.status})`,
+        ),
+      };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Error updating Telegram configuration.' };
+      return {
+        success: false,
+        error:
+          typeof err?.message === 'string' && err.message.trim()
+            ? err.message
+            : 'Error updating Telegram configuration.',
+      };
     }
   }
 
   public async testConnection(
     botToken: string,
     channelId: string,
-    allowStoredToken: boolean = false
+    allowStoredToken: boolean = false,
   ): Promise<{ success: boolean; message: string; suggestedChannelId?: string }> {
     const cleanToken = botToken.trim();
     const cleanChatId = channelId.trim();
@@ -162,23 +201,38 @@ class TelegramService {
       try {
         data = text ? JSON.parse(text) : {};
       } catch {
-        return { success: false, message: 'Server returned an invalid response during Telegram test.' };
+        return {
+          success: false,
+          message: 'Server returned an invalid response during Telegram test.',
+        };
       }
 
       if (resp.ok && typeof data.success === 'boolean') {
         return {
           success: data.success,
-          message: data.message || (data.success ? 'Telegram test succeeded.' : 'Telegram test failed.'),
+          message: extractTelegramApiError(
+            data,
+            data.success ? 'Telegram test succeeded.' : 'Telegram test failed.',
+          ),
           ...(data.suggestedChannelId ? { suggestedChannelId: data.suggestedChannelId } : {}),
         };
       }
 
       return {
         success: false,
-        message: data.error || data.message || `Telegram connection test failed (${resp.status}).`,
+        message: extractTelegramApiError(
+          data,
+          `Telegram connection test failed (${resp.status}).`,
+        ),
       };
     } catch (err: any) {
-      return { success: false, message: err?.message || 'Unable to reach Telegram test endpoint.' };
+      return {
+        success: false,
+        message:
+          typeof err?.message === 'string' && err.message.trim()
+            ? err.message
+            : 'Unable to reach Telegram test endpoint.',
+      };
     }
   }
 
@@ -202,18 +256,34 @@ class TelegramService {
       });
       const text = await resp.text();
       try {
-        return JSON.parse(text);
+        const data = text ? JSON.parse(text) : {};
+        if (!resp.ok || data?.success === false) {
+          return {
+            success: false,
+            message: extractTelegramApiError(
+              data,
+              `Telegram notification failed (${resp.status})`,
+            ),
+          };
+        }
+        return data;
       } catch {
         return { success: false, message: 'Server response not JSON' };
       }
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return {
+        success: false,
+        message:
+          typeof err?.message === 'string' && err.message.trim()
+            ? err.message
+            : 'Telegram notification failed.',
+      };
     }
   }
 
   public async notifyCustomerMessage(
     customerName: string,
-    conversationId?: string
+    conversationId?: string,
   ): Promise<{ success: boolean; message?: string; suppressed?: boolean; debounced?: boolean }> {
     try {
       const resp = await fetch('/api/telegram/notify-message', {
@@ -223,9 +293,24 @@ class TelegramService {
         body: JSON.stringify({ customerName, conversationId }),
       });
       const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data?.success === false) {
+        return {
+          success: false,
+          message: extractTelegramApiError(
+            data,
+            `Telegram message alert failed (${resp.status})`,
+          ),
+        };
+      }
       return data;
     } catch (err: any) {
-      return { success: false, message: err.message };
+      return {
+        success: false,
+        message:
+          typeof err?.message === 'string' && err.message.trim()
+            ? err.message
+            : 'Telegram message alert failed.',
+      };
     }
   }
 }

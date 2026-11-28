@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { telegramService, TelegramStatus } from '../../services/telegramService';
 import {
+  coerceSafeFeedbackText,
+  parseSuppressionWindowInput,
+} from '../../services/telegramServiceUtils';
+import {
   Send,
   CheckCircle2,
   AlertCircle,
@@ -23,7 +27,7 @@ export const TelegramBotConfigCard: React.FC = () => {
   const [botToken, setBotToken] = useState('');
   const [channelId, setChannelId] = useState('');
   const [isEnabled, setIsEnabled] = useState(true);
-  const [suppressionWindowMinutes, setSuppressionWindowMinutes] = useState<number>(5);
+  const [suppressionWindowInput, setSuppressionWindowInput] = useState<string>('5');
   const [showToken, setShowToken] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
 
@@ -52,21 +56,26 @@ export const TelegramBotConfigCard: React.FC = () => {
         ]);
         if (!isMounted) return;
         setStatus(s);
-        if (cfg) {
+        if (cfg && cfg.success !== false) {
           if (cfg.botToken) setBotToken(cfg.botToken);
           if (cfg.channelId) setChannelId(cfg.channelId);
           if (cfg.enabled !== undefined) setIsEnabled(cfg.enabled);
           if (typeof cfg.suppressionWindowMinutes === 'number') {
-            setSuppressionWindowMinutes(cfg.suppressionWindowMinutes);
+            setSuppressionWindowInput(String(cfg.suppressionWindowMinutes));
           } else if (typeof s?.suppressionWindowMinutes === 'number') {
-            setSuppressionWindowMinutes(s.suppressionWindowMinutes);
+            setSuppressionWindowInput(String(s.suppressionWindowMinutes));
           }
           if (cfg.updatedAt) setLastSavedTime(cfg.updatedAt);
         } else if (s.channelId) {
           setChannelId(s.channelId);
           if (typeof s.suppressionWindowMinutes === 'number') {
-            setSuppressionWindowMinutes(s.suppressionWindowMinutes);
+            setSuppressionWindowInput(String(s.suppressionWindowMinutes));
           }
+        } else if (cfg?.error) {
+          setFeedback({
+            type: 'error',
+            text: coerceSafeFeedbackText(cfg.error, 'Unable to load Telegram configuration.'),
+          });
         }
       } catch (err) {
         console.warn('Error loading Telegram configuration:', err);
@@ -90,18 +99,26 @@ export const TelegramBotConfigCard: React.FC = () => {
         telegramService.getConfig(),
       ]);
       setStatus(s);
-      if (cfg) {
+      if (cfg && cfg.success !== false) {
         if (cfg.botToken && !botToken) setBotToken(cfg.botToken);
         if (cfg.channelId && !channelId) setChannelId(cfg.channelId);
         if (cfg.enabled !== undefined) setIsEnabled(cfg.enabled);
         if (typeof cfg.suppressionWindowMinutes === 'number') {
-          setSuppressionWindowMinutes(cfg.suppressionWindowMinutes);
+          setSuppressionWindowInput(String(cfg.suppressionWindowMinutes));
         } else if (typeof s?.suppressionWindowMinutes === 'number') {
-          setSuppressionWindowMinutes(s.suppressionWindowMinutes);
+          setSuppressionWindowInput(String(s.suppressionWindowMinutes));
         }
         if (cfg.updatedAt) setLastSavedTime(cfg.updatedAt);
       } else if (s.channelId && !channelId) {
         setChannelId(s.channelId);
+        if (typeof s.suppressionWindowMinutes === 'number') {
+          setSuppressionWindowInput(String(s.suppressionWindowMinutes));
+        }
+      } else if (cfg?.error) {
+        setFeedback({
+          type: 'error',
+          text: coerceSafeFeedbackText(cfg.error, 'Unable to reload Telegram configuration.'),
+        });
       }
     } catch (err) {
       console.warn('Error reloading Telegram configuration:', err);
@@ -134,11 +151,13 @@ export const TelegramBotConfigCard: React.FC = () => {
       return;
     }
 
-    const cleanSuppressionMinutes = Math.max(
-      0,
-      Math.min(1440, Math.floor(Number(suppressionWindowMinutes) || 0)),
-    );
-    setSuppressionWindowMinutes(cleanSuppressionMinutes);
+    const parsedWindow = parseSuppressionWindowInput(suppressionWindowInput);
+    if (!parsedWindow.valid) {
+      setFeedback({ type: 'error', text: parsedWindow.error });
+      return;
+    }
+    const cleanSuppressionMinutes = parsedWindow.value;
+    setSuppressionWindowInput(String(cleanSuppressionMinutes));
 
     setIsSaving(true);
     setFeedback({ type: 'info', text: 'Saving Telegram alert settings...' });
@@ -151,11 +170,18 @@ export const TelegramBotConfigCard: React.FC = () => {
         cleanSuppressionMinutes,
       );
       if (res.success) {
-        setStatus(res.status || null);
+        if (res.status) {
+          setStatus((prev) => ({
+            ...(prev?.botUsername && !effectiveToken
+              ? { botUsername: prev.botUsername }
+              : {}),
+            ...res.status!,
+          }));
+        }
         if (res.config) {
           if (res.config.channelId) setChannelId(res.config.channelId);
           if (typeof res.config.suppressionWindowMinutes === 'number') {
-            setSuppressionWindowMinutes(res.config.suppressionWindowMinutes);
+            setSuppressionWindowInput(String(res.config.suppressionWindowMinutes));
           }
           if (res.config.updatedAt) setLastSavedTime(res.config.updatedAt);
           if (!res.config.botToken) setBotToken('');
@@ -165,10 +191,22 @@ export const TelegramBotConfigCard: React.FC = () => {
           text: 'Telegram alert settings saved!',
         });
       } else {
-        setFeedback({ type: 'error', text: res.error || 'Failed to update Telegram Bot configuration.' });
+        setFeedback({
+          type: 'error',
+          text: coerceSafeFeedbackText(
+            res.error,
+            'Failed to update Telegram Bot configuration.',
+          ),
+        });
       }
     } catch (err: any) {
-      setFeedback({ type: 'error', text: err.message || 'Error updating configuration.' });
+      setFeedback({
+        type: 'error',
+        text: coerceSafeFeedbackText(
+          err?.message,
+          'Error updating configuration.',
+        ),
+      });
     } finally {
       setIsSaving(false);
     }
@@ -200,23 +238,34 @@ export const TelegramBotConfigCard: React.FC = () => {
         if (res.suggestedChannelId) {
           setChannelId(res.suggestedChannelId);
         }
-        setFeedback({ type: 'success', text: res.message });
+        setFeedback({
+          type: 'success',
+          text: coerceSafeFeedbackText(res.message, 'Telegram test succeeded.'),
+        });
       } else {
         const suggestedFix = res.suggestedChannelId || (isMissingSupergroupPrefix ? suggestedSupergroupId : undefined);
         setFeedback({
           type: 'error',
-          text: res.message,
+          text: coerceSafeFeedbackText(res.message, 'Telegram test failed.'),
           suggestedFix: suggestedFix || undefined,
         });
       }
     } catch (err: any) {
-      setFeedback({ type: 'error', text: err.message || 'Test failed.' });
+      setFeedback({
+        type: 'error',
+        text: coerceSafeFeedbackText(err?.message, 'Test failed.'),
+      });
     } finally {
       setIsTesting(false);
     }
   };
 
   const isConnected = Boolean(status?.tokenConfigured && (status?.channelId || channelId));
+  const parsedSuppressionPreview = parseSuppressionWindowInput(suppressionWindowInput);
+  const previewSuppressionMinutes = parsedSuppressionPreview.valid
+    ? parsedSuppressionPreview.value
+    : null;
+  const safeFeedbackText = feedback ? coerceSafeFeedbackText(feedback.text) : '';
 
   return (
     <div className="p-6 rounded-2xl border border-sky-900/50 bg-gradient-to-br from-slate-900 via-slate-900 to-[#0A1628] shadow-xl space-y-5">
@@ -289,7 +338,11 @@ export const TelegramBotConfigCard: React.FC = () => {
         <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800">
           <span className="text-[11px] text-slate-400">Suppression Window</span>
           <div className="text-sm font-mono font-bold text-emerald-400 mt-1">
-            {suppressionWindowMinutes > 0 ? `${suppressionWindowMinutes} min` : 'Disabled'}
+            {previewSuppressionMinutes === null
+              ? 'Invalid'
+              : previewSuppressionMinutes > 0
+              ? `${previewSuppressionMinutes} min`
+              : 'Disabled'}
           </div>
         </div>
 
@@ -412,10 +465,9 @@ export const TelegramBotConfigCard: React.FC = () => {
                 min={0}
                 max={1440}
                 step={1}
-                value={suppressionWindowMinutes}
+                value={suppressionWindowInput}
                 onChange={(e) => {
-                  const val = Number.parseInt(e.target.value, 10);
-                  setSuppressionWindowMinutes(Number.isFinite(val) ? Math.max(0, Math.min(1440, val)) : 0);
+                  setSuppressionWindowInput(e.target.value);
                 }}
                 className="w-24 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 font-mono text-white text-xs focus:outline-none focus:border-sky-500"
               />
@@ -424,12 +476,12 @@ export const TelegramBotConfigCard: React.FC = () => {
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
             {[0, 5, 10, 30, 60].map((preset) => {
-              const active = suppressionWindowMinutes === preset;
+              const active = previewSuppressionMinutes === preset;
               return (
                 <button
                   key={preset}
                   type="button"
-                  onClick={() => setSuppressionWindowMinutes(preset)}
+                  onClick={() => setSuppressionWindowInput(String(preset))}
                   className={`px-2.5 py-1 rounded-lg text-[11px] font-mono border transition cursor-pointer ${
                     active
                       ? 'bg-sky-500/20 text-sky-300 border-sky-500/60 font-bold'
@@ -446,6 +498,7 @@ export const TelegramBotConfigCard: React.FC = () => {
         {/* Feedback message & Troubleshooting Box */}
         {feedback && (
           <div
+            role={feedback.type === 'error' ? 'alert' : 'status'}
             className={`p-3.5 rounded-xl text-xs space-y-2 ${
               feedback.type === 'success'
                 ? 'bg-emerald-950/80 border border-emerald-700 text-emerald-200'
@@ -463,7 +516,7 @@ export const TelegramBotConfigCard: React.FC = () => {
                 <RefreshCw className="w-4 h-4 shrink-0 text-sky-400 animate-spin mt-0.5" />
               )}
               <div className="flex-1 space-y-1">
-                <span className="font-medium leading-relaxed block">{feedback.text}</span>
+                <span className="font-medium leading-relaxed block">{safeFeedbackText}</span>
 
                 {/* If test returned a suggested auto-fix */}
                 {feedback.suggestedFix && (
@@ -485,7 +538,7 @@ export const TelegramBotConfigCard: React.FC = () => {
             </div>
 
             {/* Actionable Troubleshooting Guide when chat not found occurs */}
-            {feedback.type === 'error' && feedback.text.includes('chat not found') && (
+            {feedback.type === 'error' && safeFeedbackText.includes('chat not found') && (
               <div className="mt-2 pt-2 border-t border-rose-900/60 text-[11px] text-rose-200/90 space-y-1.5 pl-6">
                 <div className="font-bold text-white flex items-center gap-1">
                   <Info className="w-3.5 h-3.5 text-amber-400" />

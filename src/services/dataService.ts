@@ -9334,7 +9334,7 @@ class DataService {
           logs: [],
           hasMore: false,
           nextCursor: null,
-          error: data?.error || SESSION_EXPIRED_USER_MESSAGE,
+          error: extractServerApiError(data, SESSION_EXPIRED_USER_MESSAGE),
           code: 'TOKEN_EXPIRED',
           requiresReauth: true,
         };

@@ -2199,3 +2199,97 @@ test('app-config: structured cashoutRules backfill, authoritative save, and vali
   });
 });
 
+test('telegram config: custom non-preset suppressionWindowMinutes (15, 120, 1440) round-trip cleanly and invalid durations return structured 400', async () => {
+  await withAppConfigServer(async ({ baseUrl, db, otps }) => {
+    const admin = await signupAndSignIn(baseUrl, otps, {
+      name: 'Custom Window Admin',
+      email: 'admin-custom-window@example.com',
+      password: 'Password!123',
+    });
+    db.users.get(admin.userId)!.role = 'admin';
+
+    // Initial save with token + channel + custom 15m duration
+    const save15Res = await fetch(`${baseUrl}/api/telegram/config`, {
+      method: 'POST',
+      headers: {
+        Origin: TRUSTED_ORIGIN,
+        Cookie: admin.cookie,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        botToken: '1234567890:AACustomWindowToken123',
+        channelId: '-100999888777',
+        enabled: true,
+        suppressionWindowMinutes: 15,
+      }),
+    });
+    assert.equal(save15Res.status, 200);
+    const save15Json = (await save15Res.json()) as {
+      success: boolean;
+      config: { suppressionWindowMinutes: number };
+      status: { suppressionWindowMinutes: number };
+    };
+    assert.equal(save15Json.success, true);
+    assert.equal(save15Json.config.suppressionWindowMinutes, 15);
+    assert.equal(save15Json.status.suppressionWindowMinutes, 15);
+
+    // Update to custom 120m without resending botToken (token already configured)
+    const save120Res = await fetch(`${baseUrl}/api/telegram/config`, {
+      method: 'POST',
+      headers: {
+        Origin: TRUSTED_ORIGIN,
+        Cookie: admin.cookie,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        channelId: '-100999888777',
+        enabled: true,
+        suppressionWindowMinutes: 120,
+      }),
+    });
+    assert.equal(save120Res.status, 200);
+
+    const getCfgRes = await fetch(`${baseUrl}/api/telegram/config`, {
+      headers: { Cookie: admin.cookie },
+    });
+    assert.equal(getCfgRes.status, 200);
+    const getCfgJson = (await getCfgRes.json()) as {
+      suppressionWindowMinutes: number;
+      tokenConfigured: boolean;
+    };
+    assert.equal(getCfgJson.suppressionWindowMinutes, 120);
+    assert.equal(getCfgJson.tokenConfigured, true);
+
+    const getStatusRes = await fetch(`${baseUrl}/api/telegram/status`, {
+      headers: { Cookie: admin.cookie },
+    });
+    assert.equal(getStatusRes.status, 200);
+    const getStatusJson = (await getStatusRes.json()) as {
+      suppressionWindowMinutes: number;
+    };
+    assert.equal(getStatusJson.suppressionWindowMinutes, 120);
+
+    // Out-of-range duration (>1440) returns structured 400 error object
+    const badRes = await fetch(`${baseUrl}/api/telegram/config`, {
+      method: 'POST',
+      headers: {
+        Origin: TRUSTED_ORIGIN,
+        Cookie: admin.cookie,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        channelId: '-100999888777',
+        enabled: true,
+        suppressionWindowMinutes: 1441,
+      }),
+    });
+    assert.equal(badRes.status, 400);
+    const badJson = (await badRes.json()) as {
+      error: { code: string; message: string };
+    };
+    assert.equal(badJson.error.code, 'VALIDATION_ERROR');
+    assert.match(badJson.error.message, /0 and 1440/);
+  });
+});
+
+
