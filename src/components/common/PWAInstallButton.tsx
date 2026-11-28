@@ -106,6 +106,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
   }
 
   const isCompact = variant === 'compact';
+  const isNavbar = variant === 'navbar';
 
   return (
     <div className={`flex items-center gap-1.5 ${className}`}>
@@ -115,23 +116,31 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
           onClick={handleInstallClick}
           disabled={isPrompting}
           data-testid="pwa-install-button"
-          className={`flex items-center justify-center gap-1.5 font-semibold rounded-xl border transition-colors active:scale-95 whitespace-nowrap shrink-0 disabled:opacity-60 ${
+          className={`flex items-center justify-center font-semibold border transition-colors active:scale-95 whitespace-nowrap shrink-0 disabled:opacity-60 ${
             isCompact
-              ? 'px-3 py-1.5 min-h-[36px] text-xs bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-500/35'
-              : 'px-2.5 sm:px-3 min-h-[44px] sm:min-h-[36px] text-xs bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-500/35'
+              ? 'gap-1.5 px-3 py-1.5 min-h-[36px] text-xs rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-500/35'
+              : isNavbar
+              ? 'w-10 h-10 sm:w-9 sm:h-9 rounded-lg bg-[#0E1726] border border-amber-500/35 text-amber-300 hover:border-amber-400 hover:bg-[#131C2E]'
+              : 'w-10 h-10 sm:w-auto sm:h-9 sm:px-3 sm:gap-1.5 text-xs rounded-lg sm:rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-500/35'
           }`}
           title="Install Swift Sweeps app on Android, iPhone, or Desktop"
           aria-label="Install Swift Sweeps app"
         >
-          {env.platform === 'ios' ? (
-            <Smartphone className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          {isNavbar ? (
+            <Download className="w-4 h-4 text-amber-400 shrink-0" />
           ) : (
-            <Download className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <>
+              {env.platform === 'ios' ? (
+                <Smartphone className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              ) : (
+                <Download className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              )}
+              <span className="sm:hidden">{hasNativePrompt ? 'Get App' : 'Install'}</span>
+              <span className="hidden sm:inline">
+                {isPrompting ? 'Installing...' : 'Install App'}
+              </span>
+            </>
           )}
-          <span className="sm:hidden">{hasNativePrompt ? 'Get App' : 'Install'}</span>
-          <span className="hidden sm:inline">
-            {isPrompting ? 'Installing...' : 'Install App'}
-          </span>
         </button>
       )}
 

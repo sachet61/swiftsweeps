@@ -208,7 +208,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   return (
     <>
       <header className="relative z-50 bg-[#0A0F1D]/95 backdrop-blur-md border-b border-slate-800/80 max-w-full pt-safe-edge">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 xl:gap-4 px-3 sm:px-6 h-16">
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-2 sm:gap-3 xl:gap-4 px-3 sm:px-6 h-16">
           {/* Zone 1: Brand Identity & Portal Role Context */}
           <div className="flex items-center gap-2.5 shrink-0 min-w-0">
             <button
@@ -557,7 +557,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           </nav>
 
           {/* Zone 3: Notifications, Account Controls & Logout */}
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {/* PWA App Install (keeps single Bell in navbar; push alerts live in Notifications drawer) */}
             <PWAInstallButton currentUser={currentUser} showPushButton={false} />
 
@@ -569,7 +569,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                 data-testid="header-wheel-button"
                 aria-label={effectiveSpinAvailable ? 'Wheel of Luck, spin ready' : 'Wheel of Luck'}
                 title={effectiveSpinAvailable ? 'Wheel of Luck, spin ready' : 'Wheel of Luck'}
-                className={`relative flex items-center justify-center w-11 h-11 sm:w-9 sm:h-9 rounded-lg bg-[#0E1726] border transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0F1D] ${
+                className={`relative flex items-center justify-center w-10 h-10 sm:w-9 sm:h-9 rounded-lg bg-[#0E1726] border transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0F1D] ${
                   effectiveSpinAvailable
                     ? 'border-amber-500/45 text-amber-300 hover:border-amber-400 hover:bg-[#131C2E]'
                     : 'border-slate-700/80 text-slate-400 hover:border-slate-600 hover:text-slate-200'
@@ -592,7 +592,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             <button
               type="button"
               onClick={toggleNotifications}
-              className="relative flex items-center justify-center w-11 h-11 sm:w-9 sm:h-9 rounded-lg bg-[#0E1726] border border-slate-700/80 hover:border-slate-600 text-slate-300 hover:text-white transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0F1D]"
+              className="relative flex items-center justify-center w-10 h-10 sm:w-9 sm:h-9 rounded-lg bg-[#0E1726] border border-slate-700/80 hover:border-slate-600 text-slate-300 hover:text-white transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0F1D]"
               aria-label="Notifications"
               title="Notifications"
             >
@@ -634,7 +634,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             <button
               type="button"
               onClick={openMobileDrawer}
-              className="lg:hidden flex items-center justify-center w-9 h-9 rounded-lg bg-[#0E1726] border border-amber-500/30 text-amber-300 hover:text-white hover:border-amber-500/60 transition-colors active:scale-95 shrink-0"
+              className="lg:hidden flex items-center justify-center w-10 h-10 sm:w-9 sm:h-9 rounded-lg bg-[#0E1726] border border-amber-500/30 text-amber-300 hover:text-white hover:border-amber-500/60 transition-colors active:scale-95 shrink-0"
               title="Navigation Menu"
               aria-label="Open Navigation Drawer"
             >
@@ -718,7 +718,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             </div>
 
             <div className="pt-3">
-              <PWAInstallButton currentUser={currentUser} className="w-full justify-start" />
+              <PWAInstallButton variant="compact" currentUser={currentUser} className="w-full justify-start" />
             </div>
 
             <div className="flex-1 overflow-y-auto py-3 space-y-2">
