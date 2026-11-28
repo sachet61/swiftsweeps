@@ -1269,7 +1269,11 @@ async function openSseStream(
   });
 }
 
-async function createTestServer() {
+async function createTestServer(options?: {
+  telegramFetchOverride?: Parameters<typeof createApiApp>[0]['telegramFetchOverride'];
+  telegramNowFnOverride?: Parameters<typeof createApiApp>[0]['telegramNowFnOverride'];
+  logRecords?: Array<{ level: string; event: string; payload: Record<string, unknown> }>;
+}) {
   const db = new InMemoryChatDatabase();
   const authMemoryStore = {
     ba_user: [],
@@ -1279,8 +1283,20 @@ async function createTestServer() {
     ba_rate_limit: [],
   };
   const logger = createLogger({
-    level: 'error',
-    writeStdout: () => {},
+    level: options?.logRecords ? 'info' : 'error',
+    writeStdout: (line) => {
+      if (!options?.logRecords) return;
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        options.logRecords.push({
+          level: String(parsed.level || ''),
+          event: String(parsed.event || parsed.msg || ''),
+          payload: parsed,
+        });
+      } catch {
+        // ignore
+      }
+    },
     writeStderr: () => {},
   });
   const app = createApiApp({
@@ -1289,6 +1305,8 @@ async function createTestServer() {
     pool: db,
     authDatabaseOverride: memoryAdapter(authMemoryStore),
     emailDeliveryOverride: new RecordingEmailDelivery(),
+    telegramFetchOverride: options?.telegramFetchOverride,
+    telegramNowFnOverride: options?.telegramNowFnOverride,
   });
 
   const server = http.createServer(app);
@@ -2534,6 +2552,170 @@ test('Per-conversation cashout rules pinning: RBAC, customer isolation, idempote
       streamA.close();
       streamB.close();
     }
+  } finally {
+    await srv.close();
+  }
+});
+
+test('chat send: dispatches Telegram alerts server-side for new customer messages, ignores staff replies and retries, and records diagnostics', async () => {
+  let nowMs = Date.parse('2026-11-28T07:11:00.000Z');
+  const telegramCalls: Array<{ url: string; chatId: string; text: string }> = [];
+  const logRecords: Array<{
+    level: string;
+    event: string;
+    payload: Record<string, unknown>;
+  }> = [];
+
+  const srv = await createTestServer({
+    telegramNowFnOverride: () => nowMs,
+    logRecords,
+    telegramFetchOverride: async (url, init) => {
+      if (url.includes('/sendMessage')) {
+        const parsedBody = init?.body
+          ? (JSON.parse(String(init.body)) as { chat_id?: string; text?: string })
+          : {};
+        telegramCalls.push({
+          url,
+          chatId: String(parsedBody.chat_id || ''),
+          text: String(parsedBody.text || ''),
+        });
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: { message_id: telegramCalls.length } }),
+      };
+    },
+  });
+
+  try {
+    srv.db.appConfigRow = {
+      id: 'main',
+      data: {
+        telegram: {
+          botToken: '1234567890:AAChatTestBotToken99',
+          channelId: '-1004339845768',
+          enabled: true,
+          mode: 'zero-egress-notification',
+          suppressionWindowMinutes: 10,
+          lastNotifiedByConv: {},
+        },
+      },
+      updated_at: new Date(nowMs),
+    };
+
+    const cust = await signupAndSignIn(srv.baseUrl, srv.db, {
+      email: 'chat-tg-player@example.com',
+      name: 'Player One',
+      role: 'customer',
+    });
+    const admin = await signupAndSignIn(srv.baseUrl, srv.db, {
+      email: 'chat-tg-admin@example.com',
+      name: 'Super Admin',
+      role: 'admin',
+    });
+
+    const convId = `conv_${cust.appUserId}`;
+
+    // Wait helper for async non-blocking dispatch triggered after POST /api/chat/send
+    const waitForCondition = async (predicate: () => boolean) => {
+      for (let i = 0; i < 40; i += 1) {
+        if (predicate()) return;
+        await new Promise((r) => setTimeout(r, 15));
+      }
+    };
+
+    // 1. Customer sends initial message -> server dispatches Telegram alert
+    const send1 = await httpRequest(srv.baseUrl, 'POST', '/api/chat/send', {
+      jar: cust.jar,
+      body: {
+        id: 'msg_tg_1',
+        conversationId: convId,
+        text: 'hello',
+      },
+    });
+    assert.equal(send1.status, 200);
+    await waitForCondition(() => telegramCalls.length >= 1);
+    assert.equal(telegramCalls.length, 1);
+    assert.match(telegramCalls[0]!.text, /New message from Player One/);
+
+    // 2. Idempotent duplicate retry does NOT send another Telegram alert
+    const retry1 = await httpRequest(srv.baseUrl, 'POST', '/api/chat/send', {
+      jar: cust.jar,
+      body: {
+        id: 'msg_tg_1',
+        conversationId: convId,
+        text: 'hello',
+      },
+    });
+    assert.equal(retry1.status, 200);
+    assert.equal(retry1.json.deduplicated, true);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(telegramCalls.length, 1);
+
+    // 3. Customer sends a second message 2m later -> suppressed by prior Telegram alert (diagnostic = suppressed)
+    nowMs += 2 * 60_000;
+    const send2 = await httpRequest(srv.baseUrl, 'POST', '/api/chat/send', {
+      jar: cust.jar,
+      body: {
+        id: 'msg_tg_2',
+        conversationId: convId,
+        text: 'testing my notification',
+      },
+    });
+    assert.equal(send2.status, 200);
+    await waitForCondition(() =>
+      logRecords.some((l) => l.event === 'telegram_notification_suppressed'),
+    );
+    assert.equal(telegramCalls.length, 1);
+
+    const statusSuppressed = await httpRequest(
+      srv.baseUrl,
+      'GET',
+      '/api/telegram/status',
+      { jar: admin.jar },
+    );
+    assert.equal(statusSuppressed.status, 200);
+    assert.equal(statusSuppressed.json.lastDiagnostic?.status, 'suppressed');
+    assert.equal(statusSuppressed.json.lastDiagnostic?.eventType, 'chat_message');
+
+    // 4. Advance past 10m Telegram cooldown (t + 11m), and have admin reply right before customer sends (t + 11m):
+    // Staff reply MUST NOT suppress customer's new message alert!
+    nowMs += 9 * 60_000; // total +11m from initial alert
+    const staffReply = await httpRequest(srv.baseUrl, 'POST', '/api/chat/send', {
+      jar: admin.jar,
+      body: {
+        id: 'msg_tg_staff_1',
+        conversationId: convId,
+        text: 'hello from support',
+      },
+    });
+    assert.equal(staffReply.status, 200);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(telegramCalls.length, 1); // staff reply never sends customer alert
+
+    nowMs += 60_000; // 1m after staff reply (+12m from initial alert)
+    const send3 = await httpRequest(srv.baseUrl, 'POST', '/api/chat/send', {
+      jar: cust.jar,
+      body: {
+        id: 'msg_tg_3',
+        conversationId: convId,
+        text: 'test again',
+      },
+    });
+    assert.equal(send3.status, 200);
+    await waitForCondition(() => telegramCalls.length >= 2);
+    assert.equal(telegramCalls.length, 2);
+
+    const statusSent = await httpRequest(
+      srv.baseUrl,
+      'GET',
+      '/api/telegram/status',
+      { jar: admin.jar },
+    );
+    assert.equal(statusSent.status, 200);
+    assert.equal(statusSent.json.lastDiagnostic?.status, 'sent');
+    assert.equal(statusSent.json.lastDiagnostic?.eventType, 'chat_message');
   } finally {
     await srv.close();
   }

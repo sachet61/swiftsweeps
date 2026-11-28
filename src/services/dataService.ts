@@ -7007,19 +7007,6 @@ class DataService {
           deliveryError: undefined,
         })) || confirmedMsg;
 
-      // Zero-Egress Telegram Alert for customer messages
-      if (updated.senderRole === 'customer' && typeof fetch === 'function') {
-        fetch('/api/telegram/notify-message', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            customerName: updated.senderName || 'Customer',
-            conversationId: targetConvId,
-          }),
-        }).catch(() => {});
-      }
-
       // Instant Web Push Notification
       if (
         !updated.isInternalNote &&

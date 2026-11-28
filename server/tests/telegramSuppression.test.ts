@@ -9,6 +9,8 @@ import {
   normalizeSuppressionWindowMinutes,
   parseTimestampMs,
   pruneTimestampMap,
+  sanitizeTelegramDiagnostic,
+  scrubTelegramSecret,
   validateSuppressionWindowMinutes,
 } from '../appConfig/telegramSuppression.js';
 
@@ -48,7 +50,7 @@ test('parseTimestampMs handles UTC, non-UTC timezone offsets, Date objects, and 
   assert.equal(parseTimestampMs(NaN), null);
 });
 
-test('evaluateTelegramSuppression enforces window boundaries, dynamic periods, and ignores missing timestamps', () => {
+test('evaluateTelegramSuppression enforces window boundaries strictly from prior Telegram alerts', () => {
   const nowMs = Date.parse('2026-11-27T12:10:00.000Z');
   const sixMinAgo = Date.parse('2026-11-27T12:04:00.000Z');
   const exactFiveMinAgo = Date.parse('2026-11-27T12:05:00.000Z');
@@ -59,7 +61,6 @@ test('evaluateTelegramSuppression enforces window boundaries, dynamic periods, a
     suppressionWindowMinutes: 10,
     nowMs,
     lastTelegramSentAtMs: null,
-    lastOutboundMessageSentAtMs: null,
   });
   assert.equal(noHistory.suppressed, false);
 
@@ -68,7 +69,6 @@ test('evaluateTelegramSuppression enforces window boundaries, dynamic periods, a
     suppressionWindowMinutes: 5,
     nowMs,
     lastTelegramSentAtMs: fourMinAgo,
-    lastOutboundMessageSentAtMs: null,
   });
   assert.equal(withinFive.suppressed, true);
   assert.equal(withinFive.source, 'telegram_notification');
@@ -79,7 +79,6 @@ test('evaluateTelegramSuppression enforces window boundaries, dynamic periods, a
     suppressionWindowMinutes: 5,
     nowMs,
     lastTelegramSentAtMs: exactFiveMinAgo,
-    lastOutboundMessageSentAtMs: null,
   });
   assert.equal(exactBoundary.suppressed, false);
 
@@ -87,26 +86,23 @@ test('evaluateTelegramSuppression enforces window boundaries, dynamic periods, a
   const expiredForFive = evaluateTelegramSuppression({
     suppressionWindowMinutes: 5,
     nowMs,
-    lastTelegramSentAtMs: null,
-    lastOutboundMessageSentAtMs: sixMinAgo,
+    lastTelegramSentAtMs: sixMinAgo,
   });
   assert.equal(expiredForFive.suppressed, false);
 
   const activeForTen = evaluateTelegramSuppression({
     suppressionWindowMinutes: 10,
     nowMs,
-    lastTelegramSentAtMs: null,
-    lastOutboundMessageSentAtMs: sixMinAgo,
+    lastTelegramSentAtMs: sixMinAgo,
   });
   assert.equal(activeForTen.suppressed, true);
-  assert.equal(activeForTen.source, 'outbound_chat_message');
+  assert.equal(activeForTen.source, 'telegram_notification');
 
   // Window 0 explicitly disables suppression
   const disabled = evaluateTelegramSuppression({
     suppressionWindowMinutes: 0,
     nowMs,
     lastTelegramSentAtMs: fourMinAgo,
-    lastOutboundMessageSentAtMs: fourMinAgo,
   });
   assert.equal(disabled.suppressed, false);
 });
@@ -134,7 +130,6 @@ test('customer identification and suppression log metadata stay scoped and omit 
     suppressionWindowMinutes: 30,
     nowMs: Date.parse('2026-11-27T12:10:00.000Z'),
     lastTelegramSentAtMs: Date.parse('2026-11-27T12:00:00.000Z'),
-    lastOutboundMessageSentAtMs: null,
   });
   const logMeta = buildSuppressionLogMetadata({
     customerId: 'cust_real_1',
@@ -163,4 +158,36 @@ test('pruneTimestampMap retains timestamps for configured windows longer than 10
   assert.equal(pruned.conv_recent, fortyFiveMinAgo);
   assert.equal(pruned.conv_stale, undefined);
   assert.equal(pruned.conv_corrupt, undefined);
+});
+
+test('scrubTelegramSecret and sanitizeTelegramDiagnostic strip bot tokens and normalize payloads', () => {
+  const token = '123456:AASecretTokenXYZ';
+  assert.equal(
+    scrubTelegramSecret(
+      `POST https://api.telegram.org/bot${token}/sendMessage failed for ${token}`,
+      token,
+    ),
+    'POST https://api.telegram.org/bot[REDACTED]/sendMessage failed for [REDACTED]',
+  );
+
+  const sanitized = sanitizeTelegramDiagnostic(
+    {
+      status: 'failed',
+      at: '2026-11-27T12:15:00.000Z',
+      eventType: 'chat_message',
+      suppressionWindowMinutes: 10,
+      reason: 'delivery_failed',
+      errorMessage: `Upstream error with /bot${token}/sendMessage`,
+    },
+    token,
+  );
+  assert.deepEqual(sanitized, {
+    status: 'failed',
+    at: '2026-11-27T12:15:00.000Z',
+    eventType: 'chat_message',
+    suppressionWindowMinutes: 10,
+    reason: 'delivery_failed',
+    errorMessage: 'Upstream error with /bot[REDACTED]/sendMessage',
+  });
+  assert.equal(sanitizeTelegramDiagnostic({ status: 'unknown' }), undefined);
 });

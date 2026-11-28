@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   coerceSafeFeedbackText,
   extractTelegramApiError,
+  formatTelegramDiagnosticSummary,
   parseSuppressionWindowInput,
 } from './telegramServiceUtils';
 import { TelegramService } from './telegramService';
@@ -153,4 +154,43 @@ test('TelegramService.saveConfig, getConfig, getStatus, and testConnection retur
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('formatTelegramDiagnosticSummary produces safe status, event labels, and detail text across all states', () => {
+  assert.deepEqual(formatTelegramDiagnosticSummary(null), {
+    statusLabel: 'No Alerts Yet',
+    eventLabel: 'Idle',
+    detailText: 'No alert activity recorded yet.',
+  });
+
+  const sent = formatTelegramDiagnosticSummary({
+    status: 'sent',
+    at: '2026-11-27T12:00:00.000Z',
+    eventType: 'chat_message',
+    suppressionWindowMinutes: 10,
+  });
+  assert.equal(sent.statusLabel, 'Sent');
+  assert.equal(sent.eventLabel, 'Support Chat');
+  assert.match(sent.detailText, /10m cooldown/);
+
+  const suppressed = formatTelegramDiagnosticSummary({
+    status: 'suppressed',
+    at: '2026-11-27T12:02:00.000Z',
+    eventType: 'activity_alert',
+    suppressionWindowMinutes: 10,
+    remainingSec: 480,
+  });
+  assert.equal(suppressed.statusLabel, 'Suppressed');
+  assert.equal(suppressed.eventLabel, 'Activity Alert');
+  assert.match(suppressed.detailText, /480s remaining/);
+
+  const failed = formatTelegramDiagnosticSummary({
+    status: 'failed',
+    at: '2026-11-27T12:05:00.000Z',
+    eventType: 'chat_message',
+    suppressionWindowMinutes: 5,
+    errorMessage: 'chat not found',
+  });
+  assert.equal(failed.statusLabel, 'Failed');
+  assert.equal(failed.detailText, 'chat not found');
 });

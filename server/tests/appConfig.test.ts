@@ -1926,39 +1926,28 @@ test('telegram suppression: supports configurable windows, outbound sent_at trac
       assert.equal(((await afterExpireRes.json()) as { success: boolean; suppressed?: boolean }).suppressed, undefined);
       assert.equal(telegramCalls.length, 4);
 
-      // 7. Reuses existing public.messages outbound sent_at records:
-      // Advance far past previous notifications
+      // 7. Outbound staff replies & customer chat rows in public.messages do NOT suppress alerts;
+      // only prior successful Telegram alerts suppress within the shared per-customer cooldown.
       const tMsgBase = tStart + 120 * 60_000;
       setNowMs(tMsgBase);
-      // Add an old creation timestamp message, plus a failed outbound message, plus a missing sent_at message,
-      // and a recent customer-sent message -> NONE of these should suppress!
       db.messages.push(
         {
-          id: 'msg_failed_outbound',
-          conversation_id: `conv_${bob.userId}`,
-          sender_role: 'agent',
-          is_internal_note: false,
-          delivery_status: 'failed',
-          created_at: new Date(tMsgBase - 60_000),
-          sent_at: new Date(tMsgBase - 60_000),
-        },
-        {
-          id: 'msg_missing_sent_at',
+          id: 'msg_sent_agent_recent',
           conversation_id: `conv_${bob.userId}`,
           sender_role: 'agent',
           is_internal_note: false,
           delivery_status: 'sent',
           created_at: new Date(tMsgBase - 60_000),
-          sent_at: null,
+          sent_at: new Date(tMsgBase - 60_000),
         },
         {
-          id: 'msg_internal_note',
+          id: 'msg_sent_admin_recent',
           conversation_id: `conv_${bob.userId}`,
-          sender_role: 'agent',
-          is_internal_note: true,
+          sender_role: 'admin',
+          is_internal_note: false,
           delivery_status: 'sent',
-          created_at: new Date(tMsgBase - 60_000),
-          sent_at: new Date(tMsgBase - 60_000),
+          created_at: new Date(tMsgBase - 30_000),
+          sent_at: new Date(tMsgBase - 30_000),
         },
         {
           id: 'msg_customer_self',
@@ -1966,11 +1955,12 @@ test('telegram suppression: supports configurable windows, outbound sent_at trac
           sender_role: 'customer',
           is_internal_note: false,
           delivery_status: 'sent',
-          created_at: new Date(tMsgBase - 60_000),
-          sent_at: new Date(tMsgBase - 60_000),
+          created_at: new Date(tMsgBase - 20_000),
+          sent_at: new Date(tMsgBase - 20_000),
         },
       );
 
+      // Even though an agent and admin replied 30-60s ago, Bob's Telegram alert MUST fire!
       const bobAllowedRes = await fetch(`${baseUrl}/api/telegram/notify-message`, {
         method: 'POST',
         headers: {
@@ -1983,27 +1973,66 @@ test('telegram suppression: supports configurable windows, outbound sent_at trac
       assert.equal(((await bobAllowedRes.json()) as { suppressed?: boolean }).suppressed, undefined);
       assert.equal(telegramCalls.length, 5);
 
-      // Now advance 40m and add a successfully sent outbound agent message with old created_at (2h ago)
-      // but recent actual sent_at (5m ago, in +05:30 timezone format) -> MUST suppress!
-      const tOutboundCheck = tMsgBase + 40 * 60_000;
-      setNowMs(tOutboundCheck);
-      // 5m before tOutboundCheck expressed as +05:30 offset string
-      const fiveMinEarlierMs = tOutboundCheck - 5 * 60_000;
-      const offsetDate = new Date(fiveMinEarlierMs + 5.5 * 60 * 60_000);
-      const pad2 = (n: number) => String(n).padStart(2, '0');
-      const offsetIso = `${offsetDate.getUTCFullYear()}-${pad2(offsetDate.getUTCMonth() + 1)}-${pad2(offsetDate.getUTCDate())}T${pad2(offsetDate.getUTCHours())}:${pad2(offsetDate.getUTCMinutes())}:${pad2(offsetDate.getUTCSeconds())}.000+05:30`;
-
-      db.messages.push({
-        id: 'msg_sent_outbound_tz',
-        conversation_id: `conv_${bob.userId}`,
-        sender_role: 'agent',
-        is_internal_note: false,
-        delivery_status: 'sent',
-        created_at: new Date(tOutboundCheck - 120 * 60_000), // creation time 2h ago
-        sent_at: offsetIso, // actual sent time 5m ago
+      // Admin status reflects the 'sent' diagnostic snapshot
+      const statusAfterSentRes = await fetch(`${baseUrl}/api/telegram/status`, {
+        headers: { Cookie: admin.cookie },
       });
+      assert.equal(statusAfterSentRes.status, 200);
+      const statusAfterSent = (await statusAfterSentRes.json()) as {
+        lastDiagnostic?: {
+          status: string;
+          eventType: string;
+          suppressionWindowMinutes: number;
+          reason?: string;
+        };
+      };
+      assert.equal(statusAfterSent.lastDiagnostic?.status, 'sent');
+      assert.equal(statusAfterSent.lastDiagnostic?.eventType, 'chat_message');
+      assert.equal(statusAfterSent.lastDiagnostic?.suppressionWindowMinutes, 30);
 
-      const bobSuppressedByChatRes = await fetch(`${baseUrl}/api/telegram/notify-message`, {
+      // Shared cooldown: an activity alert for Bob 5 minutes later IS suppressed by the prior Telegram chat alert
+      setNowMs(tMsgBase + 5 * 60_000);
+      const bobSuppressedActivityRes = await fetch(`${baseUrl}/api/telegram/notify`, {
+        method: 'POST',
+        headers: {
+          Origin: TRUSTED_ORIGIN,
+          Cookie: bob.cookie,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text: 'Submitted cash-in proof' }),
+      });
+      const bobSuppressedJson = (await bobSuppressedActivityRes.json()) as {
+        success: boolean;
+        suppressed?: boolean;
+      };
+      assert.equal(bobSuppressedJson.suppressed, true);
+      assert.equal(
+        telegramCalls.filter((c) => c.url.includes('/sendMessage')).length,
+        5,
+      );
+
+      const statusAfterSuppressedRes = await fetch(`${baseUrl}/api/telegram/status`, {
+        headers: { Cookie: admin.cookie },
+      });
+      const statusAfterSuppressed = (await statusAfterSuppressedRes.json()) as {
+        lastDiagnostic?: {
+          status: string;
+          eventType: string;
+          remainingSec?: number;
+          reason?: string;
+        };
+      };
+      assert.equal(statusAfterSuppressed.lastDiagnostic?.status, 'suppressed');
+      assert.equal(statusAfterSuppressed.lastDiagnostic?.eventType, 'activity_alert');
+      assert.ok((statusAfterSuppressed.lastDiagnostic?.remainingSec ?? 0) > 0);
+
+      // Failed delivery diagnostic scrubs any token leakage
+      setNowMs(tMsgBase + 45 * 60_000);
+      setTelegramResponder(() => ({
+        ok: false,
+        description: 'Forbidden: /bot1234567890:AATestSuppressionToken999/sendMessage blocked',
+      }));
+      const bobFailedRes = await fetch(`${baseUrl}/api/telegram/notify-message`, {
         method: 'POST',
         headers: {
           Origin: TRUSTED_ORIGIN,
@@ -2012,12 +2041,20 @@ test('telegram suppression: supports configurable windows, outbound sent_at trac
         },
         body: JSON.stringify({ customerName: 'Bob Player' }),
       });
-      const bobSuppressedJson = (await bobSuppressedByChatRes.json()) as {
-        success: boolean;
-        suppressed?: boolean;
+      assert.equal(((await bobFailedRes.json()) as { success: boolean }).success, false);
+      const statusAfterFailedRes = await fetch(`${baseUrl}/api/telegram/status`, {
+        headers: { Cookie: admin.cookie },
+      });
+      const statusAfterFailed = (await statusAfterFailedRes.json()) as {
+        lastDiagnostic?: { status: string; errorMessage?: string };
       };
-      assert.equal(bobSuppressedJson.suppressed, true);
-      assert.equal(telegramCalls.length, 5);
+      assert.equal(statusAfterFailed.lastDiagnostic?.status, 'failed');
+      assert.ok(
+        !String(statusAfterFailed.lastDiagnostic?.errorMessage || '').includes(
+          'AATestSuppressionToken999',
+        ),
+      );
+      setTelegramResponder(() => ({ ok: true, result: { message_id: 98 } }));
 
       // 8. Concurrency safety: two parallel requests for Alice after window expires send ONLY 1 Telegram message
       const tConcurrent = getNowMs() + 120 * 60_000;

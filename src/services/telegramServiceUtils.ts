@@ -96,3 +96,64 @@ export function parseSuppressionWindowInput(
 
   return { valid: true, value: parsed };
 }
+
+export interface TelegramLastDiagnostic {
+  status: 'sent' | 'suppressed' | 'failed';
+  at: string;
+  eventType: 'chat_message' | 'activity_alert';
+  suppressionWindowMinutes: number;
+  reason?: string;
+  remainingSec?: number;
+  errorMessage?: string;
+}
+
+export function formatTelegramDiagnosticSummary(
+  diag: TelegramLastDiagnostic | null | undefined,
+): {
+  statusLabel: string;
+  eventLabel: string;
+  detailText: string;
+} {
+  if (!diag) {
+    return {
+      statusLabel: 'No Alerts Yet',
+      eventLabel: 'Idle',
+      detailText: 'No alert activity recorded yet.',
+    };
+  }
+
+  const eventLabel =
+    diag.eventType === 'chat_message' ? 'Support Chat' : 'Activity Alert';
+
+  if (diag.status === 'sent') {
+    return {
+      statusLabel: 'Sent',
+      eventLabel,
+      detailText:
+        diag.suppressionWindowMinutes > 0
+          ? `Delivered to Telegram (started ${diag.suppressionWindowMinutes}m cooldown).`
+          : 'Delivered to Telegram (suppression disabled).',
+    };
+  }
+
+  if (diag.status === 'suppressed') {
+    const remainingText =
+      typeof diag.remainingSec === 'number' && diag.remainingSec > 0
+        ? ` (${diag.remainingSec}s remaining)`
+        : '';
+    return {
+      statusLabel: 'Suppressed',
+      eventLabel,
+      detailText: `Skipped duplicate alert — a Telegram alert was sent for this customer within ${diag.suppressionWindowMinutes}m${remainingText}.`,
+    };
+  }
+
+  return {
+    statusLabel: 'Failed',
+    eventLabel,
+    detailText: coerceSafeFeedbackText(
+      diag.errorMessage,
+      'Telegram delivery failed.',
+    ),
+  };
+}

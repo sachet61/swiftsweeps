@@ -9,8 +9,12 @@ import {
   parseTimestampMs,
   pruneInFlightLeases,
   pruneTimestampMap,
+  sanitizeTelegramDiagnostic,
+  scrubTelegramSecret,
   validateSuppressionWindowMinutes,
+  type TelegramDiagnosticEventType,
   type TelegramInFlightLease,
+  type TelegramLastDiagnostic,
   type TelegramSuppressionEvaluation,
 } from './telegramSuppression.js';
 import {
@@ -40,6 +44,7 @@ export interface TelegramStoredConfig {
   updatedAt?: string;
   lastNotifiedByConv: Record<string, number>;
   inFlightByConv?: Record<string, TelegramInFlightLease>;
+  lastDiagnostic?: TelegramLastDiagnostic;
 }
 
 export interface TelegramRedactedConfig {
@@ -50,6 +55,7 @@ export interface TelegramRedactedConfig {
   suppressionWindowMinutes: number;
   updatedAt?: string;
   mode: 'zero-egress-notification';
+  lastDiagnostic?: TelegramLastDiagnostic;
 }
 
 export type ClaimTelegramDispatchResult =
@@ -207,6 +213,7 @@ export function redactTelegramConfig(raw: unknown): TelegramRedactedConfig {
   const obj = parseJsonObject(raw);
   const botToken = typeof obj.botToken === 'string' ? obj.botToken.trim() : '';
   const channelId = typeof obj.channelId === 'string' ? obj.channelId.trim() : '';
+  const lastDiagnostic = sanitizeTelegramDiagnostic(obj.lastDiagnostic, botToken);
   return {
     channelId,
     enabled: obj.enabled !== false,
@@ -219,6 +226,7 @@ export function redactTelegramConfig(raw: unknown): TelegramRedactedConfig {
       ? { updatedAt: obj.updatedAt.trim() }
       : {}),
     mode: 'zero-egress-notification',
+    ...(lastDiagnostic ? { lastDiagnostic } : {}),
   };
 }
 
@@ -582,6 +590,10 @@ export class AppConfigRepo {
         lastNotifiedByConv[key.toLowerCase()] = ts;
       }
     }
+    const lastDiagnostic = sanitizeTelegramDiagnostic(
+      tg.lastDiagnostic,
+      typeof tg.botToken === 'string' ? tg.botToken : undefined,
+    );
     return {
       botToken: typeof tg.botToken === 'string' ? tg.botToken.trim() : '',
       channelId: typeof tg.channelId === 'string' ? tg.channelId.trim() : '',
@@ -592,6 +604,7 @@ export class AppConfigRepo {
       ),
       updatedAt: typeof tg.updatedAt === 'string' ? tg.updatedAt : undefined,
       lastNotifiedByConv,
+      ...(lastDiagnostic ? { lastDiagnostic } : {}),
     };
   }
 
@@ -642,6 +655,10 @@ export class AppConfigRepo {
           : normalizeSuppressionWindowMinutes(currentTg.suppressionWindowMinutes);
 
       const existingInFlight = parseJsonObject(currentTg.inFlightByConv);
+      const existingDiagnostic = sanitizeTelegramDiagnostic(
+        currentTg.lastDiagnostic,
+        nextToken,
+      );
 
       const nextTg: TelegramStoredConfig = {
         botToken: nextToken,
@@ -661,6 +678,7 @@ export class AppConfigRepo {
               >,
             }
           : {}),
+        ...(existingDiagnostic ? { lastDiagnostic: existingDiagnostic } : {}),
       };
 
       const nextData: Record<string, unknown> = {
@@ -698,17 +716,12 @@ export class AppConfigRepo {
     customerId: string;
     conversationId?: string;
     nowMs: number;
+    eventType?: TelegramDiagnosticEventType;
   }): Promise<ClaimTelegramDispatchResult> {
     const cleanCustomerId = params.customerId.trim();
     const cooldownKey = canonicalCooldownKeyForCustomer(cleanCustomerId);
-    const candidateConvIds = Array.from(
-      new Set(
-        [
-          `conv_${cleanCustomerId}`,
-          params.conversationId?.trim() || '',
-        ].filter(Boolean),
-      ),
-    );
+    const eventType: TelegramDiagnosticEventType =
+      params.eventType ?? 'activity_alert';
 
     return this.withTransaction(async (client) => {
       const existingRes = await runQuery<
@@ -739,41 +752,43 @@ export class AppConfigRepo {
         rawNotified[cooldownKey] ?? rawNotified[`conv_${cleanCustomerId}`],
       );
 
-      let lastOutboundMessageSentAtMs: number | null = null;
-      const regRes = await runQuery<{ reg: string | null } & Record<string, unknown>>(
-        client,
-        `SELECT to_regclass('public.messages')::text AS reg`,
-        [],
-      );
-      if (regRes.rows[0]?.reg && candidateConvIds.length > 0) {
-        const msgRes = await runQuery<
-          { last_sent_at: Date | string | null } & Record<string, unknown>
-        >(
-          client,
-          `
-            SELECT MAX(sent_at) AS last_sent_at
-            FROM public.messages
-            WHERE conversation_id = ANY($1::text[])
-              AND sender_role IN ('agent', 'admin', 'system')
-              AND COALESCE(is_internal_note, false) = false
-              AND delivery_status = 'sent'
-              AND sent_at IS NOT NULL
-          `,
-          [candidateConvIds],
-        );
-        lastOutboundMessageSentAtMs = parseTimestampMs(
-          msgRes.rows[0]?.last_sent_at,
-        );
-      }
-
       const evaluation = evaluateTelegramSuppression({
         suppressionWindowMinutes,
         nowMs: params.nowMs,
         lastTelegramSentAtMs,
-        lastOutboundMessageSentAtMs,
       });
 
       if (evaluation.suppressed) {
+        const nowIso = new Date(params.nowMs).toISOString();
+        const suppressedDiagnostic: TelegramLastDiagnostic = {
+          status: 'suppressed',
+          at: nowIso,
+          eventType,
+          suppressionWindowMinutes: evaluation.windowMinutes,
+          reason:
+            evaluation.reason ||
+            'recent_telegram_notification_sent_within_window',
+          remainingSec: evaluation.remainingSec,
+        };
+        const nextData: Record<string, unknown> = {
+          ...currentData,
+          telegram: {
+            ...currentTg,
+            lastDiagnostic: suppressedDiagnostic,
+          },
+        };
+        await runQuery(
+          client,
+          `
+            INSERT INTO public.app_config (id, data, updated_at)
+            VALUES ('main', $1::jsonb, $2::timestamptz)
+            ON CONFLICT (id) DO UPDATE SET
+              data = EXCLUDED.data,
+              updated_at = EXCLUDED.updated_at
+          `,
+          [JSON.stringify(nextData), nowIso],
+        );
+
         return {
           status: 'suppressed',
           customerId: cleanCustomerId,
@@ -843,8 +858,12 @@ export class AppConfigRepo {
     succeeded: boolean;
     sentAtMs: number;
     suppressionWindowMinutes: number;
+    eventType?: TelegramDiagnosticEventType;
+    errorMessage?: string;
   }): Promise<void> {
     const nowIso = new Date(params.sentAtMs).toISOString();
+    const eventType: TelegramDiagnosticEventType =
+      params.eventType ?? 'activity_alert';
 
     await this.withTransaction(async (client) => {
       const existingRes = await runQuery<
@@ -856,6 +875,8 @@ export class AppConfigRepo {
       );
       const currentData = parseJsonObject(existingRes.rows[0]?.data);
       const currentTg = parseJsonObject(currentData.telegram);
+      const botToken =
+        typeof currentTg.botToken === 'string' ? currentTg.botToken : undefined;
 
       const activeLeases = pruneInFlightLeases(
         parseJsonObject(currentTg.inFlightByConv),
@@ -876,9 +897,34 @@ export class AppConfigRepo {
         nextLastNotified = cleaned;
       }
 
+      const safeErr = !params.succeeded
+        ? scrubTelegramSecret(
+            params.errorMessage || 'Telegram delivery failed',
+            botToken,
+          ) || 'Telegram delivery failed'
+        : undefined;
+
+      const nextDiagnostic: TelegramLastDiagnostic = params.succeeded
+        ? {
+            status: 'sent',
+            at: nowIso,
+            eventType,
+            suppressionWindowMinutes: params.suppressionWindowMinutes,
+            reason: 'delivered',
+          }
+        : {
+            status: 'failed',
+            at: nowIso,
+            eventType,
+            suppressionWindowMinutes: params.suppressionWindowMinutes,
+            reason: 'delivery_failed',
+            errorMessage: safeErr,
+          };
+
       const nextTg: Record<string, unknown> = {
         ...currentTg,
         lastNotifiedByConv: nextLastNotified,
+        lastDiagnostic: nextDiagnostic,
       };
       if (Object.keys(activeLeases).length > 0) {
         nextTg.inFlightByConv = activeLeases;

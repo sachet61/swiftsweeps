@@ -8,6 +8,7 @@ import {
 } from './auth/emailDelivery.js';
 import { UserDirectoryRepo } from './auth/userDirectoryRepo.js';
 import { AppConfigRepo } from './appConfig/appConfigRepo.js';
+import { createTelegramDispatcher } from './appConfig/telegramDispatch.js';
 import { AuditLogRepo } from './auditLogs/auditLogRepo.js';
 import { GameCatalogRepo } from './catalog/gameCatalogRepo.js';
 import { ChatEventBroker } from './chat/chatEvents.js';
@@ -117,6 +118,12 @@ export function createApiApp({
 
   const userRepo = new UserDirectoryRepo(pool);
   const appConfigRepo = new AppConfigRepo(pool);
+  const telegramDispatcher = createTelegramDispatcher({
+    appConfigRepo,
+    telegramFetch: telegramFetchOverride,
+    logger,
+    nowFn: telegramNowFnOverride,
+  });
   const auditLogRepo = new AuditLogRepo(pool);
   const gameCatalogRepo = new GameCatalogRepo(pool);
   const chatRepo = new ChatRepo(pool);
@@ -279,6 +286,8 @@ export function createApiApp({
       requireAuth,
       realtimeEvents,
       appConfigRepo,
+      telegramDispatcher,
+      logger,
     }),
   );
   app.use(
@@ -306,6 +315,7 @@ export function createApiApp({
       requireAuth,
       realtimeEvents,
       telegramFetch: telegramFetchOverride,
+      telegramDispatcher,
       logger,
       nowFn: telegramNowFnOverride,
     }),

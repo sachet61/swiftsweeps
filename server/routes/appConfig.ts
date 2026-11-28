@@ -14,10 +14,14 @@ import {
   type CreateFakedCashoutInput,
 } from '../appConfig/appConfigRepo.js';
 import {
-  buildSuppressionLogMetadata,
   canonicalCustomerIdFromInput,
   validateSuppressionWindowMinutes,
 } from '../appConfig/telegramSuppression.js';
+import {
+  createTelegramDispatcher,
+  type TelegramDispatcher,
+  type TelegramFetchFn,
+} from '../appConfig/telegramDispatch.js';
 import {
   normalizeCashoutRulesConfig,
   type CashoutRulesConfig,
@@ -27,20 +31,14 @@ import { requireRole } from '../middleware/auth.js';
 import { HttpError, validateRequestBody } from '../middleware/errorHandler.js';
 import type { RealtimeEventBroker } from '../realtime/realtimeEvents.js';
 
-export type TelegramFetchFn = (
-  url: string,
-  init?: RequestInit,
-) => Promise<{
-  ok: boolean;
-  status: number;
-  json: () => Promise<Record<string, unknown>>;
-}>;
+export type { TelegramFetchFn };
 
 export interface AppConfigRouterDeps {
   appConfigRepo: AppConfigRepo;
   requireAuth: RequestHandler;
   realtimeEvents?: RealtimeEventBroker;
   telegramFetch?: TelegramFetchFn;
+  telegramDispatcher?: TelegramDispatcher;
   logger?: Logger;
   nowFn?: () => number;
 }
@@ -1185,12 +1183,12 @@ export function createAppConfigRouter({
   requireAuth,
   realtimeEvents,
   telegramFetch,
+  telegramDispatcher,
   logger,
   nowFn,
 }: AppConfigRouterDeps): Router {
   const router = Router();
   const requireAdmin = requireRole('admin');
-  const clock = nowFn ?? (() => Date.now());
 
   const fetchImpl: TelegramFetchFn =
     telegramFetch ??
@@ -1203,58 +1201,16 @@ export function createAppConfigRouter({
       };
     });
 
-  const sendTelegramText = async (
-    token: string,
-    chatId: string,
-    text: string,
-  ): Promise<{
-    success: boolean;
-    message?: string;
-    suggestedChannelId?: string;
-  }> => {
-    const sendReq = async (targetChatId: string) => {
-      const resp = await fetchImpl(
-        `https://api.telegram.org/bot${token}/sendMessage`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: targetChatId, text }),
-        },
-      );
-      return resp.json();
-    };
+  const dispatcher =
+    telegramDispatcher ??
+    createTelegramDispatcher({
+      appConfigRepo,
+      telegramFetch: fetchImpl,
+      logger,
+      nowFn,
+    });
 
-    let data = await sendReq(chatId);
-    const strId = chatId.trim();
-    const desc = typeof data.description === 'string' ? data.description : '';
-    if (
-      !data.ok &&
-      desc.includes('chat not found') &&
-      strId.startsWith('-') &&
-      !strId.startsWith('-100')
-    ) {
-      const suggestedId = `-100${strId.replace(/^-/, '')}`;
-      data = await sendReq(suggestedId);
-      if (data.ok) {
-        return { success: true, suggestedChannelId: suggestedId };
-      }
-      return {
-        success: false,
-        message: typeof data.description === 'string' ? data.description : desc,
-        suggestedChannelId: suggestedId,
-      };
-    }
-
-    return data.ok
-      ? { success: true }
-      : {
-          success: false,
-          message:
-            typeof data.description === 'string'
-              ? data.description
-              : 'Telegram delivery failed',
-        };
-  };
+  const sendTelegramText = dispatcher.sendTelegramText;
 
   // Public read of sanitized app_config (strips telegram credentials)
   router.get(
@@ -1558,6 +1514,7 @@ export function createAppConfigRouter({
             : undefined,
           suppressionWindowMinutes: cfg.suppressionWindowMinutes,
           mode: cfg.mode,
+          ...(cfg.lastDiagnostic ? { lastDiagnostic: cfg.lastDiagnostic } : {}),
         };
 
         res.status(200).json({
@@ -1571,6 +1528,9 @@ export function createAppConfigRouter({
           tokenConfigured: redacted.tokenConfigured,
           maskedToken: redacted.maskedToken,
           mode: redacted.mode,
+          ...(redacted.lastDiagnostic
+            ? { lastDiagnostic: redacted.lastDiagnostic }
+            : {}),
         });
       } catch (err) {
         next(err);
@@ -1593,6 +1553,7 @@ export function createAppConfigRouter({
           tokenConfigured: Boolean(cfg.botToken),
           suppressionWindowMinutes: cfg.suppressionWindowMinutes,
           mode: cfg.mode,
+          ...(cfg.lastDiagnostic ? { lastDiagnostic: cfg.lastDiagnostic } : {}),
         }) as Record<string, unknown>;
 
         res.status(200).json({
@@ -1632,6 +1593,9 @@ export function createAppConfigRouter({
             tokenConfigured: saved.tokenConfigured,
             maskedToken: saved.maskedToken,
             mode: saved.mode,
+            ...(saved.lastDiagnostic
+              ? { lastDiagnostic: saved.lastDiagnostic }
+              : {}),
           },
           config: saved,
         });
@@ -1719,96 +1683,6 @@ export function createAppConfigRouter({
     },
   );
 
-  const dispatchCustomerTelegramNotification = async (params: {
-    customerId: string;
-    conversationId?: string;
-    text: string;
-  }): Promise<Record<string, unknown>> => {
-    const MAX_IN_FLIGHT_WAIT_ATTEMPTS = 60;
-    let attempt = 0;
-
-    while (attempt <= MAX_IN_FLIGHT_WAIT_ATTEMPTS) {
-      const claim = await appConfigRepo.claimTelegramNotificationDispatch({
-        customerId: params.customerId,
-        conversationId: params.conversationId,
-        nowMs: clock(),
-      });
-
-      if (claim.status === 'disabled') {
-        return {
-          success: false,
-          message: 'Telegram bot not configured or disabled',
-        };
-      }
-
-      if (claim.status === 'suppressed') {
-        logger?.info(
-          'telegram_notification_suppressed',
-          buildSuppressionLogMetadata({
-            customerId: claim.customerId,
-            evaluation: claim.evaluation,
-          }),
-        );
-        return {
-          success: true,
-          suppressed: true,
-          debounced: true,
-          suppressionWindowMinutes: claim.evaluation.windowMinutes,
-          message: `Cooldown active (${claim.evaluation.remainingSec}s)`,
-        };
-      }
-
-      if (claim.status === 'in_flight') {
-        attempt += 1;
-        if (attempt > MAX_IN_FLIGHT_WAIT_ATTEMPTS) {
-          logger?.info('telegram_notification_suppressed', {
-            customerId: claim.customerId,
-            reason: 'concurrent_dispatch_in_flight',
-            suppressionWindowMinutes: claim.suppressionWindowMinutes,
-          });
-          return {
-            success: true,
-            suppressed: true,
-            debounced: true,
-            suppressionWindowMinutes: claim.suppressionWindowMinutes,
-            message: 'Concurrent notification dispatch already in progress',
-          };
-        }
-        await new Promise((resolve) => setTimeout(resolve, claim.retryAfterMs));
-        continue;
-      }
-
-      let sendResult: {
-        success: boolean;
-        message?: string;
-        suggestedChannelId?: string;
-      } = { success: false, message: 'Telegram delivery failed' };
-      try {
-        sendResult = await sendTelegramText(
-          claim.botToken,
-          claim.channelId,
-          params.text,
-        );
-      } finally {
-        const sentAtMs = clock();
-        await appConfigRepo.finalizeTelegramNotificationDispatch({
-          cooldownKey: claim.cooldownKey,
-          claimToken: claim.claimToken,
-          succeeded: Boolean(sendResult.success),
-          sentAtMs,
-          suppressionWindowMinutes: claim.suppressionWindowMinutes,
-        });
-      }
-
-      return sendResult;
-    }
-
-    return {
-      success: false,
-      message: 'Telegram delivery failed',
-    };
-  };
-
   // Authenticated Telegram alerts (derives actor identity on server)
   router.post(
     '/telegram/notify-message',
@@ -1836,10 +1710,11 @@ export function createAppConfigRouter({
             ? `conv_${customerId}`
             : body.conversationId || `conv_${customerId}`;
 
-        const result = await dispatchCustomerTelegramNotification({
+        const result = await dispatcher.dispatchCustomerTelegramNotification({
           customerId,
           conversationId,
           text: `💬 New message from ${displayName}`,
+          eventType: 'chat_message',
         });
         res.status(200).json(result);
       } catch (err) {
@@ -1869,10 +1744,11 @@ export function createAppConfigRouter({
             : body.conversationId || `conv_${customerId}`;
         const safeText = `[${actor.displayName}] ${body.text}`.slice(0, 2000);
 
-        const result = await dispatchCustomerTelegramNotification({
+        const result = await dispatcher.dispatchCustomerTelegramNotification({
           customerId,
           conversationId,
           text: safeText,
+          eventType: 'activity_alert',
         });
         res.status(200).json(result);
       } catch (err) {

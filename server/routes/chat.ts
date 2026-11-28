@@ -16,6 +16,8 @@ import {
   type SendMessageInput,
 } from '../chat/chatRepo.js';
 import type { AppConfigRepo } from '../appConfig/appConfigRepo.js';
+import type { TelegramDispatcher } from '../appConfig/telegramDispatch.js';
+import type { Logger } from '../logging/logger.js';
 import {
   cloneDefaultCashoutRulesConfig,
   computeCashoutRulesVersion,
@@ -32,6 +34,8 @@ export interface ChatRouterDeps {
   requireAuth: RequestHandler;
   realtimeEvents?: RealtimeEventBroker;
   appConfigRepo?: AppConfigRepo;
+  telegramDispatcher?: TelegramDispatcher;
+  logger?: Logger;
 }
 
 const ID_REGEX = /^[a-zA-Z0-9_-]{1,140}$/;
@@ -562,6 +566,8 @@ export function createChatRouter({
   requireAuth,
   realtimeEvents,
   appConfigRepo,
+  telegramDispatcher,
+  logger,
 }: ChatRouterDeps): Router {
   const router = Router();
 
@@ -691,6 +697,31 @@ export function createChatRouter({
             message: result.message,
             conversation: result.conversation,
           });
+
+          if (
+            telegramDispatcher &&
+            result.message.sender_role === 'customer' &&
+            !result.message.is_internal_note
+          ) {
+            const safeDisplayName =
+              result.message.sender_name || authUser.displayName || 'Customer';
+            void telegramDispatcher
+              .dispatchCustomerTelegramNotification({
+                customerId: result.customerId,
+                conversationId: result.canonicalId,
+                text: `💬 New message from ${safeDisplayName}`,
+                eventType: 'chat_message',
+              })
+              .catch((dispatchErr) => {
+                logger?.error('telegram_chat_dispatch_error', {
+                  customerId: result.customerId,
+                  error:
+                    dispatchErr instanceof Error
+                      ? dispatchErr.message
+                      : 'Unexpected Telegram chat dispatch failure',
+                });
+              });
+          }
         }
 
         res.json({

@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { telegramService, TelegramStatus } from '../../services/telegramService';
 import {
   coerceSafeFeedbackText,
+  formatTelegramDiagnosticSummary,
   parseSuppressionWindowInput,
+  type TelegramLastDiagnostic,
 } from '../../services/telegramServiceUtils';
 import {
   Send,
@@ -175,6 +177,9 @@ export const TelegramBotConfigCard: React.FC = () => {
             ...(prev?.botUsername && !effectiveToken
               ? { botUsername: prev.botUsername }
               : {}),
+            ...(prev?.lastDiagnostic && !res.status?.lastDiagnostic
+              ? { lastDiagnostic: prev.lastDiagnostic }
+              : {}),
             ...res.status!,
           }));
         }
@@ -266,6 +271,8 @@ export const TelegramBotConfigCard: React.FC = () => {
     ? parsedSuppressionPreview.value
     : null;
   const safeFeedbackText = feedback ? coerceSafeFeedbackText(feedback.text) : '';
+  const latestDiagnostic: TelegramLastDiagnostic | undefined = status?.lastDiagnostic;
+  const diagnosticSummary = formatTelegramDiagnosticSummary(latestDiagnostic);
 
   return (
     <div className="p-6 rounded-2xl border border-sky-900/50 bg-gradient-to-br from-slate-900 via-slate-900 to-[#0A1628] shadow-xl space-y-5">
@@ -353,6 +360,53 @@ export const TelegramBotConfigCard: React.FC = () => {
             <span>{isEnabled ? 'Alerts Enabled' : 'Alerts Paused'}</span>
           </div>
         </div>
+      </div>
+
+      {/* Latest Alert Activity & Suppression Diagnostics */}
+      <div
+        data-testid="telegram-latest-diagnostic"
+        className="px-3.5 py-3 rounded-xl bg-slate-950/70 border border-slate-800/90 text-xs space-y-1.5"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-slate-300 font-semibold">
+            {latestDiagnostic?.status === 'sent' ? (
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            ) : latestDiagnostic?.status === 'suppressed' ? (
+              <Info className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            ) : latestDiagnostic?.status === 'failed' ? (
+              <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+            ) : (
+              <Info className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            )}
+            <span>Latest Alert Activity</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 font-mono tabular-nums">
+            <span
+              className={
+                latestDiagnostic?.status === 'sent'
+                  ? 'text-emerald-400 font-semibold'
+                  : latestDiagnostic?.status === 'suppressed'
+                  ? 'text-amber-300 font-semibold'
+                  : latestDiagnostic?.status === 'failed'
+                  ? 'text-rose-400 font-semibold'
+                  : 'text-slate-400'
+              }
+            >
+              {diagnosticSummary.statusLabel}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>{diagnosticSummary.eventLabel}</span>
+            {latestDiagnostic?.at && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{new Date(latestDiagnostic.at).toLocaleString()}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          {diagnosticSummary.detailText}
+        </p>
       </div>
 
       {/* Form Controls */}
@@ -455,7 +509,7 @@ export const TelegramBotConfigCard: React.FC = () => {
                 Per-Customer Suppression Window (minutes)
               </label>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                Suppress duplicate Telegram alerts if a message was successfully sent for that customer within this period (0 disables suppression).
+                Suppress duplicate Telegram alerts if a Telegram alert was already sent for this customer within this period (0 disables suppression).
               </p>
             </div>
             <div className="flex items-center gap-2 shrink-0">

@@ -1,7 +1,10 @@
 import {
   extractTelegramApiError,
   parseSuppressionWindowInput,
+  type TelegramLastDiagnostic,
 } from './telegramServiceUtils';
+
+export type { TelegramLastDiagnostic };
 
 export interface TelegramStatus {
   running: boolean;
@@ -13,6 +16,7 @@ export interface TelegramStatus {
   tokenConfigured?: boolean;
   maskedToken?: string;
   suppressionWindowMinutes?: number;
+  lastDiagnostic?: TelegramLastDiagnostic;
 }
 
 export class TelegramService {
@@ -74,6 +78,7 @@ export class TelegramService {
     maskedToken?: string;
     suppressionWindowMinutes?: number;
     updatedAt?: string;
+    lastDiagnostic?: TelegramLastDiagnostic;
     error?: string;
   }> {
     try {

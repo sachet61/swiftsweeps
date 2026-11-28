@@ -7,9 +7,20 @@ export const TELEGRAM_CLAIM_LEASE_MS = 15_000;
 export const MIN_SUPPRESSION_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 60_000;
 
-export type SuppressionTimestampSource =
-  | 'telegram_notification'
-  | 'outbound_chat_message';
+export type SuppressionTimestampSource = 'telegram_notification';
+
+export type TelegramDiagnosticOutcome = 'sent' | 'suppressed' | 'failed';
+export type TelegramDiagnosticEventType = 'chat_message' | 'activity_alert';
+
+export interface TelegramLastDiagnostic {
+  status: TelegramDiagnosticOutcome;
+  at: string;
+  eventType: TelegramDiagnosticEventType;
+  suppressionWindowMinutes: number;
+  reason?: string;
+  remainingSec?: number;
+  errorMessage?: string;
+}
 
 export interface TelegramSuppressionEvaluation {
   suppressed: boolean;
@@ -26,6 +37,65 @@ export interface TelegramSuppressionEvaluation {
 export interface TelegramInFlightLease {
   token: string;
   expiresAtMs: number;
+}
+
+export function scrubTelegramSecret(raw: unknown, botToken?: string): string {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return '';
+  let cleaned = text;
+  if (botToken && botToken.trim()) {
+    cleaned = cleaned.split(botToken.trim()).join('[REDACTED]');
+  }
+  cleaned = cleaned.replace(/\/bot\d*:[^\s/'"]+/gi, '/bot[REDACTED]');
+  return cleaned.slice(0, 300);
+}
+
+export function sanitizeTelegramDiagnostic(
+  raw: unknown,
+  botToken?: string,
+): TelegramLastDiagnostic | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined;
+  }
+  const rec = raw as Record<string, unknown>;
+  const status =
+    rec.status === 'sent' ||
+    rec.status === 'suppressed' ||
+    rec.status === 'failed'
+      ? rec.status
+      : null;
+  const atMs = parseTimestampMs(rec.at);
+  if (!status || atMs === null) {
+    return undefined;
+  }
+  const eventType: TelegramDiagnosticEventType =
+    rec.eventType === 'chat_message' ? 'chat_message' : 'activity_alert';
+  const suppressionWindowMinutes = normalizeSuppressionWindowMinutes(
+    rec.suppressionWindowMinutes,
+  );
+  const reason =
+    typeof rec.reason === 'string' && rec.reason.trim()
+      ? rec.reason.trim().slice(0, 120)
+      : undefined;
+  const remainingSec =
+    typeof rec.remainingSec === 'number' &&
+    Number.isFinite(rec.remainingSec) &&
+    rec.remainingSec > 0
+      ? Math.ceil(rec.remainingSec)
+      : undefined;
+  const errorMessage = rec.errorMessage
+    ? scrubTelegramSecret(rec.errorMessage, botToken)
+    : undefined;
+
+  return {
+    status,
+    at: new Date(atMs).toISOString(),
+    eventType,
+    suppressionWindowMinutes,
+    ...(reason ? { reason } : {}),
+    ...(remainingSec !== undefined ? { remainingSec } : {}),
+    ...(errorMessage ? { errorMessage } : {}),
+  };
 }
 
 export function normalizeSuppressionWindowMinutes(raw: unknown): number {
@@ -121,44 +191,20 @@ export function evaluateTelegramSuppression(params: {
   suppressionWindowMinutes: number;
   nowMs: number;
   lastTelegramSentAtMs: number | null;
-  lastOutboundMessageSentAtMs: number | null;
 }): TelegramSuppressionEvaluation {
   const windowMinutes = normalizeSuppressionWindowMinutes(
     params.suppressionWindowMinutes,
   );
   const windowMs = windowMinutes * 60_000;
 
-  const candidates: Array<{
-    tsMs: number;
-    source: SuppressionTimestampSource;
-  }> = [];
-
-  if (
+  const latestMs =
     params.lastTelegramSentAtMs !== null &&
     Number.isFinite(params.lastTelegramSentAtMs) &&
     params.lastTelegramSentAtMs > 0
-  ) {
-    candidates.push({
-      tsMs: params.lastTelegramSentAtMs,
-      source: 'telegram_notification',
-    });
-  }
+      ? params.lastTelegramSentAtMs
+      : null;
 
-  if (
-    params.lastOutboundMessageSentAtMs !== null &&
-    Number.isFinite(params.lastOutboundMessageSentAtMs) &&
-    params.lastOutboundMessageSentAtMs > 0
-  ) {
-    candidates.push({
-      tsMs: params.lastOutboundMessageSentAtMs,
-      source: 'outbound_chat_message',
-    });
-  }
-
-  candidates.sort((a, b) => b.tsMs - a.tsMs);
-  const latest = candidates[0] ?? null;
-
-  if (!latest) {
+  if (latestMs === null) {
     return {
       suppressed: false,
       windowMinutes,
@@ -172,16 +218,16 @@ export function evaluateTelegramSuppression(params: {
     };
   }
 
-  const latestSentAtIso = new Date(latest.tsMs).toISOString();
+  const latestSentAtIso = new Date(latestMs).toISOString();
 
   if (windowMs <= 0) {
     return {
       suppressed: false,
       windowMinutes: 0,
       windowMs: 0,
-      latestSentAtMs: latest.tsMs,
+      latestSentAtMs: latestMs,
       latestSentAtIso,
-      source: latest.source,
+      source: 'telegram_notification',
       reason: null,
       elapsedMs: null,
       remainingSec: 0,
@@ -189,36 +235,31 @@ export function evaluateTelegramSuppression(params: {
   }
 
   // Ignore unreasonably far-future timestamps (> 60s skew) as corrupted/untrusted
-  if (latest.tsMs - params.nowMs > MAX_CLOCK_SKEW_MS) {
+  if (latestMs - params.nowMs > MAX_CLOCK_SKEW_MS) {
     return {
       suppressed: false,
       windowMinutes,
       windowMs,
-      latestSentAtMs: latest.tsMs,
+      latestSentAtMs: latestMs,
       latestSentAtIso,
-      source: latest.source,
+      source: 'telegram_notification',
       reason: null,
       elapsedMs: null,
       remainingSec: 0,
     };
   }
 
-  const elapsedMs = Math.max(0, params.nowMs - latest.tsMs);
+  const elapsedMs = Math.max(0, params.nowMs - latestMs);
   if (elapsedMs < windowMs) {
     const remainingSec = Math.max(1, Math.ceil((windowMs - elapsedMs) / 1000));
-    const reason =
-      latest.source === 'outbound_chat_message'
-        ? 'recent_outbound_message_sent_within_window'
-        : 'recent_telegram_notification_sent_within_window';
-
     return {
       suppressed: true,
       windowMinutes,
       windowMs,
-      latestSentAtMs: latest.tsMs,
+      latestSentAtMs: latestMs,
       latestSentAtIso,
-      source: latest.source,
-      reason,
+      source: 'telegram_notification',
+      reason: 'recent_telegram_notification_sent_within_window',
       elapsedMs,
       remainingSec,
     };
@@ -228,9 +269,9 @@ export function evaluateTelegramSuppression(params: {
     suppressed: false,
     windowMinutes,
     windowMs,
-    latestSentAtMs: latest.tsMs,
+    latestSentAtMs: latestMs,
     latestSentAtIso,
-    source: latest.source,
+    source: 'telegram_notification',
     reason: null,
     elapsedMs,
     remainingSec: 0,
@@ -250,7 +291,9 @@ export function buildSuppressionLogMetadata(params: {
 } {
   return {
     customerId: params.customerId,
-    reason: params.evaluation.reason || 'recent_message_sent_within_window',
+    reason:
+      params.evaluation.reason ||
+      'recent_telegram_notification_sent_within_window',
     suppressionWindowMinutes: params.evaluation.windowMinutes,
     source: params.evaluation.source,
     lastSentAt: params.evaluation.latestSentAtIso,
